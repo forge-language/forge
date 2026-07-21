@@ -1,0 +1,23 @@
+Forge Hybrid Scheduler Benchmark
+Date: 2026-07-21 12:33:40 UTC
+Host: Linux 7.0.0-27-generic x86_64
+CPU cores: 16
+
+=== Coroutine scheduler (bench_coro.fg) ===
+coro bench ms:9
+coroutines:100000
+
+HTTP compare: 200000 requests, concurrency 500
+
+=== HTTP mt (REUSEPORT pthread) (port 19080) ===
+Requests:      198943
+Errors:        1057
+Duration:      12.1870s
+Requests/sec:  16324.20
+
+=== HTTP hybrid (REUSEPORT + scheduler pool) (port 19084) ===
+Requests:      198404
+Errors:        1596
+Duration:      14.5275s
+Requests/sec:  13657.09
+

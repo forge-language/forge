@@ -1,0 +1,9 @@
+// Hybrid HTTP: REUSEPORT accept threads + M:N scheduler worker pool
+
+import http;
+
+native main {
+    let server: int = http_listen(19084);
+    http_prepare(server, "Hello, World");
+    http_serve_hybrid(server, 0);
+}

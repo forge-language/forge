@@ -41,9 +41,21 @@ struct fr_msg {
 fr_scheduler_t *fr_scheduler_create(int worker_count);
 void fr_scheduler_destroy(fr_scheduler_t *sched);
 void fr_scheduler_add_process(fr_scheduler_t *sched, fr_process_t *proc);
+void fr_scheduler_start(fr_scheduler_t *sched);
+void fr_scheduler_stop(fr_scheduler_t *sched);
 void fr_scheduler_run(fr_scheduler_t *sched);
 fr_event_loop_t *fr_scheduler_event_loop(fr_scheduler_t *sched);
 int fr_scheduler_worker_count(fr_scheduler_t *sched);
+fr_scheduler_t *fr_scheduler_global(void);
+void fr_scheduler_set_global(fr_scheduler_t *sched);
+
+/* Native OS-thread work on the scheduler worker pool (hybrid mode). */
+typedef int64_t (*fr_sched_native_fn1_t)(int64_t);
+typedef int64_t (*fr_sched_native_fn2_t)(int64_t, int64_t);
+int64_t fr_sched_pool_spawn(fr_sched_native_fn1_t fn, int64_t arg);
+void fr_sched_pool_spawn_indexed(fr_sched_native_fn2_t fn, int64_t count);
+int fr_sched_pool_available(void);
+void fr_sched_pool_submit(fr_scheduler_t *sched, void (*fn)(void *), void *arg);
 
 fr_process_t *fr_process_create(const char *name);
 void fr_process_destroy(fr_process_t *proc);

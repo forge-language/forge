@@ -105,6 +105,7 @@ static const ForgeStdFn HTTP_FNS[] = {
     {"http_serve_forever", "fr_http_serve_forever"},
     {"http_serve_ok", "fr_http_serve_ok"},
     {"http_serve_mt", "fr_http_serve_mt"},
+    {"http_serve_hybrid", "fr_http_serve_hybrid"},
 };
 
 static const ForgeStdFn EVENT_FNS[] = {
@@ -160,7 +161,7 @@ static const ForgeModule MODULES[] = {
     { .name = { "os", 2 }, .header = "forge/os.h", .fns = OS_FNS, .fn_count = 4 },
     { .name = { "tcp", 3 }, .header = "forge/tcp.h", .fns = TCP_FNS, .fn_count = 7 },
     { .name = { "udp", 3 }, .header = "forge/udp.h", .fns = UDP_FNS, .fn_count = 5 },
-    { .name = { "http", 4 }, .header = "forge/http.h", .fns = HTTP_FNS, .fn_count = 15 },
+    { .name = { "http", 4 }, .header = "forge/http.h", .fns = HTTP_FNS, .fn_count = 16 },
     { .name = { "event", 5 }, .header = "forge/event.h", .fns = EVENT_FNS, .fn_count = 2 },
     { .name = { "json", 4 }, .header = "forge/json.h", .fns = JSON_FNS, .fn_count = 4 },
     { .name = { "gpu", 3 }, .header = "forge/gpu.h", .fns = GPU_FNS, .fn_count = 15 },

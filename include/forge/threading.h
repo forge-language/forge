@@ -26,6 +26,9 @@ void fr_threading_spawn_indexed(fr_threading_fn2_t fn, int64_t count);
 int64_t fr_threading_join(int64_t handle);
 void fr_threading_join_all(void);
 
+/* When a hybrid scheduler is running, spawn routes to its worker pool. */
+int fr_threading_use_scheduler_pool(void);
+
 #ifdef __cplusplus
 }
 #endif

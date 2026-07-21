@@ -1,0 +1,22 @@
+// Coroutine scheduler benchmark: spawn + yield on M:N worker pool
+
+import io;
+import time;
+
+process main {
+    let workers: int = 100000;
+
+    coroutine tick() {
+        yield;
+    }
+
+    let start: int = time_now_ms();
+    let i: int = 0;
+    while (i < workers) {
+        spawn tick();
+        i += 1;
+    }
+    let elapsed: int = time_now_ms() - start;
+    println("coro bench ms:", elapsed);
+    println("coroutines:", workers);
+}

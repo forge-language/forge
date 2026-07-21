@@ -2,6 +2,7 @@
 #include "forge/tcp.h"
 #include "forge/platform.h"
 #include "forge/thread.h"
+#include "forge_runtime.h"
 #include "forge/arena.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -274,6 +275,37 @@ static void serve_client(fr_http_server_t *srv, int client) {
     fr_sock_close(client);
 }
 
+typedef struct {
+    int client;
+    fr_http_server_t *srv;
+} http_serve_ctx_t;
+
+static fr_scheduler_t *g_http_sched;
+
+static void http_serve_task(void *arg) {
+    http_serve_ctx_t *ctx = (http_serve_ctx_t *)arg;
+    if (!ctx) return;
+    serve_client(ctx->srv, ctx->client);
+    free(ctx);
+}
+
+static int http_submit_client(fr_http_server_t *srv, int client) {
+    http_serve_ctx_t *ctx = (http_serve_ctx_t *)malloc(sizeof(http_serve_ctx_t));
+    if (!ctx) {
+        fr_sock_close(client);
+        return -1;
+    }
+    ctx->client = client;
+    ctx->srv = srv;
+    if (g_http_sched) {
+        fr_sched_pool_submit(g_http_sched, http_serve_task, ctx);
+        return 0;
+    }
+    serve_client(srv, client);
+    free(ctx);
+    return 0;
+}
+
 #if !defined(FORGE_OS_LINUX)
 static void drain_accept_queue(int listen_fd, fr_http_server_t *srv) {
     for (;;) {
@@ -286,7 +318,7 @@ static void drain_accept_queue(int listen_fd, fr_http_server_t *srv) {
 #endif
             continue;
         }
-        serve_client(srv, client);
+        http_submit_client(srv, client);
     }
 }
 #endif
@@ -316,7 +348,7 @@ static void http_serve_event_loop(int listen_fd, fr_http_server_t *srv) {
                     if (errno == EAGAIN || errno == EWOULDBLOCK) break;
                     continue;
                 }
-                serve_client(srv, client);
+                http_submit_client(srv, client);
             }
         }
     }
@@ -383,6 +415,62 @@ void fr_http_serve_mt(int64_t server, int64_t threads) {
     if (cpus < 1) cpus = 1;
 
     int accept_workers = (int)(threads > 0 ? threads : cpus);
+
+    if (accept_workers == 1) {
+        http_serve_event_loop((int)server, srv);
+        return;
+    }
+
+    fr_sock_close((int)server);
+
+    http_worker_ctx_t *ctxs = (http_worker_ctx_t *)calloc((size_t)accept_workers, sizeof(http_worker_ctx_t));
+    if (!ctxs) {
+        http_serve_event_loop((int)server, srv);
+        return;
+    }
+
+    int started = 0;
+    for (int i = 0; i < accept_workers; i++) {
+        int64_t fd = fr_tcp_listen_reuseport(srv->port);
+        if (fd < 0) continue;
+        ctxs[started].listen_fd = (int)fd;
+        ctxs[started].srv = srv;
+        ctxs[started].worker_id = started;
+        fr_thread_t *tid = NULL;
+        if (fr_thread_start(&tid, http_worker_main, &ctxs[started]) != 0) {
+            fr_sock_close((int)fd);
+            continue;
+        }
+        fr_thread_detach(tid);
+        started++;
+    }
+
+    if (started == 0) {
+        free(ctxs);
+        http_serve_event_loop((int)server, srv);
+        return;
+    }
+
+    fr_platform_sleep_forever();
+}
+
+/* REUSEPORT accept threads + M:N scheduler worker pool for response I/O. */
+void fr_http_serve_hybrid(int64_t server, int64_t threads) {
+    if (server < 0 || server >= 32) return;
+    fr_http_server_t *srv = &g_servers[server];
+    if (!srv->cached_resp || srv->cached_len == 0) return;
+
+    int cpus = fr_platform_cpu_count();
+    if (cpus < 1) cpus = 1;
+    int pool_workers = (int)(threads > 0 ? threads : cpus);
+    int accept_workers = cpus;
+
+    g_http_sched = fr_scheduler_create(pool_workers);
+    if (!g_http_sched) {
+        fr_http_serve_mt(server, threads);
+        return;
+    }
+    fr_scheduler_start(g_http_sched);
 
     if (accept_workers == 1) {
         http_serve_event_loop((int)server, srv);

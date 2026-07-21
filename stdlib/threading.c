@@ -1,6 +1,7 @@
 #include "forge/threading.h"
 #include "forge/platform.h"
 #include "forge/thread.h"
+#include "forge_runtime.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -167,8 +168,13 @@ static fr_thread_t *take_thread_slot(int64_t handle) {
     return t;
 }
 
+int fr_threading_use_scheduler_pool(void) {
+    return fr_sched_pool_available();
+}
+
 int64_t fr_threading_spawn(fr_threading_fn1_t fn, int64_t arg) {
     if (!fn) return -1;
+    if (fr_sched_pool_available()) return fr_sched_pool_spawn((fr_sched_native_fn1_t)fn, arg);
     thread_arg1_t *ctx = (thread_arg1_t *)malloc(sizeof(thread_arg1_t));
     if (!ctx) return -1;
     ctx->fn = fn;
@@ -188,6 +194,10 @@ int64_t fr_threading_spawn(fr_threading_fn1_t fn, int64_t arg) {
 
 void fr_threading_spawn_indexed(fr_threading_fn2_t fn, int64_t count) {
     if (!fn || count <= 0) return;
+    if (fr_sched_pool_available()) {
+        fr_sched_pool_spawn_indexed((fr_sched_native_fn2_t)fn, count);
+        return;
+    }
     if (count > THREAD_MAX_HANDLES) count = THREAD_MAX_HANDLES;
 
     fr_thread_t **threads = (fr_thread_t **)calloc((size_t)count, sizeof(fr_thread_t *));

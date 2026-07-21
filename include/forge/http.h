@@ -17,6 +17,7 @@ void fr_http_prepare(int64_t server, const char *body);
 void fr_http_serve_prepared(int64_t server);
 void fr_http_serve_forever(int64_t server);
 void fr_http_serve_mt(int64_t server, int64_t threads);
+void fr_http_serve_hybrid(int64_t server, int64_t threads);
 void fr_http_serve_ok(int64_t server, const char *body);
 
 #endif

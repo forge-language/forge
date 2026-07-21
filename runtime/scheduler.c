@@ -62,17 +62,34 @@ struct fr_scheduler {
     int worker_count;
     int running;
     int done;
+    int workers_started;
+    int native_pending;
     fr_thread_t **workers;
     fr_run_queue_t *worker_queues;
+    fr_native_queue_t *native_queues;
     fr_event_loop_t *event_loop;
     fr_mutex_t *lock;
     fr_cond_t *idle_cond;
 };
 
 static _Thread_local fr_coro_t *tls_current_coro = NULL;
+static _Thread_local int tls_worker_id = -1;
+static fr_scheduler_t *g_global_sched = NULL;
 
 fr_coro_t *fr_coro_current(void) {
     return tls_current_coro;
+}
+
+fr_scheduler_t *fr_scheduler_global(void) {
+    return g_global_sched;
+}
+
+void fr_scheduler_set_global(fr_scheduler_t *sched) {
+    g_global_sched = sched;
+}
+
+int fr_sched_pool_available(void) {
+    return g_global_sched && g_global_sched->running && g_global_sched->workers_started;
 }
 
 static int default_worker_count(int n) {
@@ -165,11 +182,28 @@ typedef struct {
     int wid;
 } fr_worker_arg_t;
 
+static int sched_has_work(fr_scheduler_t *sched) {
+    if (sched->native_pending > 0) return 1;
+    for (int i = 0; i < sched->worker_count; i++) {
+        if (sched->worker_queues[i].count > 0) return 1;
+        if (sched->native_queues[i].count > 0) return 1;
+    }
+    return sched_any_active(sched);
+}
+
+static void run_native_task(fr_native_fn fn, void *arg) {
+    if (fn) fn(arg);
+}
+
 static void *worker_main(void *arg) {
     fr_worker_arg_t *wa = (fr_worker_arg_t *)arg;
     fr_scheduler_t *sched = wa->sched;
     int wid = wa->wid;
     free(wa);
+
+    int cpus = fr_platform_cpu_count();
+    if (cpus > 0) fr_thread_pin_cpu(wid % cpus);
+    tls_worker_id = wid;
 
     while (sched->running) {
         fr_coro_t *coro = fr_run_queue_pop(&sched->worker_queues[wid]);
@@ -180,27 +214,53 @@ static void *worker_main(void *arg) {
                 if (coro) break;
             }
         }
-        if (!coro) {
-            if (!sched_any_active(sched)) {
-                sched->done = 1;
-                break;
+
+        if (coro) {
+            coro->on_queue = 0;
+            int budget = FR_REDUCTION_BUDGET;
+            while (budget-- > 0) {
+                if (coro->status != FR_CORO_RUNNING) break;
+                run_coro_step(coro);
+                if (coro->status == FR_CORO_WAITING_IO || coro->status == FR_CORO_WAITING_RECV) break;
+                if (coro->status == FR_CORO_DONE || coro->status == FR_CORO_ERROR) break;
             }
-            fr_thread_yield();
+            if (coro->status == FR_CORO_RUNNING) {
+                enqueue_coro(sched, coro);
+            }
             continue;
         }
 
-        coro->on_queue = 0;
-        int budget = FR_REDUCTION_BUDGET;
-        while (budget-- > 0) {
-            if (coro->status != FR_CORO_RUNNING) break;
-            run_coro_step(coro);
-            if (coro->status == FR_CORO_WAITING_IO || coro->status == FR_CORO_WAITING_RECV) break;
-            if (coro->status == FR_CORO_DONE || coro->status == FR_CORO_ERROR) break;
+        void *narg = NULL;
+        fr_native_fn nfn = fr_native_queue_pop(&sched->native_queues[wid], &narg);
+        if (!nfn) {
+            for (int i = 0; i < sched->worker_count; i++) {
+                if (i == wid) continue;
+                nfn = fr_native_queue_steal(&sched->native_queues[i], &narg);
+                if (nfn) break;
+            }
         }
-        if (coro->status == FR_CORO_RUNNING) {
-            enqueue_coro(sched, coro);
+        if (nfn) {
+            fr_mutex_lock(sched->lock);
+            if (sched->native_pending > 0) sched->native_pending--;
+            fr_mutex_unlock(sched->lock);
+            run_native_task(nfn, narg);
+            continue;
         }
+
+        if (!sched_has_work(sched)) {
+            if (!sched->running) break;
+            fr_mutex_lock(sched->lock);
+            if (!sched_has_work(sched) && !sched->running) {
+                fr_mutex_unlock(sched->lock);
+                break;
+            }
+            fr_cond_wait(sched->idle_cond, sched->lock);
+            fr_mutex_unlock(sched->lock);
+            continue;
+        }
+        fr_thread_yield();
     }
+    tls_worker_id = -1;
     return NULL;
 }
 
@@ -213,13 +273,15 @@ fr_scheduler_t *fr_scheduler_create(int worker_count) {
     s->lock = fr_mutex_create();
     s->idle_cond = fr_cond_create();
     s->worker_queues = (fr_run_queue_t *)calloc((size_t)s->worker_count, sizeof(fr_run_queue_t));
+    s->native_queues = (fr_native_queue_t *)calloc((size_t)s->worker_count, sizeof(fr_native_queue_t));
     s->workers = (fr_thread_t **)calloc((size_t)s->worker_count, sizeof(fr_thread_t *));
-    if (!s->worker_queues || !s->workers) {
+    if (!s->worker_queues || !s->native_queues || !s->workers) {
         fr_scheduler_destroy(s);
         return NULL;
     }
     for (int i = 0; i < s->worker_count; i++) {
         fr_run_queue_init(&s->worker_queues[i]);
+        fr_native_queue_init(&s->native_queues[i]);
     }
     return s;
 }
@@ -238,6 +300,11 @@ void fr_scheduler_destroy(fr_scheduler_t *sched) {
             fr_run_queue_destroy(&sched->worker_queues[i]);
         }
     }
+    if (sched->native_queues) {
+        for (int i = 0; i < sched->worker_count; i++) {
+            fr_native_queue_destroy(&sched->native_queues[i]);
+        }
+    }
     fr_process_t *p = sched->processes;
     while (p) {
         fr_process_t *next = p->next;
@@ -248,8 +315,129 @@ void fr_scheduler_destroy(fr_scheduler_t *sched) {
     fr_mutex_destroy(sched->lock);
     fr_cond_destroy(sched->idle_cond);
     free(sched->worker_queues);
+    free(sched->native_queues);
     free(sched->workers);
     free(sched);
+}
+
+static void scheduler_start_workers(fr_scheduler_t *sched) {
+    if (!sched || sched->workers_started) return;
+    sched->workers_started = 1;
+    for (int i = 0; i < sched->worker_count; i++) {
+        fr_worker_arg_t *wa = (fr_worker_arg_t *)malloc(sizeof(fr_worker_arg_t));
+        if (!wa) continue;
+        wa->sched = sched;
+        wa->wid = i;
+        fr_thread_start(&sched->workers[i], worker_main, wa);
+    }
+}
+
+void fr_scheduler_start(fr_scheduler_t *sched) {
+    if (!sched) return;
+    sched->running = 1;
+    sched->done = 0;
+    fr_scheduler_set_global(sched);
+    scan_enqueue_runnable(sched);
+    scheduler_start_workers(sched);
+}
+
+void fr_scheduler_stop(fr_scheduler_t *sched) {
+    if (!sched) return;
+    sched->running = 0;
+    fr_cond_broadcast(sched->idle_cond);
+    for (int i = 0; i < sched->worker_count; i++) {
+        if (sched->workers[i]) fr_thread_join(sched->workers[i]);
+        sched->workers[i] = NULL;
+    }
+    sched->workers_started = 0;
+    if (g_global_sched == sched) g_global_sched = NULL;
+}
+
+void fr_sched_pool_submit(fr_scheduler_t *sched, void (*fn)(void *), void *arg) {
+    if (!sched || !fn) return;
+    static int next_q;
+    int q = next_q++ % sched->worker_count;
+    fr_mutex_lock(sched->lock);
+    sched->native_pending++;
+    fr_mutex_unlock(sched->lock);
+    fr_native_queue_push(&sched->native_queues[q], fn, arg);
+    fr_cond_broadcast(sched->idle_cond);
+}
+
+typedef struct {
+    fr_sched_native_fn1_t fn;
+    int64_t arg;
+} sched_native_arg1_t;
+
+typedef struct {
+    fr_sched_native_fn2_t fn;
+    int64_t id;
+    int64_t total;
+    fr_mutex_t *lock;
+    int *remaining;
+    fr_cond_t *done;
+} sched_indexed_ctx_t;
+
+static void sched_native_trampoline1(void *p) {
+    sched_native_arg1_t *ctx = (sched_native_arg1_t *)p;
+    fr_sched_native_fn1_t fn = ctx->fn;
+    int64_t arg = ctx->arg;
+    free(ctx);
+    fn(arg);
+}
+
+static void sched_native_trampoline2(void *p) {
+    sched_indexed_ctx_t *ctx = (sched_indexed_ctx_t *)p;
+    ctx->fn(ctx->id, ctx->total);
+    fr_mutex_lock(ctx->lock);
+    (*ctx->remaining)--;
+    if (*ctx->remaining == 0) fr_cond_broadcast(ctx->done);
+    fr_mutex_unlock(ctx->lock);
+    free(ctx);
+}
+
+int64_t fr_sched_pool_spawn(fr_sched_native_fn1_t fn, int64_t arg) {
+    fr_scheduler_t *sched = g_global_sched;
+    if (!sched || !sched->running || !fn) return -1;
+    sched_native_arg1_t *ctx = (sched_native_arg1_t *)malloc(sizeof(sched_native_arg1_t));
+    if (!ctx) return -1;
+    ctx->fn = fn;
+    ctx->arg = arg;
+    fr_sched_pool_submit(sched, sched_native_trampoline1, ctx);
+    return 0;
+}
+
+void fr_sched_pool_spawn_indexed(fr_sched_native_fn2_t fn, int64_t count) {
+    fr_scheduler_t *sched = g_global_sched;
+    if (!sched || !sched->running || !fn || count <= 0) return;
+    if (count > sched->worker_count * 64) count = sched->worker_count * 64;
+
+    fr_mutex_t *lock = fr_mutex_create();
+    fr_cond_t *done = fr_cond_create();
+    int remaining = (int)count;
+    if (!lock || !done) {
+        fr_mutex_destroy(lock);
+        fr_cond_destroy(done);
+        return;
+    }
+
+    for (int64_t i = 0; i < count; i++) {
+        sched_indexed_ctx_t *ctx = (sched_indexed_ctx_t *)calloc(1, sizeof(sched_indexed_ctx_t));
+        if (!ctx) break;
+        ctx->fn = fn;
+        ctx->id = i;
+        ctx->total = count;
+        ctx->lock = lock;
+        ctx->remaining = &remaining;
+        ctx->done = done;
+        fr_sched_pool_submit(sched, sched_native_trampoline2, ctx);
+    }
+
+    fr_mutex_lock(lock);
+    while (remaining > 0) fr_cond_wait(done, lock);
+    fr_mutex_unlock(lock);
+    fr_mutex_destroy(lock);
+    fr_cond_destroy(done);
 }
 
 void fr_scheduler_add_process(fr_scheduler_t *sched, fr_process_t *proc) {
@@ -272,27 +460,14 @@ int fr_scheduler_worker_count(fr_scheduler_t *sched) {
 
 void fr_scheduler_run(fr_scheduler_t *sched) {
     if (!sched) return;
-    sched->running = 1;
-    sched->done = 0;
-    scan_enqueue_runnable(sched);
-    for (int i = 0; i < sched->worker_count; i++) {
-        fr_worker_arg_t *wa = (fr_worker_arg_t *)malloc(sizeof(fr_worker_arg_t));
-        wa->sched = sched;
-        wa->wid = i;
-        fr_thread_start(&sched->workers[i], worker_main, wa);
-    }
+    fr_scheduler_start(sched);
     fr_mutex_lock(sched->lock);
     while (!sched->done) {
         fr_event_loop_poll(sched->event_loop, 1);
-        if (!sched_any_active(sched)) sched->done = 1;
+        if (!sched_has_work(sched)) sched->done = 1;
     }
     fr_mutex_unlock(sched->lock);
-    sched->running = 0;
-    fr_cond_broadcast(sched->idle_cond);
-    for (int i = 0; i < sched->worker_count; i++) {
-        if (sched->workers[i]) fr_thread_join(sched->workers[i]);
-        sched->workers[i] = NULL;
-    }
+    fr_scheduler_stop(sched);
 }
 
 fr_process_t *fr_process_create(const char *name) {

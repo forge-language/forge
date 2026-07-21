@@ -249,6 +249,39 @@ add_custom_command(
     VERBATIM
 )
 add_custom_target(bench_server DEPENDS "${FORGE_BENCH_BIN}")
+list(APPEND FORGE_BENCH_TARGETS bench_server)
+
+set(FORGE_BENCH_HYBRID_SRC "${CMAKE_SOURCE_DIR}/benchmark/forge/bench_hybrid_server.fg")
+set(FORGE_BENCH_HYBRID_BIN "${CMAKE_BINARY_DIR}/bin/bench_hybrid_server")
+add_custom_command(
+    OUTPUT "${FORGE_BENCH_HYBRID_BIN}"
+    COMMAND forge "${FORGE_BENCH_HYBRID_SRC}" -o "${FORGE_BENCH_HYBRID_BIN}"
+        ${FORGE_CC_ARGS}
+        --forge-root "${CMAKE_SOURCE_DIR}" --lib-dir "${CMAKE_BINARY_DIR}/lib"
+    DEPENDS forge forge_runtime "${FORGE_BENCH_HYBRID_SRC}"
+    COMMENT "Compiling bench_hybrid_server.fg (native)"
+    VERBATIM
+)
+add_custom_target(bench_hybrid_server DEPENDS "${FORGE_BENCH_HYBRID_BIN}")
+list(APPEND FORGE_BENCH_TARGETS bench_hybrid_server)
+
+set(FORGE_BENCH_CORO_SRC "${CMAKE_SOURCE_DIR}/benchmark/forge/bench_coro.fg")
+set(FORGE_BENCH_CORO_BIN "${CMAKE_BINARY_DIR}/bin/bench_coro")
+add_custom_command(
+    OUTPUT "${FORGE_BENCH_CORO_BIN}"
+    COMMAND forge "${FORGE_BENCH_CORO_SRC}" -o "${FORGE_BENCH_CORO_BIN}"
+        ${FORGE_CC_ARGS}
+        --forge-root "${CMAKE_SOURCE_DIR}" --lib-dir "${CMAKE_BINARY_DIR}/lib"
+    DEPENDS forge forge_runtime "${FORGE_BENCH_CORO_SRC}"
+    COMMENT "Compiling bench_coro.fg (process)"
+    VERBATIM
+)
+add_custom_target(bench_coro DEPENDS "${FORGE_BENCH_CORO_BIN}")
+list(APPEND FORGE_BENCH_TARGETS bench_coro)
+
+if(FORGE_BENCH_TARGETS)
+    add_custom_target(benchmarks DEPENDS ${FORGE_BENCH_TARGETS})
+endif()
 
 # Simple web server example (native main, port 8080)
 set(FORGE_WEB_SRC "${CMAKE_SOURCE_DIR}/examples/web_server.fg")
