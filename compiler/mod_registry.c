@@ -119,6 +119,20 @@ static const ForgeStdFn JSON_FNS[] = {
     {"json_stringify_int", "fr_json_stringify_int"},
 };
 
+static const ForgeStdFn THREAD_FNS[] = {
+    {"thread_cpu_count", "fr_threading_cpu_count"},
+    {"thread_yield", "fr_threading_yield"},
+    {"thread_pin", "fr_threading_pin"},
+    {"thread_self", "fr_threading_self"},
+    {"thread_worker_id", "fr_threading_worker_id"},
+    {"thread_mutex_create", "fr_threading_mutex_create"},
+    {"thread_mutex_lock", "fr_threading_mutex_lock"},
+    {"thread_mutex_unlock", "fr_threading_mutex_unlock"},
+    {"thread_mutex_destroy", "fr_threading_mutex_destroy"},
+    {"thread_join", "fr_threading_join"},
+    {"thread_join_all", "fr_threading_join_all"},
+};
+
 static const ForgeStdFn GPU_FNS[] = {
     {"gpu_available", "fr_gpu_available"},
     {"gpu_backend", "fr_gpu_backend"},
@@ -150,6 +164,7 @@ static const ForgeModule MODULES[] = {
     { .name = { "event", 5 }, .header = "forge/event.h", .fns = EVENT_FNS, .fn_count = 2 },
     { .name = { "json", 4 }, .header = "forge/json.h", .fns = JSON_FNS, .fn_count = 4 },
     { .name = { "gpu", 3 }, .header = "forge/gpu.h", .fns = GPU_FNS, .fn_count = 15 },
+    { .name = { "thread", 6 }, .header = "forge/threading.h", .fns = THREAD_FNS, .fn_count = 11 },
 };
 
 const ForgeModule *forge_std_module(ForgeStr name) {

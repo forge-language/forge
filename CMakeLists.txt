@@ -43,6 +43,7 @@ add_library(forge_std STATIC
     stdlib/http.c
     stdlib/json.c
     stdlib/gpu.c
+    stdlib/threading.c
     runtime/arena.c
 )
 target_include_directories(forge_std PUBLIC include)

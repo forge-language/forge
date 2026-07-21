@@ -58,6 +58,78 @@ static FnDecl *cg_lookup_fn(Codegen *cg, ForgeStr name) {
     return NULL;
 }
 
+static size_t fn_param_count(FnDecl *fn) {
+    size_t n = 0;
+    if (!fn) return 0;
+    for (Param *p = fn->params; p; p = p->next) n++;
+    return n;
+}
+
+static FnDecl *cg_resolve_fn_ref(Codegen *cg, ForgeStr name) {
+    FnDecl *fn = cg_lookup_fn(cg, name);
+    if (fn) return fn;
+    if (cg->current_module.len > 0)
+        return lookup_module_fn(cg->prog, cg->current_module, name);
+    return NULL;
+}
+
+static void emit_fn_c_symbol(Codegen *cg, ForgeStr name, FnDecl *fn) {
+    if (cg->current_module.len > 0 &&
+        lookup_module_fn(cg->prog, cg->current_module, name) == fn) {
+        char sym[128];
+        forge_mod_mangle(sym, sizeof(sym), cg->current_module, name);
+        fputs(sym, cg->out);
+    } else {
+        fprintf(cg->out, "%.*s", (int)name.len, name.data);
+    }
+}
+
+static void emit_expr(Codegen *cg, Expr *e);
+
+static int emit_thread_call(Codegen *cg, ForgeStr name, Expr **args, size_t arg_count) {
+    if (forge_str_eq(name, forge_str("thread_spawn")) && arg_count == 2) {
+        Expr *fn_expr = args[0];
+        if (fn_expr->kind != EXPR_IDENT) {
+            fprintf(stderr, "forge: thread_spawn requires a function name\n");
+            exit(1);
+        }
+        ForgeStr fn_name = fn_expr->as.ident;
+        FnDecl *fn = cg_resolve_fn_ref(cg, fn_name);
+        if (!fn || fn_param_count(fn) != 1) {
+            fprintf(stderr, "forge: thread_spawn(fn, arg) requires fn(arg: int): int\n");
+            exit(1);
+        }
+        fputs("fr_threading_spawn((fr_threading_fn1_t)", cg->out);
+        emit_fn_c_symbol(cg, fn_name, fn);
+        fputs(", ", cg->out);
+        emit_expr(cg, args[1]);
+        fputc(')', cg->out);
+        return 1;
+    }
+
+    if (forge_str_eq(name, forge_str("thread_spawn_indexed")) && arg_count == 2) {
+        Expr *fn_expr = args[0];
+        if (fn_expr->kind != EXPR_IDENT) {
+            fprintf(stderr, "forge: thread_spawn_indexed requires a function name\n");
+            exit(1);
+        }
+        ForgeStr fn_name = fn_expr->as.ident;
+        FnDecl *fn = cg_resolve_fn_ref(cg, fn_name);
+        if (!fn || fn_param_count(fn) != 2) {
+            fprintf(stderr, "forge: thread_spawn_indexed(fn, n) requires fn(id: int, total: int): int\n");
+            exit(1);
+        }
+        fputs("fr_threading_spawn_indexed((fr_threading_fn2_t)", cg->out);
+        emit_fn_c_symbol(cg, fn_name, fn);
+        fputs(", ", cg->out);
+        emit_expr(cg, args[1]);
+        fputc(')', cg->out);
+        return 1;
+    }
+
+    return 0;
+}
+
 static int cg_lookup_const(Codegen *cg, ForgeStr name) {
     for (size_t i = 0; i < cg->prog->const_count; i++) {
         if (forge_str_eq(cg->prog->consts[i].name, name)) return 1;
@@ -185,7 +257,6 @@ static void c_type_name(FILE *out, ForgeType ty) {
     }
 }
 
-static void emit_expr(Codegen *cg, Expr *e);
 static void emit_stmts(Codegen *cg, Stmt *s, const char *proc_var, bool in_coro, const char *state_var);
 static CoroDecl *find_coro(ProcessDecl *proc, ForgeStr name);
 
@@ -260,6 +331,7 @@ static void emit_expr(Codegen *cg, Expr *e) {
     }
     case EXPR_CALL: {
         ForgeStr name = e->as.call.name;
+        if (emit_thread_call(cg, name, e->as.call.args, e->as.call.arg_count)) break;
         if (forge_str_eq(name, forge_str("println"))) {
             fputs("({ ", cg->out);
             for (size_t i = 0; i < e->as.call.arg_count; i++) {

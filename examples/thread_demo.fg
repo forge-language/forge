@@ -1,0 +1,47 @@
+// Multi-core OS thread demo — import thread
+
+import io;
+import thread;
+
+fn worker(id: int, total: int): int {
+    thread_pin(id);
+    print("worker ");
+    print_int(id);
+    print(" / ");
+    print_int(total);
+    println("");
+    return id * 10;
+}
+
+fn background(task_id: int): int {
+    print("background task ");
+    print_int(task_id);
+    println(" started");
+    thread_yield();
+    print("background task ");
+    print_int(task_id);
+    println(" done");
+    return task_id;
+}
+
+native main {
+    let cores: int = thread_cpu_count();
+    print("CPU cores: ");
+    println(cores);
+
+    let mtx: int = thread_mutex_create();
+    thread_mutex_lock(mtx);
+    println("mutex locked on main thread");
+    thread_mutex_unlock(mtx);
+    thread_mutex_destroy(mtx);
+
+    println("spawn_indexed workers...");
+    thread_spawn_indexed(worker, cores);
+
+    println("spawn single background thread...");
+    let handle: int = thread_spawn(background, 42);
+    thread_join(handle);
+
+    println("all done");
+    return 0;
+}
