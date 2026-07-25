@@ -42,6 +42,11 @@ benchmark/results.txt
 practice/a.out
 practice/*.o
 
+# Lean 4 proofs
+lean/.lake/
+lean/lake-packages/
+lean/build/
+
 # Node / LSP
 lsp/node_modules/
 lsp/out/
