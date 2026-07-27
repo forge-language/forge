@@ -127,6 +127,65 @@ For security vulnerabilities, please do **not** open a public issue. Contact the
 
 Be respectful and constructive. Disagree on technical merits, not people. Maintainers may moderate or remove contributions that harm collaboration.
 
+## For maintainers
+
+Repository settings that keep `main` healthy for multi-contributor open source work. Requires **Admin** access on [forge-language/forge](https://github.com/forge-language/forge).
+
+### Branch protection for `main`
+
+1. Open **Settings → Branches → Add branch ruleset** (or *Add classic branch protection rule*)
+2. Target branch: `main`
+3. Enable:
+
+| Setting | Recommended value |
+|---------|-------------------|
+| Require a pull request before merging | On |
+| Required approvals | **1** |
+| Dismiss stale pull request approvals when new commits are pushed | On |
+| Require status checks to pass before merging | On |
+| Status checks that are required | `Lean proofs`, `Build (Linux)` |
+| Require branches to be up to date before merging | On (optional but recommended) |
+| Do not allow bypassing the above settings | On for non-emergency repos |
+| Restrict who can push to matching branches | On — limit to maintainers only |
+| Allow force pushes | **Off** |
+| Allow deletions | **Off** |
+
+4. Save the ruleset.
+
+After this, all changes reach `main` only through reviewed, CI-green PRs.
+
+### Issue labels
+
+Create these labels under **Issues → Labels** so templates work cleanly:
+
+| Label | Color (suggested) | Use for |
+|-------|-------------------|---------|
+| `bug` | `#d73a4a` | Incorrect behavior |
+| `enhancement` | `#a2eeef` | Features and improvements |
+| `documentation` | `#0075ca` | Docs-only changes |
+| `good first issue` | `#7057ff` | Small, newcomer-friendly tasks |
+| `help wanted` | `#008672` | Maintainers welcome outside help |
+
+### Merge strategy
+
+- Prefer **Squash and merge** for contributor PRs (one commit per change on `main`)
+- Use **Rebase and merge** only when commit history on the branch is already clean
+- Avoid **Merge commit** unless a release branch needs preserved history
+
+### CODEOWNERS (optional)
+
+To auto-request review from specific people or teams, add `.github/CODEOWNERS`:
+
+```
+# Default reviewers for the whole repo
+*       @forge-language/maintainers
+
+# Area experts (replace with real handles)
+/lean/  @forge-language/maintainers
+```
+
+Teams must exist in the org and have repository access.
+
 ## License
 
 By contributing, you agree that your contributions will be licensed under the [MIT License](LICENSE) that covers this project.
