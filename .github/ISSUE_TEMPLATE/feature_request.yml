@@ -1,0 +1,45 @@
+name: Feature request
+description: Suggest a new language feature, stdlib addition, or tooling improvement
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Describe the problem first. A clear use case helps maintainers evaluate the idea.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What pain point or limitation are you hitting?
+      placeholder: I want to ... but currently Forge cannot ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: How should Forge solve it? Syntax sketches welcome.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Other approaches you thought about.
+
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Area
+      options:
+        - label: Language / compiler
+        - label: Runtime / scheduler
+        - label: Standard library
+        - label: Lean proofs
+        - label: Documentation / examples
+        - label: Editor / LSP
+        - label: CI / developer experience

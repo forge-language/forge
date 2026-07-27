@@ -383,11 +383,11 @@ forge --lib lib.fg -o libforge_mylib.a --header mylib.h \
 
 ## Contributing
 
-Issues and pull requests are welcome.
+Issues and pull requests are welcome. Please read **[CONTRIBUTING.md](CONTRIBUTING.md)** for PR rules, review expectations, and our AI-friendly contribution policy before opening a PR.
 
 1. Fork the repository and create a branch
 2. Commit your changes
-3. Open a pull request
+3. Open a pull request against `main`
 
 ## License
 
