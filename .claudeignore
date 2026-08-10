@@ -1,0 +1,58 @@
+# Build
+build/
+*.o
+*.a
+
+# OMC agent local state
+.omc/
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*~
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+venv/
+.venv/
+benchmark/python/.venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# Elixir / Phoenix benchmark
+benchmark/phoenix/**/_build/
+benchmark/phoenix/**/deps/
+benchmark/phoenix/**/.fetch
+erl_crash.dump
+.elixir_ls/
+
+# Rust / Axum benchmark
+benchmark/axum/**/target/
+
+# Benchmark output
+benchmark/results.txt
+benchmark/extreme_results*.txt
+
+# Local practice builds
+practice/a.out
+practice/*.o
+
+# Lean 4 proofs
+lean/.lake/
+lean/lake-packages/
+lean/build/
+
+# Node / LSP
+lsp/node_modules/
+lsp/out/
+editors/vscode/node_modules/
+editors/vscode/out/
+editors/vscode/server/
+
+# Git internals
+.git/
