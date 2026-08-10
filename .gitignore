@@ -3,6 +3,9 @@ build/
 *.o
 *.a
 
+# OMC agent local state
+.omc/
+
 # Editor (keep shared workspace settings visible)
 .vscode/*
 !.vscode/settings.json
