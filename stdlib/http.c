@@ -26,6 +26,11 @@
 #define FR_HTTP_MAX_REQS 4096
 #define FR_HTTP_MAX_SERVERS 256
 
+/* Header-read timeout for the blocking fr_http_accept() path: caps how
+ * long a slow/idle client can hold recv_until_headers() before we give
+ * up on it. */
+#define FR_HTTP_HEADER_TIMEOUT_MS 30000
+
 typedef struct {
     int64_t sock;
     char method[16];
@@ -165,6 +170,8 @@ static void parse_http_request(const char *raw, fr_http_req_t *req) {
 int64_t fr_http_accept(int64_t server) {
     int64_t client = fr_tcp_accept(server);
     if (client < 0 || client >= FR_HTTP_MAX_REQS) return -1;
+
+    fr_sock_set_recv_timeout((int)client, FR_HTTP_HEADER_TIMEOUT_MS);
 
     char buf[4096];
     if (recv_until_headers((int)client, buf, sizeof(buf)) < 0) {

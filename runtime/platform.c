@@ -8,6 +8,7 @@
 #if !defined(FORGE_OS_WINDOWS)
 #include <fcntl.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <unistd.h>
@@ -84,6 +85,18 @@ int fr_sock_set_tcp_nodelay(int fd) {
     return setsockopt((SOCKET)fd, IPPROTO_TCP, TCP_NODELAY, (const char *)&yes, sizeof(yes));
 #else
     return setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &yes, sizeof(yes));
+#endif
+}
+
+int fr_sock_set_recv_timeout(int fd, int timeout_ms) {
+#if defined(FORGE_OS_WINDOWS)
+    DWORD ms = (DWORD)timeout_ms;
+    return setsockopt((SOCKET)fd, SOL_SOCKET, SO_RCVTIMEO, (const char *)&ms, sizeof(ms));
+#else
+    struct timeval tv;
+    tv.tv_sec = timeout_ms / 1000;
+    tv.tv_usec = (timeout_ms % 1000) * 1000;
+    return setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 #endif
 }
 
