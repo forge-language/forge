@@ -1,0 +1,7 @@
+library greeting_ext {
+    import strings;
+
+    export fn hello(name: string): string {
+        return str_concat("Hello from an external project, ", name);
+    }
+}
