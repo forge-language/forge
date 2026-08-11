@@ -334,17 +334,48 @@ With CMake, use `forge_add_library()` from `cmake/ForgeLibrary.cmake`.
 
 ## Language Server (LSP)
 
-Editor support for `.fg` files — syntax highlighting, diagnostics, completion, hover, and document symbols.
+Editor support for `.fg` files — syntax highlighting, diagnostics, completion, hover, and document symbols,
+served by `forge-lsp`, a self-hosted native Forge program (`tools/forge-lsp/main.fg`).
 
 See [docs/lsp.md](docs/lsp.md) for setup. Quick start:
 
 ```bash
 cmake --build build
-cd lsp && npm install && npm run build
-cd ../editors/vscode && npm install && npm run build
+cd editors/vscode && npm install && npm run build
 ```
 
 Then install the extension from `editors/vscode/` in VS Code or Cursor.
+
+### Claude Code
+
+If you use the [oh-my-claudecode](https://github.com/oh-my-claudecode/oh-my-claudecode) plugin, its
+`lsp_hover`/`lsp_document_symbols`/`lsp_diagnostics`/etc. tools can drive `forge-lsp` directly against
+`.fg` files. Run:
+
+```bash
+./scripts/install-claude-lsp.sh
+```
+
+This patches your installed `oh-my-claudecode` plugin so it recognizes `.fg` files and spawns
+`forge-lsp` for them. It's idempotent — safe to re-run any time, including after a plugin update
+(it detects and skips files that are already patched). Restart Claude Code afterwards so the plugin's
+MCP server process picks up the change.
+
+Note: Claude Code's own built-in `LSP` tool is compiled directly into the `claude` CLI binary rather
+than sourced from this plugin, so this script cannot make *that* tool recognize `.fg` files — only
+the plugin's separately-named `lsp_*` tools.
+
+### Neovim
+
+`editors/nvim/` provides filetype detection, syntax highlighting, and native `forge-lsp` attachment via
+`vim.lsp.start()`. Add it to your `runtimepath` (see `editors/nvim/README.md`) after building
+`forge-lsp`.
+
+### Vim8/Vim9 + vim-lsp
+
+`editors/vim/` provides the same filetype/syntax support plus `forge-lsp` registration for
+[vim-lsp](https://github.com/prabirshrestha/vim-lsp) (installed separately). See
+`editors/vim/README.md`.
 
 ## Project Structure
 
@@ -362,7 +393,8 @@ forge/
 │   ├── phoenix/    # Phoenix (Bandit) benchmark server
 │   └── axum/       # Rust Axum benchmark server
 ├── cmake/          # CMake helpers
-├── lsp/            # TypeScript language server
+├── tools/forge-lsp/ # self-hosted native LSP server (main.fg)
+├── lsp/            # legacy TypeScript language server (unused, kept for reference)
 ├── editors/vscode/ # VS Code / Cursor extension
 └── docs/           # design documents and tutorials
 ```
