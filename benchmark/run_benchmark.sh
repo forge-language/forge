@@ -11,12 +11,24 @@ FORGE_PORT=19080
 PY_PORT=19081
 PHX_PORT=19082
 AXUM_PORT=19083
-REQUESTS=1000000
-CONCURRENCY=1000
+REQUESTS=5000000
+CONCURRENCY=5000
 RESULTS="${ROOT}/benchmark/results.txt"
 CPU_COUNT="$(nproc 2>/dev/null || echo 1)"
 
 mkdir -p "$(dirname "$RESULTS")"
+
+tune_for_benchmark() {
+    if ulimit -n 1048576 2>/dev/null; then
+        :
+    elif ulimit -n 65536 2>/dev/null; then
+        :
+    else
+        ulimit -n 4096 2>/dev/null || true
+    fi
+}
+
+tune_for_benchmark
 
 run_load() {
     local url="$1"
@@ -44,7 +56,7 @@ batch = 20000
 
 def one(_):
     last_err = None
-    for _attempt in range(3):
+    for _attempt in range(5):
         try:
             s = socket.create_connection((host, port), timeout=30)
             s.sendall(req)
@@ -54,6 +66,7 @@ def one(_):
             return 1
         except OSError as e:
             last_err = e
+            time.sleep(0.001 * (_attempt + 1))
     raise last_err
 
 done = 0

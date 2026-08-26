@@ -267,7 +267,33 @@ Forge HTTP 벤치마크의 높은 성능은 다음 공식으로 요약할 수 �
 
 이 조합은 "Hello, World" 수준의 초고속 HTTP 서버에 최적화되어 있으며, Forge 언어 자체가 Python/Elixir보다 빠른 것이 아니라 **컴파일 결과물이 최소 C HTTP 서버와 동등한 핫패스**를 갖기 때문이다. 동시에 Rust Axum과 대등한 수준까지 끌어올린 것은 아키텍처 단순화(connection pool 제거, 코어 affinity)의 효과가 크다.
 
-향후 개선 여지: `io_uring`, `sendfile`, TLS termination, 복잡한 라우팅 벤치마크 추가.
+향후 개선 여지: ~~`io_uring`, `sendfile`, TLS termination, 복잡한 라우팅 벤치마크 추가~~ → **구현 완료** (아래 §10 참고).
+
+---
+
+## 10. 고급 HTTP 벤치마크 (io_uring / sendfile / TLS / routing)
+
+### API
+
+| 함수 | 설명 |
+|------|------|
+| `http_prepare_sendfile` | memfd + `sendfile()` zero-copy 응답 준비 (Linux) |
+| `http_serve_uring` | liburing 기반 accept/recv/send (Linux, liburing 필요) |
+| `http_listen_tls` / `http_serve_tls_mt` | OpenSSL TLS termination |
+| `http_serve_routing_mt` | 9개 JSON 라우트 내장 MT 벤치 서버 |
+
+### 실행
+
+```bash
+cmake --build build --target benchmarks
+./benchmark/run_advanced_benchmark.sh
+```
+
+포트: 19080 (epoll baseline), 19086 (sendfile), 19087 (io_uring), 19088 (TLS), 19089 (routing)
+
+결과: `benchmark/advanced_results.txt`
+
+CMake 옵션: `FORGE_ENABLE_IO_URING`, `FORGE_ENABLE_TLS` (기본 ON)
 
 ---
 

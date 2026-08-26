@@ -1,0 +1,7 @@
+// HTTP benchmark: multi-route JSON API (built-in route table)
+
+import http;
+
+native main {
+    http_serve_routing_mt(19089, 0);
+}

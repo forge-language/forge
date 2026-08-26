@@ -30,6 +30,8 @@ set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 set(FORGE_CC_ARGS --cc "${CMAKE_C_COMPILER}")
 
 option(FORGE_ENABLE_GPU "Enable OpenCL GPU stdlib (gpu module)" ON)
+option(FORGE_ENABLE_IO_URING "Enable io_uring HTTP serve mode (Linux)" ON)
+option(FORGE_ENABLE_TLS "Enable OpenSSL TLS HTTP (http_listen_tls)" ON)
 
 add_library(forge_std STATIC
     stdlib/io.c
@@ -41,6 +43,9 @@ add_library(forge_std STATIC
     stdlib/tcp.c
     stdlib/udp.c
     stdlib/http.c
+    stdlib/http_uring.c
+    stdlib/http_tls.c
+    stdlib/http_routing.c
     stdlib/json.c
     stdlib/gpu.c
     stdlib/threading.c
@@ -49,7 +54,10 @@ add_library(forge_std STATIC
 target_include_directories(forge_std PUBLIC include)
 if(NOT WIN32)
     target_link_libraries(forge_std PUBLIC pthread)
+    target_compile_definitions(forge_std PRIVATE _GNU_SOURCE)
 endif()
+
+set(FORGE_LINK_EXTRAS "")
 
 if(FORGE_ENABLE_GPU)
     find_package(OpenCL)
@@ -68,11 +76,44 @@ if(FORGE_ENABLE_GPU)
         target_compile_definitions(forge_std PRIVATE FORGE_HAS_OPENCL=1)
         target_include_directories(forge_std PRIVATE ${OpenCL_INCLUDE_DIRS})
         target_link_libraries(forge_std PUBLIC ${OpenCL_LIBRARIES})
-        file(WRITE "${CMAKE_BINARY_DIR}/lib/forge.link" "${OpenCL_LIBRARIES}\n")
+        list(APPEND FORGE_LINK_EXTRAS "${OpenCL_LIBRARIES}")
     else()
         message(STATUS "Forge GPU: OpenCL not found — gpu module will report unavailable at runtime")
-        file(WRITE "${CMAKE_BINARY_DIR}/lib/forge.link" "")
     endif()
+endif()
+
+if(FORGE_ENABLE_IO_URING AND NOT WIN32)
+    find_path(LIBURING_INCLUDE_DIR NAMES liburing.h PATHS /usr/include /usr/local/include)
+    find_library(LIBURING_LIBRARY NAMES uring)
+    if(LIBURING_INCLUDE_DIR AND LIBURING_LIBRARY)
+        message(STATUS "Forge HTTP: io_uring enabled (${LIBURING_LIBRARY})")
+        target_compile_definitions(forge_std PRIVATE FORGE_HAS_IO_URING=1)
+        target_include_directories(forge_std PRIVATE ${LIBURING_INCLUDE_DIR})
+        target_link_libraries(forge_std PUBLIC ${LIBURING_LIBRARY})
+        list(APPEND FORGE_LINK_EXTRAS "${LIBURING_LIBRARY}")
+    else()
+        message(STATUS "Forge HTTP: io_uring not found — http_serve_uring falls back to epoll")
+    endif()
+endif()
+
+if(FORGE_ENABLE_TLS)
+    find_package(OpenSSL)
+    if(OpenSSL_FOUND)
+        message(STATUS "Forge HTTP: TLS enabled (${OPENSSL_SSL_LIBRARY})")
+        target_compile_definitions(forge_std PRIVATE FORGE_HAS_TLS=1)
+        target_include_directories(forge_std PRIVATE ${OPENSSL_INCLUDE_DIR})
+        target_link_libraries(forge_std PUBLIC OpenSSL::SSL OpenSSL::Crypto)
+        list(APPEND FORGE_LINK_EXTRAS "${OPENSSL_SSL_LIBRARY}" "${OPENSSL_CRYPTO_LIBRARY}")
+    else()
+        message(STATUS "Forge HTTP: OpenSSL not found — TLS falls back to plain HTTP")
+    endif()
+endif()
+
+if(FORGE_LINK_EXTRAS)
+    string(REPLACE ";" "\n" FORGE_LINK_CONTENT "${FORGE_LINK_EXTRAS}")
+    file(WRITE "${CMAKE_BINARY_DIR}/lib/forge.link" "${FORGE_LINK_CONTENT}\n")
+else()
+    file(WRITE "${CMAKE_BINARY_DIR}/lib/forge.link" "")
 endif()
 
 add_library(forge_runtime STATIC
@@ -278,6 +319,62 @@ add_custom_command(
 )
 add_custom_target(bench_coro DEPENDS "${FORGE_BENCH_CORO_BIN}")
 list(APPEND FORGE_BENCH_TARGETS bench_coro)
+
+set(FORGE_BENCH_SENDFILE_SRC "${CMAKE_SOURCE_DIR}/benchmark/forge/bench_sendfile_server.fg")
+set(FORGE_BENCH_SENDFILE_BIN "${CMAKE_BINARY_DIR}/bin/bench_sendfile_server")
+add_custom_command(
+    OUTPUT "${FORGE_BENCH_SENDFILE_BIN}"
+    COMMAND forge "${FORGE_BENCH_SENDFILE_SRC}" -o "${FORGE_BENCH_SENDFILE_BIN}"
+        ${FORGE_CC_ARGS}
+        --forge-root "${CMAKE_SOURCE_DIR}" --lib-dir "${CMAKE_BINARY_DIR}/lib"
+    DEPENDS forge forge_runtime "${FORGE_BENCH_SENDFILE_SRC}"
+    COMMENT "Compiling bench_sendfile_server.fg (native)"
+    VERBATIM
+)
+add_custom_target(bench_sendfile_server DEPENDS "${FORGE_BENCH_SENDFILE_BIN}")
+list(APPEND FORGE_BENCH_TARGETS bench_sendfile_server)
+
+set(FORGE_BENCH_URING_SRC "${CMAKE_SOURCE_DIR}/benchmark/forge/bench_uring_server.fg")
+set(FORGE_BENCH_URING_BIN "${CMAKE_BINARY_DIR}/bin/bench_uring_server")
+add_custom_command(
+    OUTPUT "${FORGE_BENCH_URING_BIN}"
+    COMMAND forge "${FORGE_BENCH_URING_SRC}" -o "${FORGE_BENCH_URING_BIN}"
+        ${FORGE_CC_ARGS}
+        --forge-root "${CMAKE_SOURCE_DIR}" --lib-dir "${CMAKE_BINARY_DIR}/lib"
+    DEPENDS forge forge_runtime "${FORGE_BENCH_URING_SRC}"
+    COMMENT "Compiling bench_uring_server.fg (native)"
+    VERBATIM
+)
+add_custom_target(bench_uring_server DEPENDS "${FORGE_BENCH_URING_BIN}")
+list(APPEND FORGE_BENCH_TARGETS bench_uring_server)
+
+set(FORGE_BENCH_TLS_SRC "${CMAKE_SOURCE_DIR}/benchmark/forge/bench_tls_server.fg")
+set(FORGE_BENCH_TLS_BIN "${CMAKE_BINARY_DIR}/bin/bench_tls_server")
+add_custom_command(
+    OUTPUT "${FORGE_BENCH_TLS_BIN}"
+    COMMAND forge "${FORGE_BENCH_TLS_SRC}" -o "${FORGE_BENCH_TLS_BIN}"
+        ${FORGE_CC_ARGS}
+        --forge-root "${CMAKE_SOURCE_DIR}" --lib-dir "${CMAKE_BINARY_DIR}/lib"
+    DEPENDS forge forge_runtime "${FORGE_BENCH_TLS_SRC}"
+    COMMENT "Compiling bench_tls_server.fg (native)"
+    VERBATIM
+)
+add_custom_target(bench_tls_server DEPENDS "${FORGE_BENCH_TLS_BIN}")
+list(APPEND FORGE_BENCH_TARGETS bench_tls_server)
+
+set(FORGE_BENCH_ROUTING_SRC "${CMAKE_SOURCE_DIR}/benchmark/forge/bench_routing_server.fg")
+set(FORGE_BENCH_ROUTING_BIN "${CMAKE_BINARY_DIR}/bin/bench_routing_server")
+add_custom_command(
+    OUTPUT "${FORGE_BENCH_ROUTING_BIN}"
+    COMMAND forge "${FORGE_BENCH_ROUTING_SRC}" -o "${FORGE_BENCH_ROUTING_BIN}"
+        ${FORGE_CC_ARGS}
+        --forge-root "${CMAKE_SOURCE_DIR}" --lib-dir "${CMAKE_BINARY_DIR}/lib"
+    DEPENDS forge forge_runtime "${FORGE_BENCH_ROUTING_SRC}"
+    COMMENT "Compiling bench_routing_server.fg (native)"
+    VERBATIM
+)
+add_custom_target(bench_routing_server DEPENDS "${FORGE_BENCH_ROUTING_BIN}")
+list(APPEND FORGE_BENCH_TARGETS bench_routing_server)
 
 if(FORGE_BENCH_TARGETS)
     add_custom_target(benchmarks DEPENDS ${FORGE_BENCH_TARGETS})
