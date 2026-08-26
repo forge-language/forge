@@ -57,7 +57,7 @@ static int64_t tcp_listen_common(int64_t port, int reuseport) {
     addr.sin_addr.s_addr = htonl(INADDR_ANY);
     addr.sin_port = htons((uint16_t)port);
     if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) { fr_sock_close(fd); return -1; }
-    if (listen(fd, 4096) < 0) { fr_sock_close(fd); return -1; }
+    if (listen(fd, 8192) < 0) { fr_sock_close(fd); return -1; }
     return (int64_t)fd;
 }
 

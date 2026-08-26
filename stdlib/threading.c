@@ -17,8 +17,14 @@ typedef struct {
     int in_use;
 } thread_slot_t;
 
+typedef struct {
+    fr_mutex_t *mutex;
+    int refcount;        /* number of lock() calls without a matching unlock() */
+    int pending_destroy; /* destroy() was requested while refcount > 0 */
+} mutex_slot_t;
+
 static thread_slot_t g_threads[THREAD_MAX_HANDLES];
-static fr_mutex_t *g_mutexes[THREAD_MAX_MUTEXES];
+static mutex_slot_t g_mutexes[THREAD_MAX_MUTEXES];
 static fr_mutex_t *g_registry_lock;
 static int64_t g_next_thread_id;
 static fr_mutex_t *g_id_lock;
@@ -29,13 +35,74 @@ static __declspec(thread) int64_t tls_worker_id = -1;
 static __thread int64_t tls_worker_id = -1;
 #endif
 
+/* Thread-safe one-time registry initialization. A plain "if (!g_registry_lock)
+ * check-then-init" is racy: two threads can both observe an uninitialized
+ * registry and both allocate/re-memset it concurrently, corrupting state or
+ * leaking the loser's allocation. Use the platform's proper once-init
+ * primitive so initialization happens exactly once no matter how many
+ * threads race into registry_init() simultaneously. */
+#if defined(_WIN32)
+static INIT_ONCE g_registry_once = INIT_ONCE_STATIC_INIT;
+
+static BOOL CALLBACK registry_init_once(PINIT_ONCE once, PVOID param, PVOID *ctx) {
+    (void)once;
+    (void)param;
+    (void)ctx;
+    g_registry_lock = fr_mutex_create();
+    g_id_lock = fr_mutex_create();
+    memset(g_threads, 0, sizeof(g_threads));
+    memset(g_mutexes, 0, sizeof(g_mutexes));
+    return TRUE;
+}
+
 static void registry_init(void) {
-    if (!g_registry_lock) {
-        g_registry_lock = fr_mutex_create();
-        g_id_lock = fr_mutex_create();
-        memset(g_threads, 0, sizeof(g_threads));
-        memset(g_mutexes, 0, sizeof(g_mutexes));
+    InitOnceExecuteOnce(&g_registry_once, registry_init_once, NULL, NULL);
+}
+#else
+static pthread_once_t g_registry_once = PTHREAD_ONCE_INIT;
+
+static void registry_init_once(void) {
+    g_registry_lock = fr_mutex_create();
+    g_id_lock = fr_mutex_create();
+    memset(g_threads, 0, sizeof(g_threads));
+    memset(g_mutexes, 0, sizeof(g_mutexes));
+}
+
+static void registry_init(void) {
+    pthread_once(&g_registry_once, registry_init_once);
+}
+#endif
+
+/* Acquire a live reference to the mutex behind `handle`, bumping its
+ * refcount so a concurrent destroy() cannot free it out from under the
+ * caller. Must be paired with mutex_ref_release(). */
+static fr_mutex_t *mutex_ref_acquire(int64_t handle) {
+    if (handle < 0 || handle >= THREAD_MAX_MUTEXES) return NULL;
+    registry_init();
+    fr_mutex_lock(g_registry_lock);
+    fr_mutex_t *m = NULL;
+    if (g_mutexes[handle].mutex && !g_mutexes[handle].pending_destroy) {
+        m = g_mutexes[handle].mutex;
+        g_mutexes[handle].refcount++;
     }
+    fr_mutex_unlock(g_registry_lock);
+    return m;
+}
+
+/* Release a reference taken by mutex_ref_acquire(). If destroy() was
+ * requested while this reference was outstanding and this was the last
+ * reference, actually destroy the underlying mutex now. */
+static void mutex_ref_release(int64_t handle) {
+    if (handle < 0 || handle >= THREAD_MAX_MUTEXES) return;
+    fr_mutex_lock(g_registry_lock);
+    if (g_mutexes[handle].refcount > 0) g_mutexes[handle].refcount--;
+    if (g_mutexes[handle].pending_destroy && g_mutexes[handle].refcount == 0 &&
+        g_mutexes[handle].mutex) {
+        fr_mutex_destroy(g_mutexes[handle].mutex);
+        g_mutexes[handle].mutex = NULL;
+        g_mutexes[handle].pending_destroy = 0;
+    }
+    fr_mutex_unlock(g_registry_lock);
 }
 
 int64_t fr_threading_cpu_count(void) {
@@ -75,9 +142,14 @@ int64_t fr_threading_mutex_create(void) {
     fr_mutex_lock(g_registry_lock);
     int64_t handle = -1;
     for (int i = 0; i < THREAD_MAX_MUTEXES; i++) {
-        if (!g_mutexes[i]) {
-            g_mutexes[i] = fr_mutex_create();
-            if (g_mutexes[i]) handle = i;
+        if (!g_mutexes[i].mutex) {
+            fr_mutex_t *m = fr_mutex_create();
+            if (m) {
+                g_mutexes[i].mutex = m;
+                g_mutexes[i].refcount = 0;
+                g_mutexes[i].pending_destroy = 0;
+                handle = i;
+            }
             break;
         }
     }
@@ -86,22 +158,38 @@ int64_t fr_threading_mutex_create(void) {
 }
 
 void fr_threading_mutex_lock(int64_t handle) {
-    if (handle < 0 || handle >= THREAD_MAX_MUTEXES) return;
-    if (g_mutexes[handle]) fr_mutex_lock(g_mutexes[handle]);
+    fr_mutex_t *m = mutex_ref_acquire(handle);
+    if (!m) return;
+    /* The reference stays outstanding (refcount held) until the matching
+     * fr_threading_mutex_unlock() call releases it, so a concurrent
+     * destroy() cannot free this mutex while it is locked. */
+    fr_mutex_lock(m);
 }
 
 void fr_threading_mutex_unlock(int64_t handle) {
     if (handle < 0 || handle >= THREAD_MAX_MUTEXES) return;
-    if (g_mutexes[handle]) fr_mutex_unlock(g_mutexes[handle]);
+    registry_init();
+    fr_mutex_lock(g_registry_lock);
+    fr_mutex_t *m = g_mutexes[handle].mutex;
+    fr_mutex_unlock(g_registry_lock);
+    if (!m) return;
+    fr_mutex_unlock(m);
+    mutex_ref_release(handle);
 }
 
 void fr_threading_mutex_destroy(int64_t handle) {
     if (handle < 0 || handle >= THREAD_MAX_MUTEXES) return;
     registry_init();
     fr_mutex_lock(g_registry_lock);
-    if (g_mutexes[handle]) {
-        fr_mutex_destroy(g_mutexes[handle]);
-        g_mutexes[handle] = NULL;
+    if (g_mutexes[handle].mutex) {
+        if (g_mutexes[handle].refcount > 0) {
+            /* Still referenced by an in-flight lock()/unlock() pair; defer
+             * the actual destroy until the last reference is released. */
+            g_mutexes[handle].pending_destroy = 1;
+        } else {
+            fr_mutex_destroy(g_mutexes[handle].mutex);
+            g_mutexes[handle].mutex = NULL;
+        }
     }
     fr_mutex_unlock(g_registry_lock);
 }
