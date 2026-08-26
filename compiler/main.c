@@ -18,6 +18,11 @@ static char *read_file(const char *path, size_t *out_len) {
     }
     fseek(f, 0, SEEK_END);
     long sz = ftell(f);
+    if (sz < 0) {
+        fclose(f);
+        fprintf(stderr, "forge: cannot determine size of input file '%s' (is it a pipe or special file?)\n", path);
+        exit(1);
+    }
     fseek(f, 0, SEEK_SET);
     char *buf = (char *)malloc((size_t)sz + 1);
     if (!buf) forge_die("out of memory");
@@ -63,8 +68,11 @@ int main(int argc, char **argv) {
     forge_driver_config_init(&cfg);
     forge_driver_detect_paths(&cfg, argv[0]);
 
-    const char *includes[32];
-    const char *link_libs[32];
+#define FORGE_MAX_CLI_PATHS 32
+#define FORGE_STRINGIFY_(x) #x
+#define FORGE_STRINGIFY(x) FORGE_STRINGIFY_(x)
+    const char *includes[FORGE_MAX_CLI_PATHS];
+    const char *link_libs[FORGE_MAX_CLI_PATHS];
     size_t include_count = 0;
     size_t link_lib_count = 0;
 
@@ -91,8 +99,12 @@ int main(int argc, char **argv) {
         } else if (strcmp(argv[i], "--keep-temp") == 0) {
             cfg.keep_intermediate = true;
         } else if (strcmp(argv[i], "-I") == 0 && i + 1 < argc) {
+            if (include_count >= FORGE_MAX_CLI_PATHS)
+                forge_die("too many -I include directories (max " FORGE_STRINGIFY(FORGE_MAX_CLI_PATHS) ")");
             includes[include_count++] = argv[++i];
         } else if (strcmp(argv[i], "-l") == 0 && i + 1 < argc) {
+            if (link_lib_count >= FORGE_MAX_CLI_PATHS)
+                forge_die("too many -l link libraries (max " FORGE_STRINGIFY(FORGE_MAX_CLI_PATHS) ")");
             link_libs[link_lib_count++] = argv[++i];
         } else if (argv[i][0] != '-') {
             input = argv[i];

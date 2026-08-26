@@ -1,5 +1,6 @@
 #include "mod_registry.h"
 #include <stdio.h>
+#include <stdint.h>
 
 static const ForgeStdFn IO_FNS[] = {
     {"print", "fr_print"},
@@ -101,11 +102,19 @@ static const ForgeStdFn HTTP_FNS[] = {
     {"http_close", "fr_http_close"},
     {"http_server_close", "fr_http_server_close"},
     {"http_prepare", "fr_http_prepare"},
+    {"http_prepare_sendfile", "fr_http_prepare_sendfile"},
     {"http_serve_prepared", "fr_http_serve_prepared"},
     {"http_serve_forever", "fr_http_serve_forever"},
     {"http_serve_ok", "fr_http_serve_ok"},
     {"http_serve_mt", "fr_http_serve_mt"},
     {"http_serve_hybrid", "fr_http_serve_hybrid"},
+    {"http_serve_uring", "fr_http_serve_uring"},
+    {"http_listen_tls", "fr_http_listen_tls"},
+    {"http_serve_tls_mt", "fr_http_serve_tls_mt"},
+    {"http_serve_routing_mt", "fr_http_serve_routing_mt"},
+    {"http_has_sendfile", "fr_http_has_sendfile"},
+    {"http_has_uring", "fr_http_has_uring"},
+    {"http_has_tls", "fr_http_has_tls"},
 };
 
 static const ForgeStdFn EVENT_FNS[] = {
@@ -161,7 +170,7 @@ static const ForgeModule MODULES[] = {
     { .name = { "os", 2 }, .header = "forge/os.h", .fns = OS_FNS, .fn_count = 4 },
     { .name = { "tcp", 3 }, .header = "forge/tcp.h", .fns = TCP_FNS, .fn_count = 7 },
     { .name = { "udp", 3 }, .header = "forge/udp.h", .fns = UDP_FNS, .fn_count = 5 },
-    { .name = { "http", 4 }, .header = "forge/http.h", .fns = HTTP_FNS, .fn_count = 16 },
+    { .name = { "http", 4 }, .header = "forge/http.h", .fns = HTTP_FNS, .fn_count = 24 },
     { .name = { "event", 5 }, .header = "forge/event.h", .fns = EVENT_FNS, .fn_count = 2 },
     { .name = { "json", 4 }, .header = "forge/json.h", .fns = JSON_FNS, .fn_count = 4 },
     { .name = { "gpu", 3 }, .header = "forge/gpu.h", .fns = GPU_FNS, .fn_count = 15 },
@@ -196,12 +205,48 @@ int forge_import_is_stdlib(ForgeStr name) {
     return forge_std_module(name) != NULL;
 }
 
+/* FNV-1a over the mangled-name components. Used to keep long symbols unique
+ * when the caller's buffer cannot hold the whole mangled form: without it two
+ * names sharing a long prefix truncate to the very same C identifier, and a
+ * call silently binds to the wrong function. */
+static uint64_t mangle_hash_bytes(uint64_t h, const char *p, size_t n) {
+    for (size_t i = 0; i < n; i++) {
+        h ^= (unsigned char)p[i];
+        h *= 1099511628211ULL;
+    }
+    return h;
+}
+
+/* Hash suffix: '_' + 16 hex digits + NUL. */
+#define FORGE_MANGLE_SUFFIX_LEN 18
+
+static void forge_mangle_into(char *out, size_t cap, const char *prefix,
+                              ForgeStr a, ForgeStr b) {
+    if (!out || cap == 0) return;
+    int n = snprintf(out, cap, "%s%.*s_%.*s", prefix,
+                     (int)a.len, a.data, (int)b.len, b.data);
+    if (n < 0) forge_die("symbol mangling failed");
+    if ((size_t)n < cap) return;
+
+    /* snprintf truncated. Replace the tail with a hash of the full name so
+     * distinct sources always produce distinct symbols. */
+    if (cap < FORGE_MANGLE_SUFFIX_LEN + 4)
+        forge_die("symbol buffer too small for mangled name");
+    uint64_t h = 1469598103934665603ULL;
+    h = mangle_hash_bytes(h, prefix, strlen(prefix));
+    h = mangle_hash_bytes(h, a.data, a.len);
+    h = mangle_hash_bytes(h, "_", 1);
+    h = mangle_hash_bytes(h, b.data, b.len);
+    snprintf(out + cap - FORGE_MANGLE_SUFFIX_LEN, FORGE_MANGLE_SUFFIX_LEN,
+             "_%016llx", (unsigned long long)h);
+}
+
 void forge_lib_mangle(char *out, size_t cap, ForgeStr lib, ForgeStr fn) {
-    snprintf(out, cap, "frlib_%.*s_%.*s", (int)lib.len, lib.data, (int)fn.len, fn.data);
+    forge_mangle_into(out, cap, "frlib_", lib, fn);
 }
 
 void forge_mod_mangle(char *out, size_t cap, ForgeStr mod, ForgeStr fn) {
-    snprintf(out, cap, "frmod_%.*s_%.*s", (int)mod.len, mod.data, (int)fn.len, fn.data);
+    forge_mangle_into(out, cap, "frmod_", mod, fn);
 }
 
 int forge_import_is_file_module(Program *prog, ForgeStr name) {

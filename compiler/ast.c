@@ -64,7 +64,15 @@ Expr *expr_binary(BinOp op, Expr *l, Expr *r) {
     e->as.binary.op = op;
     e->as.binary.left = l;
     e->as.binary.right = r;
-    e->type = l->type;
+    switch (op) {
+    case BIN_EQ: case BIN_NE: case BIN_LT: case BIN_LE:
+    case BIN_GT: case BIN_GE:
+        e->type = forge_type_bool();
+        break;
+    default:
+        e->type = l->type;
+        break;
+    }
     return e;
 }
 

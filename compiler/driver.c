@@ -20,40 +20,63 @@
 
 typedef struct {
     char **items;
+    unsigned char *owned;
     size_t count;
     size_t cap;
 } Argv;
 
 static void argv_init(Argv *a) {
     a->items = NULL;
+    a->owned = NULL;
     a->count = 0;
     a->cap = 0;
 }
 
-static void argv_push(Argv *a, char *s) {
+static void argv_push_internal(Argv *a, char *s, int owned) {
     if (a->count == a->cap) {
-        a->cap = a->cap ? a->cap * 2 : 32;
-        a->items = (char **)realloc(a->items, a->cap * sizeof(char *));
-        if (!a->items) forge_die("out of memory");
+        size_t new_cap = a->cap ? a->cap * 2 : 32;
+        char **new_items = (char **)realloc(a->items, new_cap * sizeof(char *));
+        unsigned char *new_owned =
+            (unsigned char *)realloc(a->owned, new_cap * sizeof(unsigned char));
+        if (!new_items || !new_owned) forge_die("out of memory");
+        a->items = new_items;
+        a->owned = new_owned;
+        a->cap = new_cap;
     }
-    a->items[a->count++] = s;
+    a->items[a->count] = s;
+    a->owned[a->count] = owned ? 1 : 0;
+    a->count++;
+}
+
+static void argv_push(Argv *a, char *s) {
+    argv_push_internal(a, s, 0);
+}
+
+static void argv_push_owned(Argv *a, char *s) {
+    if (!s) forge_die("out of memory");
+    argv_push_internal(a, s, 1);
 }
 
 static void argv_free(Argv *a) {
+    for (size_t i = 0; i < a->count; i++) {
+        if (a->owned[i]) free(a->items[i]);
+    }
     free(a->items);
+    free(a->owned);
     a->items = NULL;
+    a->owned = NULL;
     a->count = a->cap = 0;
 }
 
 static void argv_add_opt(Argv *a, int opt_level) {
     char opt[8];
     snprintf(opt, sizeof(opt), "-O%d", opt_level < 0 ? 2 : (opt_level > 3 ? 3 : opt_level));
-    argv_push(a, strdup(opt));
+    argv_push_owned(a, strdup(opt));
 }
 
 static void argv_add_lto(Argv *a) {
 #if !defined(FORGE_OS_WINDOWS)
-    argv_push(a, strdup("-flto"));
+    argv_push_owned(a, strdup("-flto"));
 #endif
 }
 
@@ -62,13 +85,13 @@ static void argv_add_includes(Argv *a, const ForgeDriverConfig *cfg) {
         size_t n = strlen(cfg->include_dir) + 3;
         char *inc = (char *)malloc(n);
         snprintf(inc, n, "-I%s", cfg->include_dir);
-        argv_push(a, inc);
+        argv_push_owned(a, inc);
     }
     for (size_t i = 0; i < cfg->extra_include_count; i++) {
         size_t n = strlen(cfg->extra_includes[i]) + 3;
         char *inc = (char *)malloc(n);
         snprintf(inc, n, "-I%s", cfg->extra_includes[i]);
-        argv_push(a, inc);
+        argv_push_owned(a, inc);
     }
 }
 
@@ -153,7 +176,7 @@ static void argv_add_link_extras(Argv *a, const ForgeDriverConfig *cfg) {
         if (!p[0] || p[0] == '#') continue;
         char *save = NULL;
         for (char *tok = strtok_r(p, " \t", &save); tok; tok = strtok_r(NULL, " \t", &save))
-            argv_push(a, strdup(tok));
+            argv_push_owned(a, strdup(tok));
     }
     fclose(f);
 }
@@ -169,13 +192,13 @@ static int link_object(const char *obj_path, const char *output_path, const Forg
         size_t n = strlen(cfg->lib_dir) + 3;
         char *libdir = (char *)malloc(n);
         snprintf(libdir, n, "-L%s", cfg->lib_dir);
-        argv_push(&args, libdir);
+        argv_push_owned(&args, libdir);
     }
     for (size_t i = 0; i < cfg->link_lib_count; i++) {
         size_t n = strlen(cfg->link_libs[i]) + 3;
         char *lib = (char *)malloc(n);
         snprintf(lib, n, "-l%s", cfg->link_libs[i]);
-        argv_push(&args, lib);
+        argv_push_owned(&args, lib);
     }
     argv_push(&args, "-lforge_std");
     argv_push(&args, "-lforge_runtime");
@@ -266,12 +289,16 @@ void forge_driver_detect_paths(ForgeDriverConfig *cfg, const char *argv0) {
     if (!cfg->forge_root) cfg->forge_root = ".";
 
     if (!cfg->lib_dir) {
-        snprintf(libbuf, sizeof(libbuf), "%s/build/lib", cfg->forge_root);
-        if (fr_path_exists(libbuf)) cfg->lib_dir = libbuf;
+        int n = snprintf(libbuf, sizeof(libbuf), "%s/build/lib", cfg->forge_root);
+        if (n > 0 && (size_t)n < sizeof(libbuf) && fr_path_exists(libbuf)) {
+            cfg->lib_dir = libbuf;
+        }
     }
     if (!cfg->include_dir) {
-        snprintf(incbuf, sizeof(incbuf), "%s/include", cfg->forge_root);
-        if (fr_path_exists(incbuf)) cfg->include_dir = incbuf;
+        int n = snprintf(incbuf, sizeof(incbuf), "%s/include", cfg->forge_root);
+        if (n > 0 && (size_t)n < sizeof(incbuf) && fr_path_exists(incbuf)) {
+            cfg->include_dir = incbuf;
+        }
     }
 }
 

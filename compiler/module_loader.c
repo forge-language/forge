@@ -114,8 +114,12 @@ static bool resolve_module_path(ModuleResolver *r, ForgeStr name, ForgeStr rel_p
             snprintf(candidate, sizeof(candidate), "%s/%.*s", bases[i], (int)rel_path.len, rel_path.data);
             if (try_candidate(candidate, out, cap)) return true;
         }
-        if (rel_path.len > 0 && (rel_path.data[0] == '/' || strchr(rel_path.data, ':')))
-            return try_candidate(rel_path.data, out, cap);
+        if (rel_path.len > 0 &&
+            (rel_path.data[0] == '/' || memchr(rel_path.data, ':', rel_path.len))) {
+            char abs_path[PATH_MAX];
+            snprintf(abs_path, sizeof(abs_path), "%.*s", (int)rel_path.len, rel_path.data);
+            return try_candidate(abs_path, out, cap);
+        }
         return false;
     }
 
@@ -216,7 +220,14 @@ static void load_parsed_module(ModuleResolver *r, Program *prog, ForgeStr name,
         fm->functions = NULL;
         fm->fn_count = 0;
     } else {
-        free(src);
+        /* fm already exists for this module name. Do NOT free src here:
+         * the imports/decls merged above (merge_import) and the decls
+         * about to be merged below (merge_program_decls) may hold ForgeStr
+         * slices pointing directly into this buffer. Freeing it now would
+         * be a use-after-free once those slices are read later (codegen,
+         * symbol printing, etc). Intentionally leak it for the remaining
+         * lifetime of the process instead, matching the lifetime of the
+         * AST it feeds. */
     }
 
     for (size_t i = 0; i < mod->fn_count; i++) {
