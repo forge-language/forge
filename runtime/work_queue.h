@@ -41,7 +41,8 @@ typedef struct {
 
 void fr_native_queue_init(fr_native_queue_t *q);
 void fr_native_queue_destroy(fr_native_queue_t *q);
-void fr_native_queue_push(fr_native_queue_t *q, fr_native_fn fn, void *arg);
+int fr_native_queue_push(fr_native_queue_t *q, fr_native_fn fn, void *arg);
+size_t fr_native_queue_count(fr_native_queue_t *q);
 fr_native_fn fr_native_queue_pop(fr_native_queue_t *q, void **arg_out);
 fr_native_fn fr_native_queue_steal(fr_native_queue_t *victim, void **arg_out);
 
