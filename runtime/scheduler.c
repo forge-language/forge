@@ -286,11 +286,31 @@ static void *worker_main(void *arg) {
 
     while (sched->running) {
         fr_coro_t *coro = fr_run_queue_pop(&sched->worker_queues[wid]);
+        void *narg = NULL;
+        fr_native_fn nfn = NULL;
         if (!coro) {
-            for (int i = 0; i < sched->worker_count; i++) {
-                if (i == wid) continue;
-                coro = fr_run_queue_steal(&sched->worker_queues[i], &sched->worker_queues[wid]);
-                if (coro) break;
+            /* Take our own native task before paying for a cross-worker
+             * coroutine steal scan. That scan acquires one victim lock per
+             * peer worker, and for a pool that only ever runs native tasks
+             * -- the io_uring HTTP dispatch pool (fr_http_serve_uring) is
+             * exactly that -- the coroutine run-queues are permanently
+             * empty, so it found nothing on every single dequeue while
+             * costing worker_count-1 lock round-trips. fr_sched_pool_submit
+             * round-robins into the per-worker native queues, so the
+             * common case is a hit right here with no locks at all beyond
+             * this queue's own.
+             *
+             * This does reorder priority: a worker holding a local native
+             * task now runs it instead of stealing a peer's coroutine.
+             * Both are work-conserving; preferring local work is the
+             * standard choice and avoids the pathological case above. */
+            nfn = fr_native_queue_pop(&sched->native_queues[wid], &narg);
+            if (!nfn) {
+                for (int i = 0; i < sched->worker_count; i++) {
+                    if (i == wid) continue;
+                    coro = fr_run_queue_steal(&sched->worker_queues[i], &sched->worker_queues[wid]);
+                    if (coro) break;
+                }
             }
         }
 
@@ -340,8 +360,6 @@ static void *worker_main(void *arg) {
             continue;
         }
 
-        void *narg = NULL;
-        fr_native_fn nfn = fr_native_queue_pop(&sched->native_queues[wid], &narg);
         if (!nfn) {
             for (int i = 0; i < sched->worker_count; i++) {
                 if (i == wid) continue;
@@ -482,7 +500,18 @@ int fr_sched_pool_submit(fr_scheduler_t *sched, void (*fn)(void *), void *arg) {
     fr_mutex_lock(sched->lock);
     sched->native_pending++;
     fr_mutex_unlock(sched->lock);
-    fr_cond_broadcast(sched->idle_cond);
+    /* One task needs one worker: signal, don't broadcast. A broadcast here
+     * woke every parked worker for each submitted task -- a thundering herd
+     * where all but one immediately failed every queue scan and parked
+     * again, and the HTTP io_uring path submits once per request.
+     *
+     * Signalling cannot lose a wakeup: native_pending is incremented above
+     * under sched->lock, and worker_main only parks after re-checking
+     * sched_has_queued_work() (which reports native_pending > 0) while
+     * holding that same lock. So no worker can be parked while a submitted
+     * task is still pending -- a worker that misses the signal finds the
+     * work on its next loop instead of sleeping through it. */
+    fr_cond_signal(sched->idle_cond);
     return 0;
 }
 

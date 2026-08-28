@@ -45,6 +45,10 @@ void fr_cond_broadcast(fr_cond_t *c) {
     if (c) WakeAllConditionVariable(&c->cv);
 }
 
+void fr_cond_signal(fr_cond_t *c) {
+    if (c) WakeConditionVariable(&c->cv);
+}
+
 void fr_cond_wait(fr_cond_t *c, fr_mutex_t *m) {
     if (c && m) SleepConditionVariableSRW(&c->cv, &m->lock, INFINITE, 0);
 }
@@ -146,6 +150,10 @@ void fr_cond_destroy(fr_cond_t *c) {
 
 void fr_cond_broadcast(fr_cond_t *c) {
     if (c) pthread_cond_broadcast(&c->cv);
+}
+
+void fr_cond_signal(fr_cond_t *c) {
+    if (c) pthread_cond_signal(&c->cv);
 }
 
 void fr_cond_wait(fr_cond_t *c, fr_mutex_t *m) {
