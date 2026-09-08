@@ -6,12 +6,8 @@ build/
 # OMC agent local state
 .omc/
 
-# Editor (keep shared workspace settings visible)
-.vscode/*
-!.vscode/settings.json
-!.vscode/extensions.json
-!.vscode/launch.json
-!.vscode/tasks.json
+# Editor
+.vscode/
 .idea/
 *.swp
 *~
@@ -40,6 +36,7 @@ benchmark/axum/**/target/
 
 # Benchmark output
 benchmark/results.txt
+benchmark/extreme_results*.txt
 
 # Local practice builds
 practice/a.out
@@ -56,3 +53,6 @@ lsp/out/
 editors/vscode/node_modules/
 editors/vscode/out/
 editors/vscode/server/
+
+# Git internals
+.git/

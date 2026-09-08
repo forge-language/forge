@@ -50,14 +50,17 @@
           "items": { "type": "string" },
           "default": [],
           "description": "Extra -I paths for module resolution."
+        },
+        "forge.lspPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the native forge-lsp binary. Defaults to build/bin/forge-lsp in the workspace, then PATH."
         }
       }
     }
   },
   "scripts": {
-    "build:lsp": "npm install --prefix ../../lsp && npm run build --prefix ../../lsp",
-    "bundle:server": "node scripts/bundle-server.mjs",
-    "build": "npm run build:lsp && npm run bundle:server && tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json",
     "watch": "tsc -p tsconfig.json --watch",
     "vscode:prepublish": "npm run build"
   },

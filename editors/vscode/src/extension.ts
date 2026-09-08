@@ -1,28 +1,41 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { workspace, ExtensionContext, WorkspaceConfiguration } from 'vscode';
+import { workspace, ExtensionContext, WorkspaceConfiguration, window } from 'vscode';
 import {
   LanguageClient,
   LanguageClientOptions,
   ServerOptions,
-  TransportKind,
 } from 'vscode-languageclient/node';
 
 let client: LanguageClient | undefined;
 
-function resolveServerModule(context: ExtensionContext): string {
-  const candidates = [
-    path.join(context.extensionPath, 'server', 'out', 'server.js'),
-    path.join(context.extensionPath, '..', '..', 'lsp', 'out', 'server.js'),
-  ];
-  for (const candidate of candidates) {
-    if (fs.existsSync(candidate)) return candidate;
-  }
-  return candidates[0];
-}
-
 function forgeConfig(): WorkspaceConfiguration {
   return workspace.getConfiguration('forge');
+}
+
+function findOnPath(binName: string): string | undefined {
+  const pathEnv = process.env.PATH || '';
+  const exts = process.platform === 'win32' ? ['.exe', '.cmd', ''] : [''];
+  for (const dir of pathEnv.split(path.delimiter)) {
+    for (const ext of exts) {
+      const candidate = path.join(dir, binName + ext);
+      if (fs.existsSync(candidate)) return candidate;
+    }
+  }
+  return undefined;
+}
+
+function resolveServerBinary(): string | undefined {
+  const cfg = forgeConfig();
+  const configured = cfg.get<string>('lspPath');
+  if (configured && fs.existsSync(configured)) return configured;
+
+  for (const folder of workspace.workspaceFolders ?? []) {
+    const candidate = path.join(folder.uri.fsPath, 'build', 'bin', 'forge-lsp');
+    if (fs.existsSync(candidate)) return candidate;
+  }
+
+  return findOnPath('forge-lsp');
 }
 
 function buildInitializationOptions() {
@@ -40,14 +53,18 @@ function buildInitializationOptions() {
 }
 
 export function activate(context: ExtensionContext): void {
-  const serverModule = resolveServerModule(context);
+  const serverBinary = resolveServerBinary();
+  if (!serverBinary) {
+    void window.showErrorMessage(
+      "Forge: couldn't find the forge-lsp binary. Build it (cmake --build build --target forge-lsp) " +
+        "or set the forge.lspPath setting.",
+    );
+    return;
+  }
+
   const serverOptions: ServerOptions = {
-    run: { module: serverModule, transport: TransportKind.ipc },
-    debug: {
-      module: serverModule,
-      transport: TransportKind.ipc,
-      options: { execArgv: ['--nolazy', '--inspect=6010'] },
-    },
+    run: { command: serverBinary, args: [] },
+    debug: { command: serverBinary, args: [] },
   };
 
   const clientOptions: LanguageClientOptions = {

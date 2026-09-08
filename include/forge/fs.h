@@ -15,5 +15,6 @@ int fr_fs_mkdir(const char *path);
 int fr_fs_rename(const char *old_path, const char *new_path);
 int fr_fs_copy(const char *src, const char *dst);
 char *fr_fs_list_dir(const char *path);
+char *fr_fs_temp_path(const char *prefix, const char *suffix);
 
 #endif
