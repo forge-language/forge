@@ -143,7 +143,7 @@ static int compile_c_source(Program *prog, const char *obj_path, const ForgeDriv
     argv_init(&args);
     argv_push(&args, (char *)cfg->cc);
     argv_push(&args, "-std=c11");
-    argv_add_opt(&args, cfg->opt_level > 0 ? cfg->opt_level : 3);
+    argv_add_opt(&args, cfg->opt_level);
     if (cfg->opt_level > 0 && getenv("FORGE_ENABLE_LTO")) argv_add_lto(&args);
     argv_add_includes(&args, cfg);
     argv_push(&args, "-c");
@@ -194,14 +194,21 @@ static int link_object(const char *obj_path, const char *output_path, const Forg
         snprintf(libdir, n, "-L%s", cfg->lib_dir);
         argv_push_owned(&args, libdir);
     }
+    for (size_t i = 0; i < cfg->extra_lib_dir_count; i++) {
+        argv_push(&args, "-L");
+        argv_push(&args, (char *)cfg->extra_lib_dirs[i]);
+    }
     for (size_t i = 0; i < cfg->link_lib_count; i++) {
         size_t n = strlen(cfg->link_libs[i]) + 3;
         char *lib = (char *)malloc(n);
         snprintf(lib, n, "-l%s", cfg->link_libs[i]);
         argv_push_owned(&args, lib);
     }
+    /* The static archives have a small circular dependency. */
     argv_push(&args, "-lforge_std");
     argv_push(&args, "-lforge_runtime");
+    /* Resolve stdlib references introduced by the runtime archive. */
+    argv_push(&args, "-lforge_std");
     argv_add_link_extras(&args, cfg);
     argv_push(&args, "-lm");
     int rc = exec_argv(&args);
@@ -258,7 +265,9 @@ void forge_driver_detect_paths(ForgeDriverConfig *cfg, const char *argv0) {
     static char incbuf[PATH_MAX];
 
     const char *root = getenv("FORGE_ROOT");
-    if (root && root[0]) {
+    if (cfg->forge_root) {
+        /* Explicit --forge-root takes precedence over environment/detection. */
+    } else if (root && root[0]) {
         cfg->forge_root = root;
     } else if (argv0 && argv0[0]) {
 #if defined(FORGE_OS_WINDOWS)
@@ -267,6 +276,15 @@ void forge_driver_detect_paths(ForgeDriverConfig *cfg, const char *argv0) {
         if (n > 0 && n < sizeof(resolved)) {
             char *slash = strstr(resolved, "\\build\\bin\\");
             if (!slash) slash = strstr(resolved, "/build/bin/");
+            if (!slash) {
+                fr_path_normalize(resolved);
+                slash = strrchr(resolved, '/');
+                if (slash) {
+                    *slash = '\0';
+                    slash = strrchr(resolved, '/');
+                    if (slash && strcmp(slash, "/bin") != 0) slash = NULL;
+                }
+            }
             if (slash) {
                 *slash = '\0';
                 snprintf(rootbuf, sizeof(rootbuf), "%s", resolved);
@@ -278,6 +296,14 @@ void forge_driver_detect_paths(ForgeDriverConfig *cfg, const char *argv0) {
         char resolved[PATH_MAX];
         if (realpath(argv0, resolved)) {
             char *slash = strstr(resolved, "/build/bin/");
+            if (!slash) {
+                slash = strrchr(resolved, '/');
+                if (slash) {
+                    *slash = '\0';
+                    slash = strrchr(resolved, '/');
+                    if (slash && strcmp(slash, "/bin") != 0) slash = NULL;
+                }
+            }
             if (slash) {
                 *slash = '\0';
                 snprintf(rootbuf, sizeof(rootbuf), "%s", resolved);

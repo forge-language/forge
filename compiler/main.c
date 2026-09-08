@@ -41,10 +41,12 @@ static void usage(const char *prog) {
     fprintf(stderr, "  %s --lib <input.fg> -o <lib.a> --header <lib.h>\n", prog);
     fprintf(stderr, "Options:\n");
     fprintf(stderr, "  --emit-c           Emit C instead of a native binary\n");
+    fprintf(stderr, "  -O0/-O1/-O2/-O3    C optimization level (default: -O3)\n");
     fprintf(stderr, "  --forge-root PATH  Project root (include/, build/lib)\n");
     fprintf(stderr, "  --lib-dir PATH     Directory containing libforge_*.a\n");
     fprintf(stderr, "  -I PATH            Extra include directory (also searches for .fg modules)\n");
     fprintf(stderr, "  -l NAME             Link libforge_NAME.a (repeatable)\n");
+    fprintf(stderr, "  -L PATH            Extra library search directory (repeatable)\n");
     fprintf(stderr, "  --cc PATH          C compiler for native output (default: CC, clang, gcc, or cc)\n");
     fprintf(stderr, "  --check            Parse only; exit 0 on success (for LSP / CI)\n");
     fprintf(stderr, "  --symbols-json     Print document symbols as JSON to stdout\n");
@@ -66,7 +68,6 @@ int main(int argc, char **argv) {
 
     ForgeDriverConfig cfg;
     forge_driver_config_init(&cfg);
-    forge_driver_detect_paths(&cfg, argv[0]);
 
 #define FORGE_MAX_CLI_PATHS 32
 #define FORGE_STRINGIFY_(x) #x
@@ -87,9 +88,12 @@ int main(int argc, char **argv) {
             header = argv[++i];
         } else if (strcmp(argv[i], "--emit-c") == 0) {
             cfg.emit_c_only = true;
+        } else if (strlen(argv[i]) == 3 && argv[i][0] == '-' && argv[i][1] == 'O' &&
+                   argv[i][2] >= '0' && argv[i][2] <= '3') {
+            cfg.opt_level = argv[i][2] - '0';
         } else if (strcmp(argv[i], "--forge-root") == 0 && i + 1 < argc) {
             cfg.forge_root = argv[++i];
-            forge_driver_detect_paths(&cfg, argv[0]);
+            cfg.include_dir = NULL;
         } else if (strcmp(argv[i], "--lib-dir") == 0 && i + 1 < argc) {
             cfg.lib_dir = argv[++i];
         } else if (strcmp(argv[i], "--cc") == 0 && i + 1 < argc) {
@@ -123,6 +127,8 @@ int main(int argc, char **argv) {
     cfg.link_lib_count = link_lib_count;
     cfg.extra_lib_dirs = lib_dirs;
     cfg.extra_lib_dir_count = lib_dir_count;
+    /* Resolve defaults after all explicit path options have been parsed. */
+    forge_driver_detect_paths(&cfg, argv[0]);
 
     if (!input) {
         usage(argv[0]);
@@ -147,7 +153,7 @@ int main(int argc, char **argv) {
         .include_dir_count = include_count,
     };
     forge_load_modules(&prog, &mcfg);
-    optimize_program(&prog);
+    if (cfg.opt_level > 0) optimize_program(&prog);
 
     if (symbols_json) {
         forge_emit_symbols_json(&prog, stdout);
