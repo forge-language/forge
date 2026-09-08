@@ -85,13 +85,6 @@ fn json_unquote(raw: string): string {
     return json_get_path_str(wrapped, "v");
 }
 
-fn qshell(s: string): string {
-    let out: string = q();
-    out = str_append_str(out, s);
-    out = str_append_str(out, q());
-    return out;
-}
-
 fn cfg_key(name: string): string {
     return str_append_str("__cfg_", name);
 }
@@ -163,34 +156,6 @@ fn str_to_int(s: string): int {
     }
     if (neg == 1) { return 0 - result; }
     return result;
-}
-
-fn build_forge_cmd(file: string, flag: string): string {
-    let fpath: string = cfg_get("forgePath");
-    if (str_len(fpath) == 0) { fpath = "forge"; }
-    let froot: string = cfg_get("forgeRoot");
-    let flib: string = cfg_get("libDir");
-    let finc: string = cfg_get("includeArgs");
-
-    let cmd: string = qshell(fpath);
-    cmd = str_append_str(cmd, " ");
-    cmd = str_append_str(cmd, qshell(file));
-    cmd = str_append_str(cmd, " ");
-    cmd = str_append_str(cmd, flag);
-    if (str_len(froot) > 0) {
-        cmd = str_append_str(cmd, " --forge-root ");
-        cmd = str_append_str(cmd, qshell(froot));
-    }
-    if (str_len(flib) > 0) {
-        cmd = str_append_str(cmd, " --lib-dir ");
-        cmd = str_append_str(cmd, qshell(flib));
-    }
-    if (str_len(finc) > 0) {
-        cmd = str_append_str(cmd, " ");
-        cmd = str_append_str(cmd, finc);
-    }
-    cmd = str_append_str(cmd, " 2>&1");
-    return cmd;
 }
 
 fn send_raw(obj_json: string): int {
@@ -281,11 +246,21 @@ fn parse_diagnostics(output: string, had_error: int): string {
 }
 
 fn run_diagnostics(uri: string, text: string): int {
-    let tmp: string = "/tmp/forge_lsp_check.fg";
-    fs_write(tmp, text);
-    let cmd: string = build_forge_cmd(tmp, "--check");
-    let status: int = proc_run(cmd);
+    let tmp: string = fs_temp_path("forge-lsp-check", ".fg");
+    if (str_len(tmp) == 0) {
+        publish_diagnostics(uri, "[]");
+        return 1;
+    }
+    if (fs_write(tmp, text) == 0) {
+        fs_remove(tmp);
+        publish_diagnostics(uri, "[]");
+        return 1;
+    }
+    let status: int = proc_run_forge(
+        cfg_get("forgePath"), tmp, "--check", cfg_get("forgeRoot"),
+        cfg_get("libDir"), cfg_get("includePaths"));
     let output: string = proc_output();
+    fs_remove(tmp);
     let had_error: int = 1;
     if (status == 0) { had_error = 0; }
     let diags: string = parse_diagnostics(output, had_error);
@@ -294,11 +269,17 @@ fn run_diagnostics(uri: string, text: string): int {
 }
 
 fn get_symbols_json(text: string): string {
-    let tmp: string = "/tmp/forge_lsp_symbols.fg";
-    fs_write(tmp, text);
-    let cmd: string = build_forge_cmd(tmp, "--symbols-json");
-    proc_run(cmd);
+    let tmp: string = fs_temp_path("forge-lsp-symbols", ".fg");
+    if (str_len(tmp) == 0) { return "[]"; }
+    if (fs_write(tmp, text) == 0) {
+        fs_remove(tmp);
+        return "[]";
+    }
+    proc_run_forge(
+        cfg_get("forgePath"), tmp, "--symbols-json", cfg_get("forgeRoot"),
+        cfg_get("libDir"), cfg_get("includePaths"));
     let output: string = proc_output();
+    fs_remove(tmp);
     let trimmed: string = str_trim(output);
     if (str_len(trimmed) == 0) { return "[]"; }
     if (str_char_at(trimmed, 0) != 91) { return "[]"; }
@@ -431,25 +412,24 @@ fn handle_initialize(id_raw: string, msg: string): int {
     }
 
     let inc_raw: string = json_get_path(msg, "params.initializationOptions.forge.includePaths");
-    let inc_args: string = "";
+    let inc_paths: string = "";
     let inc_count: int = json_array_len(inc_raw);
     let i: int = 0;
     while (i < inc_count) {
         let item_raw: string = json_array_at(inc_raw, i);
         let item: string = json_unquote(item_raw);
-        if (str_len(inc_args) > 0) { inc_args = str_append_str(inc_args, " "); }
-        inc_args = str_append_str(inc_args, "-I ");
-        inc_args = str_append_str(inc_args, qshell(item));
+        if (str_len(inc_paths) > 0) { inc_paths = str_append_str(inc_paths, "\n"); }
+        inc_paths = str_append_str(inc_paths, item);
         i = i + 1;
     }
     if (inc_count == 0 && str_len(root) > 0) {
-        inc_args = str_append_str("-I ", qshell(str_append_str(root, "/examples")));
+        inc_paths = str_append_str(root, "/examples");
     }
 
     cfg_set("forgePath", fpath);
     cfg_set("forgeRoot", froot);
     cfg_set("libDir", flib);
-    cfg_set("includeArgs", inc_args);
+    cfg_set("includePaths", inc_paths);
 
     send_result(id_raw, build_capabilities());
     return 1;
@@ -503,7 +483,7 @@ fn stdlib_fn_list(mod: string): string {
     if (str_eq(mod, "strings")) { return "str_len str_concat str_eq str_sub str_contains str_trim str_char_at str_append str_append_str str_from_int str_reset_arena"; }
     if (str_eq(mod, "math")) { return "abs_i abs_f min_i max_i clamp_i pow_i"; }
     if (str_eq(mod, "time")) { return "time_now_ms sleep_ms"; }
-    if (str_eq(mod, "fs")) { return "fs_read fs_write fs_append fs_exists fs_remove fs_size fs_is_file fs_is_dir fs_mkdir fs_rename fs_copy fs_list_dir"; }
+    if (str_eq(mod, "fs")) { return "fs_read fs_write fs_append fs_exists fs_remove fs_size fs_is_file fs_is_dir fs_mkdir fs_rename fs_copy fs_list_dir fs_temp_path"; }
     if (str_eq(mod, "os")) { return "os_exit os_getenv os_argc os_argv"; }
     if (str_eq(mod, "tcp")) { return "tcp_listen tcp_accept tcp_connect tcp_send tcp_recv tcp_close net_init"; }
     if (str_eq(mod, "udp")) { return "udp_bind udp_send udp_recv udp_peer udp_close"; }
@@ -512,7 +492,7 @@ fn stdlib_fn_list(mod: string): string {
     if (str_eq(mod, "json")) { return "json_get_string json_get_int json_stringify_str json_stringify_int json_get_path json_get_path_str json_get_path_int json_array_len json_array_at"; }
     if (str_eq(mod, "gpu")) { return "gpu_available gpu_backend gpu_device_count gpu_device_name gpu_select_device gpu_alloc gpu_free gpu_copy gpu_sync gpu_fill_i32 gpu_write_i32 gpu_read_i32 gpu_add_i32 gpu_mul_i32 gpu_run_kernel"; }
     if (str_eq(mod, "thread")) { return "thread_cpu_count thread_yield thread_pin thread_self thread_worker_id thread_mutex_create thread_mutex_lock thread_mutex_unlock thread_mutex_destroy thread_join thread_join_all"; }
-    if (str_eq(mod, "proc")) { return "proc_run proc_output"; }
+    if (str_eq(mod, "proc")) { return "proc_run proc_run_forge proc_output"; }
     if (str_eq(mod, "docstore")) { return "doc_set doc_get doc_remove"; }
     if (str_eq(mod, "lsprpc")) { return "lsp_read lsp_write"; }
     return "";
