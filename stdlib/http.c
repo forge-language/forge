@@ -20,6 +20,21 @@
 #include <sys/event.h>
 #endif
 
+/* Sized to typical default fd limits (Linux/macOS default ulimit -n is
+ * 1024-4096); fr_http_accept/fr_http_listen index these arrays directly
+ * by fd, so capacity here must cover the process's fd space. */
+#define FR_HTTP_MAX_REQS 4096
+#define FR_HTTP_MAX_SERVERS 256
+
+/* Header-read timeout for the blocking fr_http_accept() path: caps how
+ * long a slow/idle client can hold recv_until_headers() before we give
+ * up on it. */
+#define FR_HTTP_HEADER_TIMEOUT_MS 30000
+
+/* Hard cap on request body size read via Content-Length, independent of
+ * whatever fit in the initial header recv() call. */
+#define FR_HTTP_MAX_BODY (8 * 1024 * 1024)
+
 typedef struct {
     int64_t sock;
     char method[16];
@@ -34,8 +49,8 @@ typedef struct {
     size_t cached_len;
 } fr_http_server_t;
 
-static fr_http_req_t g_reqs[128];
-static fr_http_server_t g_servers[32];
+static fr_http_req_t g_reqs[FR_HTTP_MAX_REQS];
+static fr_http_server_t g_servers[FR_HTTP_MAX_SERVERS];
 
 static int recv_until_headers(int fd, char *buf, size_t cap) {
     size_t len = 0;
@@ -127,7 +142,7 @@ char *fr_http_post(const char *url, const char *body) {
 
 int64_t fr_http_listen(int64_t port) {
     int64_t sock = fr_tcp_listen(port);
-    if (sock < 0 || sock >= 32) return -1;
+    if (sock < 0 || sock >= FR_HTTP_MAX_SERVERS) return -1;
     g_servers[sock].listen_sock = sock;
     g_servers[sock].port = port;
     g_servers[sock].cached_resp = NULL;
@@ -135,7 +150,30 @@ int64_t fr_http_listen(int64_t port) {
     return sock;
 }
 
-static void parse_http_request(const char *raw, fr_http_req_t *req) {
+/* Case-insensitive scan for a "content-length:" header within
+ * raw[0..header_len), returning its value or -1 if absent. */
+static int64_t find_content_length(const char *raw, size_t header_len) {
+    static const char key[] = "content-length:";
+    size_t key_len = sizeof(key) - 1;
+    if (header_len < key_len) return -1;
+    for (size_t i = 0; i + key_len <= header_len; i++) {
+        size_t k = 0;
+        for (; k < key_len; k++) {
+            char c = raw[i + k];
+            if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+            if (c != key[k]) break;
+        }
+        if (k == key_len) {
+            const char *v = raw + i + key_len;
+            while (*v == ' ') v++;
+            return atoll(v);
+        }
+    }
+    return -1;
+}
+
+static void parse_http_request(const char *raw, size_t raw_len, int64_t client) {
+    fr_http_req_t *req = &g_reqs[client];
     req->method[0] = req->path[0] = '\0';
     req->body = NULL;
 
@@ -146,48 +184,76 @@ static void parse_http_request(const char *raw, fr_http_req_t *req) {
     if (ll >= sizeof(line)) ll = sizeof(line) - 1;
     memcpy(line, raw, ll);
     line[ll] = '\0';
-
     sscanf(line, "%15s %511s", req->method, req->path);
-    const char *body = strstr(raw, "\r\n\r\n");
-    if (body && body[4]) {
-        body += 4;
-        fr_arena_t *arena = fr_arena_tls();
-        req->body = fr_arena_strdup(arena, body);
+
+    const char *body_start = strstr(raw, "\r\n\r\n");
+    if (!body_start) return;
+    int64_t content_length = find_content_length(raw, (size_t)(body_start - raw));
+    body_start += 4;
+
+    size_t have = raw_len - (size_t)(body_start - raw);
+    fr_arena_t *arena = fr_arena_tls();
+
+    if (content_length <= 0) {
+        if (have > 0) req->body = fr_arena_strdup(arena, body_start);
+        return;
     }
+
+    size_t want = (size_t)content_length;
+    if (want > FR_HTTP_MAX_BODY) want = FR_HTTP_MAX_BODY;
+
+    char *full = (char *)fr_arena_alloc(arena, want + 1, 1);
+    if (!full) return;
+
+    size_t copied = have < want ? have : want;
+    memcpy(full, body_start, copied);
+
+    size_t remaining = want - copied;
+    while (remaining > 0) {
+        ssize_t n = fr_sock_recv((int)client, full + copied, remaining);
+        if (n <= 0) break;
+        copied += (size_t)n;
+        remaining -= (size_t)n;
+    }
+    full[copied] = '\0';
+    req->body = full;
 }
 
 int64_t fr_http_accept(int64_t server) {
     int64_t client = fr_tcp_accept(server);
-    if (client < 0 || client >= 128) return -1;
+    if (client < 0 || client >= FR_HTTP_MAX_REQS) return -1;
+
+    fr_sock_set_recv_timeout((int)client, FR_HTTP_HEADER_TIMEOUT_MS);
 
     char buf[4096];
-    if (recv_until_headers((int)client, buf, sizeof(buf)) < 0) {
+    int hdr_len = recv_until_headers((int)client, buf, sizeof(buf));
+    if (hdr_len < 0) {
         fr_tcp_close(client);
         return -1;
     }
 
     g_reqs[client].sock = client;
-    parse_http_request(buf, &g_reqs[client]);
+    parse_http_request(buf, (size_t)hdr_len, client);
     return client;
 }
 
 const char *fr_http_req_method(int64_t req) {
-    if (req < 0 || req >= 128) return "";
+    if (req < 0 || req >= FR_HTTP_MAX_REQS) return "";
     return g_reqs[req].method;
 }
 
 const char *fr_http_req_path(int64_t req) {
-    if (req < 0 || req >= 128) return "";
+    if (req < 0 || req >= FR_HTTP_MAX_REQS) return "";
     return g_reqs[req].path;
 }
 
 const char *fr_http_req_body(int64_t req) {
-    if (req < 0 || req >= 128 || !g_reqs[req].body) return "";
+    if (req < 0 || req >= FR_HTTP_MAX_REQS || !g_reqs[req].body) return "";
     return g_reqs[req].body;
 }
 
 void fr_http_respond(int64_t req, int64_t status, const char *body) {
-    if (req < 0 || req >= 128) return;
+    if (req < 0 || req >= FR_HTTP_MAX_REQS) return;
     const char *text = "OK";
     if (status == 404) text = "Not Found";
     else if (status == 500) text = "Internal Server Error";
@@ -209,7 +275,7 @@ void fr_http_respond(int64_t req, int64_t status, const char *body) {
 }
 
 void fr_http_close(int64_t req) {
-    if (req < 0 || req >= 128) return;
+    if (req < 0 || req >= FR_HTTP_MAX_REQS) return;
     fr_arena_tls_reset();
     fr_tcp_close(g_reqs[req].sock);
     g_reqs[req].sock = -1;
@@ -217,7 +283,7 @@ void fr_http_close(int64_t req) {
 }
 
 void fr_http_server_close(int64_t server) {
-    if (server >= 0 && server < 32) {
+    if (server >= 0 && server < FR_HTTP_MAX_SERVERS) {
         free(g_servers[server].cached_resp);
         g_servers[server].cached_resp = NULL;
         g_servers[server].cached_len = 0;
@@ -226,7 +292,7 @@ void fr_http_server_close(int64_t server) {
 }
 
 void fr_http_prepare(int64_t server, const char *body) {
-    if (server < 0 || server >= 32) return;
+    if (server < 0 || server >= FR_HTTP_MAX_SERVERS) return;
     free(g_servers[server].cached_resp);
     g_servers[server].cached_resp = NULL;
     g_servers[server].cached_len = 0;
@@ -244,7 +310,7 @@ void fr_http_prepare(int64_t server, const char *body) {
 }
 
 void fr_http_serve_prepared(int64_t server) {
-    if (server < 0 || server >= 32) return;
+    if (server < 0 || server >= FR_HTTP_MAX_SERVERS) return;
     fr_http_server_t *srv = &g_servers[server];
     if (!srv->cached_resp || srv->cached_len == 0) return;
 
@@ -378,14 +444,14 @@ static void http_serve_event_loop(int listen_fd, fr_http_server_t *srv) {
 #endif
 
 void fr_http_serve_forever(int64_t server) {
-    if (server < 0 || server >= 32) return;
+    if (server < 0 || server >= FR_HTTP_MAX_SERVERS) return;
     fr_http_server_t *srv = &g_servers[server];
     if (!srv->cached_resp || srv->cached_len == 0) return;
     http_serve_event_loop((int)server, srv);
 }
 
 void fr_http_serve_ok(int64_t server, const char *body) {
-    if (server < 0 || server >= 32) return;
+    if (server < 0 || server >= FR_HTTP_MAX_SERVERS) return;
     fr_http_server_t *srv = &g_servers[server];
     if (!srv->cached_resp) fr_http_prepare(server, body);
     fr_http_serve_prepared(server);
@@ -407,7 +473,7 @@ static void *http_worker_main(void *arg) {
 
 /* Multi-worker REUSEPORT epoll: accept and respond on the same thread. */
 void fr_http_serve_mt(int64_t server, int64_t threads) {
-    if (server < 0 || server >= 32) return;
+    if (server < 0 || server >= FR_HTTP_MAX_SERVERS) return;
     fr_http_server_t *srv = &g_servers[server];
     if (!srv->cached_resp || srv->cached_len == 0) return;
 
@@ -456,7 +522,7 @@ void fr_http_serve_mt(int64_t server, int64_t threads) {
 
 /* REUSEPORT accept threads + M:N scheduler worker pool for response I/O. */
 void fr_http_serve_hybrid(int64_t server, int64_t threads) {
-    if (server < 0 || server >= 32) return;
+    if (server < 0 || server >= FR_HTTP_MAX_SERVERS) return;
     fr_http_server_t *srv = &g_servers[server];
     if (!srv->cached_resp || srv->cached_len == 0) return;
 

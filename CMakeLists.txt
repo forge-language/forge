@@ -46,6 +46,9 @@ add_library(forge_std STATIC
     stdlib/json.c
     stdlib/gpu.c
     stdlib/threading.c
+    stdlib/process.c
+    stdlib/docstore.c
+    stdlib/lsprpc.c
     runtime/arena.c
 )
 target_include_directories(forge_std PUBLIC include)
@@ -143,7 +146,7 @@ foreach(example_file IN LISTS FORGE_EXAMPLES)
         COMMAND forge "${example_file}" -o "${gen_bin}"
             ${FORGE_CC_ARGS}
             --forge-root "${CMAKE_SOURCE_DIR}" --lib-dir "${CMAKE_BINARY_DIR}/lib"
-        DEPENDS forge forge_runtime "${example_file}"
+        DEPENDS forge forge_runtime forge_std "${example_file}"
         COMMENT "Compiling ${example_name}.fg (native)"
         VERBATIM
     )
@@ -159,7 +162,7 @@ add_custom_command(
         --forge-root "${CMAKE_SOURCE_DIR}" --lib-dir "${CMAKE_BINARY_DIR}/lib"
         -I "${CMAKE_BINARY_DIR}/generated/libs"
         -l forge_greeting -l forge_mathutil
-    DEPENDS forge forge_runtime forge_lib_greeting forge_lib_mathutil "${CMAKE_SOURCE_DIR}/examples/use_library.fg"
+    DEPENDS forge forge_runtime forge_std forge_lib_greeting forge_lib_mathutil "${CMAKE_SOURCE_DIR}/examples/use_library.fg"
     COMMENT "Compiling use_library.fg (native)"
     VERBATIM
 )
@@ -181,7 +184,7 @@ add_custom_command(
     COMMAND forge "${FORGE_BOOTSTRAP_SRC}" -o "${FORGE_STAGE1_BIN}"
         ${FORGE_CC_ARGS}
         --forge-root "${CMAKE_SOURCE_DIR}" --lib-dir "${CMAKE_BINARY_DIR}/lib"
-    DEPENDS forge forge_runtime "${FORGE_BOOTSTRAP_SRC}"
+    DEPENDS forge forge_runtime forge_std "${FORGE_BOOTSTRAP_SRC}"
     COMMENT "Bootstrap stage1: C forge compiles compiler.fg"
     VERBATIM
 )
@@ -197,7 +200,7 @@ add_custom_command(
         -o "${FORGE_STAGE2_BIN}"
         "-L${CMAKE_BINARY_DIR}/lib"
         -lforge_std -lforge_runtime -lm
-    DEPENDS forge-stage1 "${FORGE_BOOTSTRAP_SRC}"
+    DEPENDS forge-stage1 forge_std "${FORGE_BOOTSTRAP_SRC}"
     COMMENT "Bootstrap stage2: self-hosted compiler compiles itself"
     VERBATIM
 )
@@ -242,7 +245,7 @@ add_custom_command(
         -lforge_std -lforge_runtime -lm
     COMMAND "${FORGE_STAGE3_BIN}" "${FORGE_BOOTSTRAP_SRC}" -o "${FORGE_STAGE4_C}"
     COMMAND ${CMAKE_COMMAND} -E compare_files "${FORGE_STAGE3_C}" "${FORGE_STAGE4_C}"
-    DEPENDS forge-selfhost "${FORGE_BOOTSTRAP_SRC}"
+    DEPENDS forge-selfhost forge_std "${FORGE_BOOTSTRAP_SRC}"
     COMMENT "Self-host verify: stage3 recompiles compiler.fg to identical output"
     VERBATIM
 )
@@ -256,7 +259,7 @@ add_custom_command(
     COMMAND forge "${FORGE_BENCH_SRC}" -o "${FORGE_BENCH_BIN}"
         ${FORGE_CC_ARGS}
         --forge-root "${CMAKE_SOURCE_DIR}" --lib-dir "${CMAKE_BINARY_DIR}/lib"
-    DEPENDS forge forge_runtime "${FORGE_BENCH_SRC}"
+    DEPENDS forge forge_runtime forge_std "${FORGE_BENCH_SRC}"
     COMMENT "Compiling bench_server.fg (native)"
     VERBATIM
 )
@@ -270,7 +273,7 @@ add_custom_command(
     COMMAND forge "${FORGE_BENCH_HYBRID_SRC}" -o "${FORGE_BENCH_HYBRID_BIN}"
         ${FORGE_CC_ARGS}
         --forge-root "${CMAKE_SOURCE_DIR}" --lib-dir "${CMAKE_BINARY_DIR}/lib"
-    DEPENDS forge forge_runtime "${FORGE_BENCH_HYBRID_SRC}"
+    DEPENDS forge forge_runtime forge_std "${FORGE_BENCH_HYBRID_SRC}"
     COMMENT "Compiling bench_hybrid_server.fg (native)"
     VERBATIM
 )
@@ -284,7 +287,7 @@ add_custom_command(
     COMMAND forge "${FORGE_BENCH_CORO_SRC}" -o "${FORGE_BENCH_CORO_BIN}"
         ${FORGE_CC_ARGS}
         --forge-root "${CMAKE_SOURCE_DIR}" --lib-dir "${CMAKE_BINARY_DIR}/lib"
-    DEPENDS forge forge_runtime "${FORGE_BENCH_CORO_SRC}"
+    DEPENDS forge forge_runtime forge_std "${FORGE_BENCH_CORO_SRC}"
     COMMENT "Compiling bench_coro.fg (process)"
     VERBATIM
 )
@@ -303,7 +306,7 @@ add_custom_command(
     COMMAND forge "${FORGE_WEB_SRC}" -o "${FORGE_WEB_BIN}"
         ${FORGE_CC_ARGS}
         --forge-root "${CMAKE_SOURCE_DIR}" --lib-dir "${CMAKE_BINARY_DIR}/lib"
-    DEPENDS forge forge_runtime "${FORGE_WEB_SRC}"
+    DEPENDS forge forge_runtime forge_std "${FORGE_WEB_SRC}"
     COMMENT "Compiling web_server.fg (native)"
     VERBATIM
 )
@@ -332,3 +335,18 @@ install(FILES
     "${CMAKE_CURRENT_BINARY_DIR}/ForgeConfigVersion.cmake"
     DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/Forge
 )
+
+# Forge-native LSP server (self-hosted, used by editors/vscode, Claude Code's LSP tool,
+# and the Neovim/Vim plugins under editors/)
+set(FORGE_LSP_SRC "${CMAKE_SOURCE_DIR}/tools/forge-lsp/main.fg")
+set(FORGE_LSP_BIN "${CMAKE_BINARY_DIR}/bin/forge-lsp")
+add_custom_command(
+    OUTPUT "${FORGE_LSP_BIN}"
+    COMMAND forge "${FORGE_LSP_SRC}" -o "${FORGE_LSP_BIN}"
+        ${FORGE_CC_ARGS}
+        --forge-root "${CMAKE_SOURCE_DIR}" --lib-dir "${CMAKE_BINARY_DIR}/lib"
+    DEPENDS forge forge_runtime forge_std "${FORGE_LSP_SRC}"
+    COMMENT "Compiling forge-lsp (native LSP server)"
+    VERBATIM
+)
+add_custom_target(forge-lsp ALL DEPENDS "${FORGE_LSP_BIN}")
