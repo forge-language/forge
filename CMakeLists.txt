@@ -150,6 +150,7 @@ add_executable(forge
     compiler/driver.c
 )
 target_include_directories(forge PRIVATE include compiler)
+target_compile_definitions(forge PRIVATE FORGE_VERSION="${PROJECT_VERSION}")
 target_sources(forge PRIVATE runtime/platform.c)
 
 install(TARGETS forge
@@ -161,6 +162,23 @@ install(TARGETS forge_std forge_runtime
 install(DIRECTORY include/forge DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 install(FILES include/forge_runtime.h DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 install(FILES "${CMAKE_BINARY_DIR}/lib/forge.link" DESTINATION ${CMAKE_INSTALL_LIBDIR} OPTIONAL)
+
+include(CTest)
+if(BUILD_TESTING)
+    add_test(NAME forge-cli COMMAND ${CMAKE_COMMAND}
+        "-DFORGE=$<TARGET_FILE:forge>"
+        "-DSOURCE_DIR=${CMAKE_SOURCE_DIR}"
+        "-DTEST_DIR=${CMAKE_BINARY_DIR}/cli-smoke"
+        "-DEXPECTED_VERSION=${PROJECT_VERSION}"
+        -P "${CMAKE_SOURCE_DIR}/cmake/CliSmoke.cmake")
+    if(NOT WIN32 AND NOT CMAKE_CROSSCOMPILING)
+        add_test(NAME forge-external-library COMMAND ${CMAKE_COMMAND}
+            "-DFORGE_BUILD=${CMAKE_BINARY_DIR}"
+            "-DSOURCE_DIR=${CMAKE_SOURCE_DIR}"
+            "-DTEST_DIR=${CMAKE_BINARY_DIR}/external-smoke"
+            -P "${CMAKE_SOURCE_DIR}/cmake/ExternalSmoke.cmake")
+    endif()
+endif()
 
 file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/generated")
 

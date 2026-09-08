@@ -8,7 +8,9 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#define FORGE_VERSION "0.1.0"
+#ifndef FORGE_VERSION
+#define FORGE_VERSION "unknown"
+#endif
 
 typedef struct ForgeStr {
     char *data;

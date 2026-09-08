@@ -33,27 +33,32 @@ static char *read_file(const char *path, size_t *out_len) {
     return buf;
 }
 
-static void usage(const char *prog) {
-    fprintf(stderr, "Forge %s - AOT native compiler\n", FORGE_VERSION);
-    fprintf(stderr, "Usage:\n");
-    fprintf(stderr, "  %s <input.fg> -o <binary>          Compile directly to native executable\n", prog);
-    fprintf(stderr, "  %s <input.fg> -o <output.c> --emit-c   Emit C source only\n", prog);
-    fprintf(stderr, "  %s --lib <input.fg> -o <lib.a> --header <lib.h>\n", prog);
-    fprintf(stderr, "Options:\n");
-    fprintf(stderr, "  --emit-c           Emit C instead of a native binary\n");
-    fprintf(stderr, "  --forge-root PATH  Project root (include/, build/lib)\n");
-    fprintf(stderr, "  --lib-dir PATH     Directory containing libforge_*.a\n");
-    fprintf(stderr, "  -I PATH            Extra include directory (also searches for .fg modules)\n");
-    fprintf(stderr, "  -l NAME             Link libforge_NAME.a (repeatable)\n");
-    fprintf(stderr, "  --cc PATH          C compiler for native output (default: CC, clang, gcc, or cc)\n");
-    fprintf(stderr, "  --check            Parse only; exit 0 on success (for LSP / CI)\n");
-    fprintf(stderr, "  --symbols-json     Print document symbols as JSON to stdout\n");
-    fprintf(stderr, "  --keep-temp        Keep intermediate object files\n");
+static void usage(FILE *stream, const char *prog) {
+    fprintf(stream, "Forge %s - AOT native compiler\n", FORGE_VERSION);
+    fprintf(stream, "Usage:\n");
+    fprintf(stream, "  %s <input.fg> -o <binary>          Compile directly to native executable\n", prog);
+    fprintf(stream, "  %s <input.fg> -o <output.c> --emit-c   Emit C source only\n", prog);
+    fprintf(stream, "  %s --lib <input.fg> -o <lib.a> --header <lib.h>\n", prog);
+    fprintf(stream, "Options:\n");
+    fprintf(stream, "  -h, --help         Show this help\n");
+    fprintf(stream, "  --version          Show compiler version\n");
+    fprintf(stream, "  --emit-c           Emit C instead of a native binary\n");
+    fprintf(stream, "  --forge-root PATH  Project root (include/, build/lib)\n");
+    fprintf(stream, "  --lib-dir PATH     Directory containing libforge_*.a\n");
+    fprintf(stream, "  -I PATH            Extra include directory (also searches for .fg modules)\n");
+    fprintf(stream, "  -l NAME            Link libforge_NAME.a (repeatable)\n");
+    fprintf(stream, "  -L PATH            Extra library search directory (repeatable)\n");
+    fprintf(stream, "  --cc PATH          C compiler for native output (default: CC, clang, gcc, or cc)\n");
+    fprintf(stream, "  --check            Parse only; exit 0 on success (for LSP / CI)\n");
+    fprintf(stream, "  --symbols-json     Print document symbols as JSON to stdout\n");
+    fprintf(stream, "  --keep-temp        Keep intermediate object files\n");
+    fprintf(stream, "  --                 End options (for filenames beginning with '-')\n");
+    fprintf(stream, "Example:\n  %s examples/hello.fg -o hello\n", prog);
 }
 
 int main(int argc, char **argv) {
     if (argc < 2) {
-        usage(argv[0]);
+        usage(stderr, argv[0]);
         return 1;
     }
 
@@ -77,8 +82,38 @@ int main(int argc, char **argv) {
     size_t include_count = 0;
     size_t link_lib_count = 0;
     size_t lib_dir_count = 0;
+    bool end_options = false;
 
     for (int i = 1; i < argc; i++) {
+        if (end_options || argv[i][0] != '-') {
+            if (input) {
+                fprintf(stderr, "forge: multiple input files are not supported: '%s' and '%s'\n", input, argv[i]);
+                return 1;
+            }
+            input = argv[i];
+            continue;
+        }
+        if (strcmp(argv[i], "--") == 0) {
+            end_options = true;
+            continue;
+        }
+        if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
+            usage(stdout, argv[0]);
+            return 0;
+        }
+        if (strcmp(argv[i], "--version") == 0) {
+            printf("Forge %s\n", FORGE_VERSION);
+            return 0;
+        }
+        if (strcmp(argv[i], "-o") == 0 || strcmp(argv[i], "--header") == 0 ||
+            strcmp(argv[i], "--forge-root") == 0 || strcmp(argv[i], "--lib-dir") == 0 ||
+            strcmp(argv[i], "--cc") == 0 || strcmp(argv[i], "-I") == 0 ||
+            strcmp(argv[i], "-l") == 0 || strcmp(argv[i], "-L") == 0) {
+            if (i + 1 >= argc || !argv[i + 1][0] || argv[i + 1][0] == '-') {
+                fprintf(stderr, "forge: option '%s' requires a value (use ./ for paths beginning with '-')\n", argv[i]);
+                return 1;
+            }
+        }
         if (strcmp(argv[i], "--lib") == 0) {
             lib_mode = true;
         } else if (strcmp(argv[i], "-o") == 0 && i + 1 < argc) {
@@ -112,8 +147,9 @@ int main(int argc, char **argv) {
             if (lib_dir_count >= FORGE_MAX_CLI_PATHS)
                 forge_die("too many -L library directories (max " FORGE_STRINGIFY(FORGE_MAX_CLI_PATHS) ")");
             lib_dirs[lib_dir_count++] = argv[++i];
-        } else if (argv[i][0] != '-') {
-            input = argv[i];
+        } else {
+            fprintf(stderr, "forge: unknown option '%s'; use --help for usage\n", argv[i]);
+            return 1;
         }
     }
 
@@ -125,7 +161,7 @@ int main(int argc, char **argv) {
     cfg.extra_lib_dir_count = lib_dir_count;
 
     if (!input) {
-        usage(argv[0]);
+        usage(stderr, argv[0]);
         return 1;
     }
     if (lib_mode && !header) {

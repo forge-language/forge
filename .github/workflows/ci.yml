@@ -29,3 +29,10 @@ jobs:
         run: cmake -B build -DCMAKE_BUILD_TYPE=Release
       - name: Build
         run: cmake --build build --parallel
+      - name: Test compiler CLI
+        working-directory: build
+        run: ctest --output-on-failure
+      - name: Run first program
+        run: |
+          ./build/bin/forge examples/hello.fg -o build/hello
+          ./build/hello
