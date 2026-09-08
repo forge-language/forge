@@ -7,14 +7,82 @@
 
 A **Hybrid Lightweight Process + Coroutine** language — an AOT-compiled language that combines Elixir/Erlang-style lightweight processes with coroutines.
 
-Forge source (`.fg`) is compiled directly to native binaries. The compiler streams generated code to `clang` in memory — no `.c` files are written unless you pass `--emit-c`.
+Forge source (`.fg`) is compiled to native binaries through a C compiler. Generated
+C and object files are temporary and removed after compilation unless you pass
+`--keep-temp`. Use `--emit-c` to inspect the generated C.
+
+## Start here
+
+Try Forge if you want to experiment with process-style concurrency and native
+executables. This monorepo is a development snapshot; evaluate the examples and
+runtime behavior for your workload before depending on it in production.
+
+### Build and run your first program
+
+From this checkout, with CMake 3.16+ and GCC or Clang available:
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --target forge forge_runtime --parallel
+./build/bin/forge --version
+./build/bin/forge examples/hello.fg -o build/hello
+./build/hello
+```
+
+Expected program output:
+
+```text
+Hello from Forge!
+42
+```
+
+The program you just compiled:
+
+```forge
+process main {
+    println("Hello from Forge!");
+    let x: int = 40 + 2;
+    println(x);
+}
+```
+
+This builds the compiler and runtime first. To build the bundled examples too,
+run `cmake --build build --parallel`. On Windows with MinGW, select
+`-G "MinGW Makefiles"` when configuring and use the `.exe` executable paths.
+
+### Next steps
+
+- [Language examples](docs/examples/README.md): functions, messages, coroutines, and ownership.
+- [Web server walkthrough](docs/examples/web_server.md): build with
+  `cmake --build build --target web_server`, then run `./build/bin/web_server`.
+- [Editor setup](docs/lsp.md): language server and VS Code support.
+- [Contributing](CONTRIBUTING.md): build checks and useful bug reports.
+
+Use `./build/bin/forge --help` to see the compiler options. Check syntax without
+creating a binary with `./build/bin/forge --check examples/hello.fg`.
+`--check` parses and loads modules; it does not verify native compilation or
+runtime behavior. Native output requires `-o <binary>`.
+
+### If compilation fails
+
+- **C compiler unavailable:** install GCC or Clang, or pass `--cc /path/to/cc`.
+  `CC` accepts a compiler executable, not a shell command with flags.
+- **Runtime libraries not found:** build `forge_runtime` and run the commands
+  above from the repository root. For a custom build directory, pass
+  `--forge-root /path/to/forge --lib-dir /path/to/custom-build/lib`.
+- **Optional libraries unavailable:** OpenCL, OpenSSL, and liburing are detected
+  at configure time. For a minimal local build, configure with
+  `-DFORGE_ENABLE_GPU=OFF -DFORGE_ENABLE_TLS=OFF -DFORGE_ENABLE_IO_URING=OFF`.
+  This disables those integrations; do not use that build for TLS services.
+- **Unknown option or missing value:** the compiler exits with an error. Use
+  `--help` for supported flags; use `--` before an input filename starting with `-`.
 
 ## Features
 
 - **Direct native compilation** — `forge app.fg -o app` produces an executable in one step
 - **Light Process** — unit for state ownership, isolation, and fault recovery (`process`)
 - **Coroutine** — lightweight execution flows inside a process (`coroutine`, `spawn`, `yield`)
-- **AOT compilation** — `.fg` → native binary (C emitted only with `--emit-c`)
+- **AOT compilation** — `.fg` → native binary (generated C available with `--emit-c`)
 - **Functions** — top-level `fn` with recursion, forward declarations, and return types
 - **Native programs** — `native main` for plain C entry points (bootstrap compiler)
 - **Optimizer** — constant folding and algebraic simplification

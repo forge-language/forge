@@ -14,6 +14,27 @@ Please read this guide before opening a pull request.
 
 For build instructions, see the [README](README.md).
 
+### Local compiler checks
+
+With CMake 3.16+ and a C11 compiler (GCC or Clang):
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
+cmake --build build --target forge forge_runtime --parallel
+(cd build && ctest --output-on-failure)
+./build/bin/forge examples/hello.fg -o build/hello
+./build/hello
+```
+
+CTest covers CLI help, version, argument errors, syntax checking, and document
+symbols. On native Unix builds it also installs Forge into a build-local prefix
+and builds and runs the external-library example. It is not a complete compiler
+or runtime suite. Also compile and run an
+example that exercises your change. `--check` alone does not prove native
+compilation or runtime correctness. For a bug report, include `forge --version`,
+your OS and C compiler, a minimal `.fg` program, the exact command, output, and
+exit code. Remove credentials and private data.
+
 ## Pull request rules
 
 ### Scope
