@@ -7,14 +7,14 @@
 
 A **Hybrid Lightweight Process + Coroutine** language — an AOT-compiled language that combines Elixir/Erlang-style lightweight processes with coroutines.
 
-Forge source (`.fg`) is compiled directly to native binaries. The compiler streams generated code to `clang` in memory — no `.c` files are written unless you pass `--emit-c`.
+Forge source (`.fg`) is compiled to native binaries through generated C. The compiler writes a temporary C file, invokes the configured C compiler, and removes intermediate files by default. Use `--emit-c` to retain C output or `--keep-temp` to keep intermediates.
 
 ## Features
 
 - **Direct native compilation** — `forge app.fg -o app` produces an executable in one step
 - **Light Process** — unit for state ownership, isolation, and fault recovery (`process`)
 - **Coroutine** — lightweight execution flows inside a process (`coroutine`, `spawn`, `yield`)
-- **AOT compilation** — `.fg` → native binary (C emitted only with `--emit-c`)
+- **AOT compilation** — `.fg` → generated C → native binary
 - **Functions** — top-level `fn` with recursion, forward declarations, and return types
 - **Native programs** — `native main` for plain C entry points (bootstrap compiler)
 - **Optimizer** — constant folding and algebraic simplification
@@ -26,9 +26,9 @@ Forge source (`.fg`) is compiled directly to native binaries. The compiler strea
 - **Pattern matching** — `match expr { pat => stmt, _ => default }` on integers
 - **Comptime constants** — `const NAME = expr` folded at compile time
 - **Arena allocator** — bump allocation for HTTP request bodies (per-request reset)
-- **Preemptive scheduling** — 2000-reduction budget per coroutine (BEAM-style)
+- **Scheduling budget** — up to 2000 coroutine steps per worker turn; a running step must return before another coroutine can run on that worker
 - **Ownership** — `own let` for heap strings, `move(x)` and `send proc, tag, move(msg)` for move semantics
-- **Supervisor** — Elixir-style fault-recovery policies
+- **Supervisor declarations** — syntax and child registration are implemented; automatic restart policies are not yet executed by the runtime
 
 ## Requirements
 
@@ -89,6 +89,11 @@ cmake --build build
 ```
 
 ## Run
+
+Choose `-O0` for debugging, or `-O1`, `-O2`, `-O3` for C compiler optimization
+(default: `-O3`). `-O0` also skips Forge's optional AST optimization pass.
+Compare runtime results with `python3 tests/test_regressions.py` and measure a
+small native workload with `python3 benchmark/compare_optimization.py`.
 
 ```bash
 ./build/bin/hello
