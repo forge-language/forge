@@ -155,23 +155,46 @@ int fr_make_temp_path(char *buf, size_t cap, const char *prefix, const char *suf
 #if defined(FORGE_OS_WINDOWS)
     char temp_dir[MAX_PATH];
     if (GetTempPathA(sizeof(temp_dir), temp_dir) == 0) return -1;
-    if (GetTempFileNameA(temp_dir, prefix ? prefix : "frg", 0, buf) == 0) return -1;
-    if (suffix && suffix[0]) {
-        size_t n = strlen(buf);
-        if (n + strlen(suffix) + 1 > cap) return -1;
-        strcat(buf, suffix);
+    char base[MAX_PATH];
+    const char *ext = suffix ? suffix : "";
+    for (;;) {
+        if (GetTempFileNameA(temp_dir, prefix ? prefix : "frg", 0, base) == 0)
+            return -1;
+        if (strlen(base) + strlen(ext) + 1 > cap) {
+            DeleteFileA(base);
+            return -1;
+        }
+        if (!ext[0]) {
+            memcpy(buf, base, strlen(base) + 1);
+            return 0;
+        }
+
+        char candidate[MAX_PATH];
+        if (strlen(base) + strlen(ext) + 1 > sizeof(candidate)) {
+            DeleteFileA(base);
+            return -1;
+        }
+        strcpy(candidate, base);
+        strcat(candidate, ext);
+        if (MoveFileExA(base, candidate, MOVEFILE_FAIL_IF_EXISTS | MOVEFILE_WRITE_THROUGH)) {
+            memcpy(buf, candidate, strlen(candidate) + 1);
+            return 0;
+        }
+        DeleteFileA(base);
     }
-    return 0;
 #else
-    snprintf(buf, cap, "/tmp/%s-XXXXXX", prefix ? prefix : "forge");
+    const char *name = prefix ? prefix : "forge";
+    const char *ext = suffix ? suffix : "";
+    int needed = snprintf(buf, cap, "/tmp/%s-XXXXXX%s", name, ext);
+    if (needed < 0 || (size_t)needed >= cap) return -1;
+#if defined(__GLIBC__) || defined(__APPLE__) || defined(__FreeBSD__) || defined(__NetBSD__) || defined(__OpenBSD__)
+    int fd = mkstemps(buf, (int)strlen(ext));
+#else
+    if (ext[0]) return -1;
     int fd = mkstemp(buf);
+#endif
     if (fd < 0) return -1;
     close(fd);
-    if (suffix && suffix[0]) {
-        size_t n = strlen(buf);
-        if (n + strlen(suffix) + 1 > cap) return -1;
-        strcat(buf, suffix);
-    }
     return 0;
 #endif
 }
