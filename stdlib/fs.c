@@ -185,22 +185,6 @@ char *fr_fs_list_dir(const char *path) {
 
 char *fr_fs_temp_path(const char *prefix, const char *suffix) {
     char path[4096];
-    if (fr_make_temp_path(path, sizeof(path), prefix, "") != 0) return NULL;
-    if (suffix && suffix[0]) {
-        size_t path_len = strlen(path);
-        size_t suffix_len = strlen(suffix);
-        if (path_len + suffix_len + 1 > sizeof(path)) {
-            remove(path);
-            return NULL;
-        }
-        memmove(path + path_len, suffix, suffix_len + 1);
-        char base[4096];
-        memcpy(base, path, path_len);
-        base[path_len] = '\0';
-        if (rename(base, path) != 0) {
-            remove(base);
-            return NULL;
-        }
-    }
+    if (fr_make_temp_path(path, sizeof(path), prefix, suffix) != 0) return NULL;
     return fr_arena_strdup(fr_arena_tls(), path);
 }
