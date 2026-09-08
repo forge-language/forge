@@ -74,34 +74,34 @@ void fr_arena_destroy(fr_arena_t *a) {
 
 void *fr_arena_alloc(fr_arena_t *a, size_t size, size_t align) {
     if (!a || size == 0) return NULL;
+    if (align && (align & (align - 1))) return NULL;
     if (align < sizeof(void *)) align = sizeof(void *);
-
+    size_t required;
+    if (__builtin_add_overflow(size, align - 1, &required)) return NULL;
     fr_arena_block_t *b = a->current;
-
-    /* Overflow-checked bump allocation within the current block. */
-    size_t off = (b->pos + (align - 1)) & ~(align - 1);
-    size_t end;
-    int fits = off >= b->pos && off <= b->cap &&
-               !__builtin_add_overflow(off, size, &end) && end <= b->cap;
-
-    if (!fits) {
-        /* Doesn't fit (or would overflow) -- grow via a NEW block, never by
-         * reallocating/moving the existing one. */
+    for (;;) {
+        /* Align the actual address, not just the offset from data[]. */
+        uintptr_t address = (uintptr_t)(b->data + b->pos);
+        size_t padding = (size_t)(-address & (align - 1));
+        size_t off, end;
+        if (!__builtin_add_overflow(b->pos, padding, &off) &&
+            !__builtin_add_overflow(off, size, &end) && end <= b->cap) {
+            b->pos = end;
+            a->current = b;
+            return b->data + off;
+        }
+        /* Reset retains blocks. Reuse them without losing the tail chain. */
+        if (b->next) {
+            b = b->next;
+            continue;
+        }
         size_t block_cap = a->default_cap;
-        if (size > block_cap) block_cap = size; /* oversized request gets its own block */
-
+        if (required > block_cap) block_cap = required;
         fr_arena_block_t *nb = arena_block_create(block_cap);
         if (!nb) return NULL;
-
-        a->current->next = nb;
-        a->current = nb;
+        b->next = nb;
         b = nb;
-        off = 0;
-        end = size; /* safe: block_cap >= size by construction */
     }
-
-    b->pos = end;
-    return b->data + off;
 }
 
 char *fr_arena_strdup(fr_arena_t *a, const char *s) {

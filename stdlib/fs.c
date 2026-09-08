@@ -186,5 +186,7 @@ char *fr_fs_list_dir(const char *path) {
 char *fr_fs_temp_path(const char *prefix, const char *suffix) {
     char path[4096];
     if (fr_make_temp_path(path, sizeof(path), prefix, suffix) != 0) return NULL;
-    return fr_arena_strdup(fr_arena_tls(), path);
+    char *result = fr_arena_strdup(fr_arena_tls(), path);
+    if (!result) remove(path);
+    return result;
 }

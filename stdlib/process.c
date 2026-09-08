@@ -51,10 +51,11 @@ int64_t fr_proc_run(const char *command) {
 
     size_t total = 0;
     size_t n;
-    while (total < FR_PROC_BUF_SIZE - 1 &&
-           (n = fread(g_proc_output + total, 1, FR_PROC_BUF_SIZE - 1 - total, p)) > 0) {
-        total += n;
-    }
+    char buf[4096];
+    /* Drain even after capture is full, otherwise pclose waits for a child
+     * blocked writing to the full pipe. */
+    while ((n = fread(buf, 1, sizeof(buf), p)) > 0)
+        fr_proc_append_output(buf, &total, n);
     g_proc_output[total] = '\0';
 
     return (int64_t)fr_proc_finish_status(FR_PCLOSE(p));
@@ -119,6 +120,8 @@ int64_t fr_proc_run_forge(const char *forge, const char *file, const char *flag,
     int saved_out = _dup(_fileno(stdout));
     int saved_err = _dup(_fileno(stderr));
     FILE *capture = tmpfile();
+    fflush(stdout);
+    fflush(stderr);
     if (saved_out >= 0 && saved_err >= 0 && capture &&
         _dup2(_fileno(capture), _fileno(stdout)) == 0 &&
         _dup2(_fileno(capture), _fileno(stderr)) == 0) {
@@ -136,6 +139,9 @@ int64_t fr_proc_run_forge(const char *forge, const char *file, const char *flag,
             g_proc_output[total] = '\0';
         }
     }
+    /* Restore descriptors even when only the first redirection succeeded. */
+    if (saved_out >= 0) _dup2(saved_out, _fileno(stdout));
+    if (saved_err >= 0) _dup2(saved_err, _fileno(stderr));
     if (capture) fclose(capture);
     if (saved_out >= 0) _close(saved_out);
     if (saved_err >= 0) _close(saved_err);
@@ -162,7 +168,11 @@ int64_t fr_proc_run_forge(const char *forge, const char *file, const char *flag,
             } while (n > 0 || (n < 0 && errno == EINTR));
             close(pipefd[0]);
             int raw_status = 0;
-            if (waitpid(pid, &raw_status, 0) >= 0)
+            pid_t waited;
+            do {
+                waited = waitpid(pid, &raw_status, 0);
+            } while (waited < 0 && errno == EINTR);
+            if (waited >= 0)
                 status = fr_proc_finish_status(raw_status);
             g_proc_output[total] = '\0';
         } else {
