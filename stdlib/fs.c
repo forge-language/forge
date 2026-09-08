@@ -1,4 +1,6 @@
 #include "forge/fs.h"
+#include "forge/arena.h"
+#include "forge/platform.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -179,4 +181,10 @@ char *fr_fs_list_dir(const char *path) {
     closedir(d);
     return out;
 #endif
+}
+
+char *fr_fs_temp_path(const char *prefix, const char *suffix) {
+    char path[4096];
+    if (fr_make_temp_path(path, sizeof(path), prefix, suffix) != 0) return NULL;
+    return fr_arena_strdup(fr_arena_tls(), path);
 }

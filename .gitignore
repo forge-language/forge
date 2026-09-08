@@ -3,6 +3,9 @@ build/
 *.o
 *.a
 
+# OMC agent local state
+.omc/
+
 # Editor (keep shared workspace settings visible)
 .vscode/*
 !.vscode/settings.json
@@ -41,6 +44,11 @@ benchmark/results.txt
 # Local practice builds
 practice/a.out
 practice/*.o
+
+# Lean 4 proofs
+lean/.lake/
+lean/lake-packages/
+lean/build/
 
 # Node / LSP
 lsp/node_modules/

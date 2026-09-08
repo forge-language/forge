@@ -73,8 +73,10 @@ int main(int argc, char **argv) {
 #define FORGE_STRINGIFY(x) FORGE_STRINGIFY_(x)
     const char *includes[FORGE_MAX_CLI_PATHS];
     const char *link_libs[FORGE_MAX_CLI_PATHS];
+    const char *lib_dirs[FORGE_MAX_CLI_PATHS];
     size_t include_count = 0;
     size_t link_lib_count = 0;
+    size_t lib_dir_count = 0;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--lib") == 0) {
@@ -106,6 +108,10 @@ int main(int argc, char **argv) {
             if (link_lib_count >= FORGE_MAX_CLI_PATHS)
                 forge_die("too many -l link libraries (max " FORGE_STRINGIFY(FORGE_MAX_CLI_PATHS) ")");
             link_libs[link_lib_count++] = argv[++i];
+        } else if (strcmp(argv[i], "-L") == 0 && i + 1 < argc) {
+            if (lib_dir_count >= FORGE_MAX_CLI_PATHS)
+                forge_die("too many -L library directories (max " FORGE_STRINGIFY(FORGE_MAX_CLI_PATHS) ")");
+            lib_dirs[lib_dir_count++] = argv[++i];
         } else if (argv[i][0] != '-') {
             input = argv[i];
         }
@@ -115,6 +121,8 @@ int main(int argc, char **argv) {
     cfg.extra_include_count = include_count;
     cfg.link_libs = link_libs;
     cfg.link_lib_count = link_lib_count;
+    cfg.extra_lib_dirs = lib_dirs;
+    cfg.extra_lib_dir_count = lib_dir_count;
 
     if (!input) {
         usage(argv[0]);

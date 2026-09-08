@@ -290,6 +290,10 @@ void forge_driver_detect_paths(ForgeDriverConfig *cfg, const char *argv0) {
 
     if (!cfg->lib_dir) {
         int n = snprintf(libbuf, sizeof(libbuf), "%s/build/lib", cfg->forge_root);
+        if (n <= 0 || (size_t)n >= sizeof(libbuf) || !fr_path_exists(libbuf)) {
+            /* Installed layouts keep the runtime archives directly under lib. */
+            n = snprintf(libbuf, sizeof(libbuf), "%s/lib", cfg->forge_root);
+        }
         if (n > 0 && (size_t)n < sizeof(libbuf) && fr_path_exists(libbuf)) {
             cfg->lib_dir = libbuf;
         }

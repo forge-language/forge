@@ -13,6 +13,8 @@ typedef struct {
     size_t extra_include_count;
     const char **link_libs;
     size_t link_lib_count;
+    const char **extra_lib_dirs;
+    size_t extra_lib_dir_count;
     bool emit_c_only;
     bool keep_intermediate;
     int opt_level;

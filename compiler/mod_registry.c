@@ -63,6 +63,7 @@ static const ForgeStdFn FS_FNS[] = {
     {"fs_rename", "fr_fs_rename"},
     {"fs_copy", "fr_fs_copy"},
     {"fs_list_dir", "fr_fs_list_dir"},
+    {"fs_temp_path", "fr_fs_temp_path"},
 };
 
 static const ForgeStdFn OS_FNS[] = {
@@ -127,6 +128,28 @@ static const ForgeStdFn JSON_FNS[] = {
     {"json_get_int", "fr_json_get_int"},
     {"json_stringify_str", "fr_json_stringify_str"},
     {"json_stringify_int", "fr_json_stringify_int"},
+    {"json_get_path", "fr_json_get_path_raw"},
+    {"json_get_path_str", "fr_json_get_path_string"},
+    {"json_get_path_int", "fr_json_get_path_int"},
+    {"json_array_len", "fr_json_array_len"},
+    {"json_array_at", "fr_json_array_item"},
+};
+
+static const ForgeStdFn PROCESS_FNS[] = {
+    {"proc_run", "fr_proc_run"},
+    {"proc_run_forge", "fr_proc_run_forge"},
+    {"proc_output", "fr_proc_output"},
+};
+
+static const ForgeStdFn DOCSTORE_FNS[] = {
+    {"doc_set", "fr_doc_set"},
+    {"doc_get", "fr_doc_get"},
+    {"doc_remove", "fr_doc_remove"},
+};
+
+static const ForgeStdFn LSPRPC_FNS[] = {
+    {"lsp_read", "fr_lsp_read_message"},
+    {"lsp_write", "fr_lsp_write_message"},
 };
 
 static const ForgeStdFn THREAD_FNS[] = {
@@ -166,15 +189,18 @@ static const ForgeModule MODULES[] = {
     { .name = { "strings", 7 }, .header = "forge/string.h", .fns = STRING_FNS, .fn_count = 11 },
     { .name = { "math", 4 }, .header = "forge/math.h", .fns = MATH_FNS, .fn_count = 6 },
     { .name = { "time", 4 }, .header = "forge/time.h", .fns = TIME_FNS, .fn_count = 2 },
-    { .name = { "fs", 2 }, .header = "forge/fs.h", .fns = FS_FNS, .fn_count = 12 },
+    { .name = { "fs", 2 }, .header = "forge/fs.h", .fns = FS_FNS, .fn_count = 13 },
     { .name = { "os", 2 }, .header = "forge/os.h", .fns = OS_FNS, .fn_count = 4 },
     { .name = { "tcp", 3 }, .header = "forge/tcp.h", .fns = TCP_FNS, .fn_count = 7 },
     { .name = { "udp", 3 }, .header = "forge/udp.h", .fns = UDP_FNS, .fn_count = 5 },
     { .name = { "http", 4 }, .header = "forge/http.h", .fns = HTTP_FNS, .fn_count = 24 },
     { .name = { "event", 5 }, .header = "forge/event.h", .fns = EVENT_FNS, .fn_count = 2 },
-    { .name = { "json", 4 }, .header = "forge/json.h", .fns = JSON_FNS, .fn_count = 4 },
+    { .name = { "json", 4 }, .header = "forge/json.h", .fns = JSON_FNS, .fn_count = 9 },
     { .name = { "gpu", 3 }, .header = "forge/gpu.h", .fns = GPU_FNS, .fn_count = 15 },
     { .name = { "thread", 6 }, .header = "forge/threading.h", .fns = THREAD_FNS, .fn_count = 11 },
+    { .name = { "proc", 4 }, .header = "forge/process.h", .fns = PROCESS_FNS, .fn_count = 3 },
+    { .name = { "docstore", 8 }, .header = "forge/docstore.h", .fns = DOCSTORE_FNS, .fn_count = 3 },
+    { .name = { "lsprpc", 6 }, .header = "forge/lsprpc.h", .fns = LSPRPC_FNS, .fn_count = 2 },
 };
 
 const ForgeModule *forge_std_module(ForgeStr name) {
