@@ -19,6 +19,14 @@ void fr_arena_reset(fr_arena_t *a);
 fr_arena_t *fr_arena_tls(void);
 void fr_arena_tls_reset(void);
 
+/* Lets a higher layer (the coroutine scheduler) supply a per-coroutine
+ * arena to back fr_arena_tls()/fr_arena_tls_reset() instead of the plain
+ * OS-thread-local one, without arena.c linking against the scheduler.
+ * Registered once by the runtime; NULL (the default) means "no coroutine
+ * context available", falling back to the thread-local arena. */
+typedef fr_arena_t *(*fr_arena_coro_provider_fn)(void);
+void fr_arena_set_coro_provider(fr_arena_coro_provider_fn fn);
+
 #ifdef __cplusplus
 }
 #endif

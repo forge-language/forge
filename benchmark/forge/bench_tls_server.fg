@@ -1,0 +1,11 @@
+// HTTP benchmark: TLS termination (OpenSSL) + REUSEPORT epoll
+
+import http;
+
+native main {
+    let cert: string = "benchmark/tls/cert.pem";
+    let key: string = "benchmark/tls/key.pem";
+    let server: int = http_listen_tls(19088, cert, key);
+    http_prepare(server, "Hello, World");
+    http_serve_tls_mt(server, 0);
+}

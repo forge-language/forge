@@ -97,9 +97,9 @@ void fr_native_queue_destroy(fr_native_queue_t *q) {
     q->lock = NULL;
 }
 
-void fr_native_queue_push(fr_native_queue_t *q, fr_native_fn fn, void *arg) {
+int fr_native_queue_push(fr_native_queue_t *q, fr_native_fn fn, void *arg) {
     fr_native_node_t *node = (fr_native_node_t *)malloc(sizeof(fr_native_node_t));
-    if (!node) return;
+    if (!node) return -1;
     node->fn = fn;
     node->arg = arg;
     node->next = NULL;
@@ -109,6 +109,15 @@ void fr_native_queue_push(fr_native_queue_t *q, fr_native_fn fn, void *arg) {
     q->tail = node;
     q->count++;
     fr_mutex_unlock(q->lock);
+    return 0;
+}
+
+size_t fr_native_queue_count(fr_native_queue_t *q) {
+    if (!q || !q->lock) return 0;
+    fr_mutex_lock(q->lock);
+    size_t n = q->count;
+    fr_mutex_unlock(q->lock);
+    return n;
 }
 
 static fr_native_fn pop_native_locked(fr_native_queue_t *q, void **arg_out, int from_tail) {

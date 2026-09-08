@@ -46,11 +46,17 @@ void fr_platform_init(void);
 void fr_platform_shutdown(void);
 int fr_platform_cpu_count(void);
 void fr_platform_sleep_forever(void);
+/* Raise RLIMIT_NOFILE before high-concurrency servers (best effort). */
+void fr_platform_tune_for_server(void);
+int fr_sock_would_block(int err);
+void fr_platform_sleep_us(int microseconds);
 
 ssize_t fr_sock_send(int fd, const void *buf, size_t len);
 ssize_t fr_sock_recv(int fd, void *buf, size_t len);
 int fr_sock_set_tcp_nodelay(int fd);
 int fr_sock_set_nonblocking(int fd);
+int fr_sock_set_blocking(int fd);
+int fr_sock_set_timeout(int fd, int timeout_ms);
 int fr_sock_set_recv_timeout(int fd, int timeout_ms);
 int fr_sock_accept_nb(int listen_fd);
 void fr_sock_close(int fd);

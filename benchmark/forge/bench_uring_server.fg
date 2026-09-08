@@ -1,0 +1,8 @@
+// HTTP benchmark: io_uring accept/recv/send + REUSEPORT
+
+import http;
+
+native main {
+    let server: int = http_listen(19087);
+    http_prepare(server, "Hello, World");
+    http_serve_uring(server, 0);}

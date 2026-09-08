@@ -1,7 +1,10 @@
 #include "parser.h"
 
+#define FORGE_MAX_EXPR_DEPTH 2000
+
 typedef struct {
     Lexer *lx;
+    int expr_depth;
 } Parser;
 
 static void parser_error(Parser *p, const char *msg) {
@@ -87,6 +90,49 @@ static Expr *parse_postfix(Parser *p, Expr *e) {
     return e;
 }
 
+/* Parses whatever follows an already-consumed identifier token as the start
+ * of an expression: a qualified call/field access (a.b / a.b(...)), a direct
+ * call (a(...)), or a bare identifier. Shared by parse_primary and by
+ * parse_stmt's expression-statement path so both see identical grammar. */
+static Expr *parse_ident_start(Parser *p, ForgeStr name) {
+    if (lexer_match(p->lx, TOK_DOT)) {
+        Token fn = lexer_peek(p->lx);
+        expect(p, TOK_IDENT);
+        if (lexer_match(p->lx, TOK_LPAREN)) {
+            Expr **args = NULL;
+            size_t n = 0, cap = 0;
+            if (!lexer_match(p->lx, TOK_RPAREN)) {
+                do {
+                    if (n == cap) {
+                        cap = cap ? cap * 2 : 4;
+                        args = (Expr **)realloc(args, cap * sizeof(Expr *));
+                    }
+                    args[n++] = parse_expr(p);
+                } while (lexer_match(p->lx, TOK_COMMA));
+                expect(p, TOK_RPAREN);
+            }
+            return expr_qual_call(name, token_str(fn), args, n);
+        }
+        return expr_field(expr_ident(name), token_str(fn));
+    }
+    if (lexer_match(p->lx, TOK_LPAREN)) {
+        Expr **args = NULL;
+        size_t n = 0, cap = 0;
+        if (!lexer_match(p->lx, TOK_RPAREN)) {
+            do {
+                if (n == cap) {
+                    cap = cap ? cap * 2 : 4;
+                    args = (Expr **)realloc(args, cap * sizeof(Expr *));
+                }
+                args[n++] = parse_expr(p);
+            } while (lexer_match(p->lx, TOK_COMMA));
+            expect(p, TOK_RPAREN);
+        }
+        return expr_call(name, args, n);
+    }
+    return expr_ident(name);
+}
+
 static Expr *parse_primary(Parser *p) {
     Token t = lexer_peek(p->lx);
     switch (t.kind) {
@@ -108,42 +154,7 @@ static Expr *parse_primary(Parser *p) {
     case TOK_IDENT: {
         ForgeStr name = token_str(t);
         lexer_next(p->lx);
-        if (lexer_match(p->lx, TOK_DOT)) {
-            Token fn = lexer_peek(p->lx);
-            expect(p, TOK_IDENT);
-            if (lexer_match(p->lx, TOK_LPAREN)) {
-                Expr **args = NULL;
-                size_t n = 0, cap = 0;
-                if (!lexer_match(p->lx, TOK_RPAREN)) {
-                    do {
-                        if (n == cap) {
-                            cap = cap ? cap * 2 : 4;
-                            args = (Expr **)realloc(args, cap * sizeof(Expr *));
-                        }
-                        args[n++] = parse_expr(p);
-                    } while (lexer_match(p->lx, TOK_COMMA));
-                    expect(p, TOK_RPAREN);
-                }
-                return expr_qual_call(name, token_str(fn), args, n);
-            }
-            return expr_field(expr_ident(name), token_str(fn));
-        }
-        if (lexer_match(p->lx, TOK_LPAREN)) {
-            Expr **args = NULL;
-            size_t n = 0, cap = 0;
-            if (!lexer_match(p->lx, TOK_RPAREN)) {
-                do {
-                    if (n == cap) {
-                        cap = cap ? cap * 2 : 4;
-                        args = (Expr **)realloc(args, cap * sizeof(Expr *));
-                    }
-                    args[n++] = parse_expr(p);
-                } while (lexer_match(p->lx, TOK_COMMA));
-                expect(p, TOK_RPAREN);
-            }
-            return expr_call(name, args, n);
-        }
-        return expr_ident(name);
+        return parse_ident_start(p, name);
     }
     case TOK_KW_RECV:
         lexer_next(p->lx);
@@ -163,20 +174,28 @@ static Expr *parse_primary(Parser *p) {
 }
 
 static Expr *parse_unary(Parser *p) {
+    if (++p->expr_depth > FORGE_MAX_EXPR_DEPTH) {
+        forge_die("expression nesting too deep");
+    }
+    Expr *e;
     if (lexer_match(p->lx, TOK_KW_MOVE)) {
-        return parse_postfix(p, expr_move(parse_unary(p)));
+        e = parse_postfix(p, expr_move(parse_unary(p)));
+    } else if (lexer_match(p->lx, TOK_MINUS)) {
+        e = parse_postfix(p, expr_binary(BIN_SUB, expr_int(0), parse_unary(p)));
+    } else if (lexer_match(p->lx, TOK_BANG)) {
+        e = parse_postfix(p, expr_binary(BIN_EQ, parse_unary(p), expr_bool(false)));
+    } else {
+        e = parse_postfix(p, parse_primary(p));
     }
-    if (lexer_match(p->lx, TOK_MINUS)) {
-        return parse_postfix(p, expr_binary(BIN_SUB, expr_int(0), parse_unary(p)));
-    }
-    if (lexer_match(p->lx, TOK_BANG)) {
-        return parse_postfix(p, expr_binary(BIN_EQ, parse_unary(p), expr_bool(false)));
-    }
-    return parse_postfix(p, parse_primary(p));
+    p->expr_depth--;
+    return e;
 }
 
-static Expr *parse_mul(Parser *p) {
-    Expr *left = parse_unary(p);
+/* Each "_from" variant continues precedence-climbing from an already-parsed
+ * left operand. This lets callers that had to hand-parse a leading operand
+ * (e.g. parse_stmt's ident-led expression-statements) rejoin the normal
+ * expression grammar instead of re-implementing a subset of it. */
+static Expr *parse_mul_from(Parser *p, Expr *left) {
     for (;;) {
         if (lexer_match(p->lx, TOK_STAR)) left = expr_binary(BIN_MUL, left, parse_unary(p));
         else if (lexer_match(p->lx, TOK_SLASH)) left = expr_binary(BIN_DIV, left, parse_unary(p));
@@ -186,8 +205,12 @@ static Expr *parse_mul(Parser *p) {
     return left;
 }
 
-static Expr *parse_add(Parser *p) {
-    Expr *left = parse_mul(p);
+static Expr *parse_mul(Parser *p) {
+    return parse_mul_from(p, parse_unary(p));
+}
+
+static Expr *parse_add_from(Parser *p, Expr *left) {
+    left = parse_mul_from(p, left);
     for (;;) {
         if (lexer_match(p->lx, TOK_PLUS)) left = expr_binary(BIN_ADD, left, parse_mul(p));
         else if (lexer_match(p->lx, TOK_MINUS)) left = expr_binary(BIN_SUB, left, parse_mul(p));
@@ -196,8 +219,12 @@ static Expr *parse_add(Parser *p) {
     return left;
 }
 
-static Expr *parse_cmp(Parser *p) {
-    Expr *left = parse_add(p);
+static Expr *parse_add(Parser *p) {
+    return parse_add_from(p, parse_mul(p));
+}
+
+static Expr *parse_cmp_from(Parser *p, Expr *left) {
+    left = parse_add_from(p, left);
     for (;;) {
         if (lexer_match(p->lx, TOK_EQEQ)) left = expr_binary(BIN_EQ, left, parse_add(p));
         else if (lexer_match(p->lx, TOK_NE)) left = expr_binary(BIN_NE, left, parse_add(p));
@@ -210,20 +237,32 @@ static Expr *parse_cmp(Parser *p) {
     return left;
 }
 
-static Expr *parse_and(Parser *p) {
-    Expr *left = parse_cmp(p);
+static Expr *parse_cmp(Parser *p) {
+    return parse_cmp_from(p, parse_add(p));
+}
+
+static Expr *parse_and_from(Parser *p, Expr *left) {
+    left = parse_cmp_from(p, left);
     while (lexer_match(p->lx, TOK_ANDAND)) {
         left = expr_binary(BIN_AND, left, parse_cmp(p));
     }
     return left;
 }
 
-static Expr *parse_or(Parser *p) {
-    Expr *left = parse_and(p);
+static Expr *parse_and(Parser *p) {
+    return parse_and_from(p, parse_cmp(p));
+}
+
+static Expr *parse_or_from(Parser *p, Expr *left) {
+    left = parse_and_from(p, left);
     while (lexer_match(p->lx, TOK_OROR)) {
         left = expr_binary(BIN_OR, left, parse_and(p));
     }
     return left;
+}
+
+static Expr *parse_or(Parser *p) {
+    return parse_or_from(p, parse_and(p));
 }
 
 static Expr *pipe_rhs_to_call(Expr *left, Expr *right, Parser *p) {
@@ -256,16 +295,25 @@ static Expr *pipe_rhs_to_call(Expr *left, Expr *right, Parser *p) {
     return left;
 }
 
-static Expr *parse_pipe(Parser *p) {
-    Expr *left = parse_or(p);
+static Expr *parse_pipe_from(Parser *p, Expr *left) {
+    left = parse_or_from(p, left);
     while (lexer_match(p->lx, TOK_PIPE)) {
         left = pipe_rhs_to_call(left, parse_or(p), p);
     }
     return left;
 }
 
+static Expr *parse_pipe(Parser *p) {
+    return parse_pipe_from(p, parse_or(p));
+}
+
 static Expr *parse_expr(Parser *p) {
-    return parse_pipe(p);
+    if (++p->expr_depth > FORGE_MAX_EXPR_DEPTH) {
+        forge_die("expression nesting too deep");
+    }
+    Expr *e = parse_pipe(p);
+    p->expr_depth--;
+    return e;
 }
 
 static Block *parse_block(Parser *p) {
@@ -462,33 +510,14 @@ static Stmt *parse_stmt(Parser *p) {
             expect(p, TOK_SEMI);
             return s;
         }
-        /* rewind: ident as start of expression */
-        Expr *e = expr_ident(token_str(name));
-        if (lexer_match(p->lx, TOK_LPAREN)) {
-            Expr **args = NULL;
-            size_t n = 0, cap = 0;
-            if (!lexer_match(p->lx, TOK_RPAREN)) {
-                do {
-                    if (n == cap) {
-                        cap = cap ? cap * 2 : 4;
-                        args = (Expr **)realloc(args, cap * sizeof(Expr *));
-                    }
-                    args[n++] = parse_expr(p);
-                } while (lexer_match(p->lx, TOK_COMMA));
-                expect(p, TOK_RPAREN);
-            }
-            e = expr_call(token_str(name), args, n);
-        } else {
-            while (lexer_peek(p->lx).kind == TOK_PLUS || lexer_peek(p->lx).kind == TOK_MINUS ||
-                   lexer_peek(p->lx).kind == TOK_STAR || lexer_peek(p->lx).kind == TOK_SLASH) {
-                Token op = lexer_next(p->lx);
-                BinOp bop = BIN_ADD;
-                if (op.kind == TOK_MINUS) bop = BIN_SUB;
-                else if (op.kind == TOK_STAR) bop = BIN_MUL;
-                else if (op.kind == TOK_SLASH) bop = BIN_DIV;
-                e = expr_binary(bop, e, parse_unary(p));
-            }
-        }
+        /* ident as start of an expression-statement: build the same leading
+         * expression parse_primary would (qualified call/field, direct call,
+         * or bare ident), then rejoin the full expression grammar so any
+         * postfix (.field / [index]) and any binary/logical/pipe operator
+         * is accepted here too, not just a hand-picked subset. */
+        Expr *e = parse_ident_start(p, token_str(name));
+        e = parse_postfix(p, e);
+        e = parse_pipe_from(p, e);
         expect(p, TOK_SEMI);
         return stmt_expr(e);
     }
@@ -731,7 +760,7 @@ static NativeDecl parse_native(Parser *p) {
 }
 
 Program parse_program(Lexer *lx) {
-    Parser p = { lx };
+    Parser p = { lx, 0 };
     Program prog = {0};
 
     while (lexer_peek(p.lx).kind != TOK_EOF) {

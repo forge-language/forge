@@ -1,16 +1,18 @@
 #define _GNU_SOURCE
-#define _GNU_SOURCE
 #include "forge/platform.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #if !defined(FORGE_OS_WINDOWS)
+#include <errno.h>
 #include <fcntl.h>
+#include <sys/resource.h>
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <time.h>
 #include <unistd.h>
 #endif
 
@@ -33,6 +35,56 @@ void fr_platform_shutdown(void) {
         WSACleanup();
         g_net_inited = 0;
     }
+#endif
+}
+
+void fr_platform_tune_for_server(void) {
+#if !defined(FORGE_OS_WINDOWS)
+    struct rlimit rl;
+    if (getrlimit(RLIMIT_NOFILE, &rl) == 0) {
+        rlim_t target = 65536;
+        const char *configured = getenv("FORGE_MAX_FDS");
+        if (configured && configured[0]) {
+            char *end = NULL;
+            unsigned long long value = strtoull(configured, &end, 10);
+            if (end && *end == '\0' && value >= 1024 && value <= 1048576) {
+                target = (rlim_t)value;
+            }
+        }
+        if (rl.rlim_max != RLIM_INFINITY && target > rl.rlim_max) target = rl.rlim_max;
+        if (target > rl.rlim_cur) {
+            rl.rlim_cur = target;
+            (void)setrlimit(RLIMIT_NOFILE, &rl);
+        }
+    }
+    if (getrlimit(RLIMIT_MEMLOCK, &rl) == 0) {
+        rlim_t target = rl.rlim_max;
+        if (target == RLIM_INFINITY || target > (64 * 1024 * 1024)) target = 64 * 1024 * 1024;
+        if (target > rl.rlim_cur) {
+            rl.rlim_cur = target;
+            (void)setrlimit(RLIMIT_MEMLOCK, &rl);
+        }
+    }
+#endif
+}
+
+int fr_sock_would_block(int err) {
+#if defined(FORGE_OS_WINDOWS)
+    return err == WSAEWOULDBLOCK;
+#else
+    return err == EAGAIN || err == EWOULDBLOCK;
+#endif
+}
+
+void fr_platform_sleep_us(int microseconds) {
+    if (microseconds <= 0) return;
+#if defined(FORGE_OS_WINDOWS)
+    Sleep((DWORD)((microseconds + 999) / 1000));
+#else
+    struct timespec ts;
+    ts.tv_sec = (time_t)(microseconds / 1000000);
+    ts.tv_nsec = (long)(microseconds % 1000000) * 1000L;
+    nanosleep(&ts, NULL);
 #endif
 }
 
@@ -75,7 +127,11 @@ ssize_t fr_sock_recv(int fd, void *buf, size_t len) {
 #if defined(FORGE_OS_WINDOWS)
     return recv((SOCKET)fd, (char *)buf, (int)len, 0);
 #else
-    return recv(fd, buf, len, 0);
+    for (;;) {
+        ssize_t n = recv(fd, buf, len, 0);
+        if (n < 0 && errno == EINTR) continue;
+        return n;
+    }
 #endif
 }
 
@@ -108,6 +164,34 @@ int fr_sock_set_nonblocking(int fd) {
     int flags = fcntl(fd, F_GETFL, 0);
     if (flags < 0) return -1;
     return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+#endif
+}
+
+int fr_sock_set_blocking(int fd) {
+#if defined(FORGE_OS_WINDOWS)
+    u_long mode = 0;
+    return ioctlsocket((SOCKET)fd, FIONBIO, &mode);
+#else
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (flags < 0) return -1;
+    return fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
+#endif
+}
+
+int fr_sock_set_timeout(int fd, int timeout_ms) {
+    if (timeout_ms <= 0) return -1;
+#if defined(FORGE_OS_WINDOWS)
+    DWORD timeout = (DWORD)timeout_ms;
+    if (setsockopt((SOCKET)fd, SOL_SOCKET, SO_RCVTIMEO,
+                   (const char *)&timeout, sizeof(timeout)) != 0) return -1;
+    return setsockopt((SOCKET)fd, SOL_SOCKET, SO_SNDTIMEO,
+                      (const char *)&timeout, sizeof(timeout));
+#else
+    struct timeval timeout;
+    timeout.tv_sec = timeout_ms / 1000;
+    timeout.tv_usec = (timeout_ms % 1000) * 1000;
+    if (setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) != 0) return -1;
+    return setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
 #endif
 }
 

@@ -4,15 +4,27 @@ static Expr *fold_binary(BinOp op, Expr *l, Expr *r) {
     if (l->kind == EXPR_INT && r->kind == EXPR_INT) {
         int64_t a = l->as.int_val, b = r->as.int_val, v = 0;
         switch (op) {
-        case BIN_ADD: v = a + b; break;
-        case BIN_SUB: v = a - b; break;
-        case BIN_MUL: v = a * b; break;
+        case BIN_ADD:
+            if (__builtin_add_overflow(a, b, &v)) return expr_binary(op, l, r);
+            break;
+        case BIN_SUB:
+            if (__builtin_sub_overflow(a, b, &v)) return expr_binary(op, l, r);
+            break;
+        case BIN_MUL:
+            if (__builtin_mul_overflow(a, b, &v)) return expr_binary(op, l, r);
+            break;
         case BIN_DIV:
             if (b == 0) return expr_binary(op, l, r);
+            /* INT64_MIN / -1 overflows and traps (SIGFPE) on the divide
+             * instruction; decline to fold just like the div-by-zero case. */
+            if (a == INT64_MIN && b == -1) return expr_binary(op, l, r);
             v = a / b;
             break;
         case BIN_MOD:
             if (b == 0) return expr_binary(op, l, r);
+            /* INT64_MIN % -1 traps for the same reason as the division
+             * above (the CPU computes both via the same instruction). */
+            if (a == INT64_MIN && b == -1) return expr_binary(op, l, r);
             v = a % b;
             break;
         case BIN_EQ: return expr_bool(a == b);
@@ -69,8 +81,25 @@ static Expr *simplify_binary(BinOp op, Expr *l, Expr *r) {
         return l;
     }
     if (op == BIN_MUL) {
-        if (l->kind == EXPR_INT && l->as.int_val == 0) { free(l); return r; }
-        if (r->kind == EXPR_INT && r->as.int_val == 0) { free(r); return l; }
+        /* x * 0 == 0 and 0 * x == 0, but only fold away the non-zero side
+         * when it is side-effect free (literal or plain identifier) --
+         * otherwise dropping it would silently discard e.g. a call. */
+        if (l->kind == EXPR_INT && l->as.int_val == 0) {
+            if (r->kind == EXPR_INT || r->kind == EXPR_FLOAT || r->kind == EXPR_BOOL ||
+                r->kind == EXPR_STRING || r->kind == EXPR_IDENT) {
+                free(r);
+                return l;
+            }
+            return expr_binary(op, l, r);
+        }
+        if (r->kind == EXPR_INT && r->as.int_val == 0) {
+            if (l->kind == EXPR_INT || l->kind == EXPR_FLOAT || l->kind == EXPR_BOOL ||
+                l->kind == EXPR_STRING || l->kind == EXPR_IDENT) {
+                free(l);
+                return r;
+            }
+            return expr_binary(op, l, r);
+        }
         if (l->kind == EXPR_INT && l->as.int_val == 1) { free(l); return r; }
         if (r->kind == EXPR_INT && r->as.int_val == 1) { free(r); return l; }
     }
@@ -89,9 +118,20 @@ static Expr *optimize_expr(Expr *e) {
                 free(e);
                 return folded;
             }
-            e->type = e->as.binary.left->type;
+            switch (e->as.binary.op) {
+            case BIN_EQ: case BIN_NE: case BIN_LT: case BIN_LE:
+            case BIN_GT: case BIN_GE:
+                e->type = forge_type_bool();
+                break;
+            default:
+                e->type = e->as.binary.left->type;
+                break;
+            }
             return e;
         }
+    case EXPR_MOVE:
+        e->as.move_expr = optimize_expr(e->as.move_expr);
+        return e;
     case EXPR_CALL:
         for (size_t i = 0; i < e->as.call.arg_count; i++)
             e->as.call.args[i] = optimize_expr(e->as.call.args[i]);
@@ -115,7 +155,11 @@ static Expr *optimize_expr(Expr *e) {
 
 static void optimize_block(Block *b) {
     if (!b) return;
-    for (Stmt *s = b->first; s; s = s->next) {
+    Stmt *prev = NULL;
+    Stmt *s = b->first;
+    while (s) {
+        Stmt *next = s->next;
+        bool spliced = false;
         switch (s->kind) {
         case STMT_LET:
             s->as.let.init = optimize_expr(s->as.let.init);
@@ -126,14 +170,39 @@ static void optimize_block(Block *b) {
         case STMT_RETURN:
             s->as.ret = optimize_expr(s->as.ret);
             break;
-        case STMT_IF:
+        case STMT_IF: {
             s->as.if_stmt.cond = optimize_expr(s->as.if_stmt.cond);
             optimize_block(s->as.if_stmt.then_br);
             optimize_block(s->as.if_stmt.else_br);
+            if (s->as.if_stmt.cond->kind == EXPR_BOOL) {
+                /* Condition is compile-time known: splice the taken branch
+                 * in place of the whole if statement, dropping the other
+                 * branch entirely instead of emitting both. */
+                Block *taken = s->as.if_stmt.cond->as.bool_val
+                    ? s->as.if_stmt.then_br : s->as.if_stmt.else_br;
+                Stmt *repl_first = taken ? taken->first : NULL;
+                Stmt *repl_last = taken ? taken->last : NULL;
+                if (repl_first) repl_last->next = next;
+                if (prev) prev->next = repl_first ? repl_first : next;
+                else b->first = repl_first ? repl_first : next;
+                if (s == b->last) b->last = repl_last ? repl_last : prev;
+                if (repl_last) prev = repl_last;
+                spliced = true;
+            }
             break;
+        }
         case STMT_WHILE:
             s->as.while_stmt.cond = optimize_expr(s->as.while_stmt.cond);
             optimize_block(s->as.while_stmt.body);
+            if (s->as.while_stmt.cond->kind == EXPR_BOOL &&
+                !s->as.while_stmt.cond->as.bool_val) {
+                /* Condition is compile-time false: the loop body never
+                 * runs, so drop the whole while statement. */
+                if (prev) prev->next = next;
+                else b->first = next;
+                if (s == b->last) b->last = prev;
+                spliced = true;
+            }
             break;
         case STMT_FOR:
             if (s->as.for_stmt.init) optimize_block(&(Block){ s->as.for_stmt.init, s->as.for_stmt.init });
@@ -167,6 +236,8 @@ static void optimize_block(Block *b) {
         default:
             break;
         }
+        if (!spliced) prev = s;
+        s = next;
     }
 }
 

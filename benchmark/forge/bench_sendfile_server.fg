@@ -1,0 +1,9 @@
+// HTTP benchmark: sendfile (memfd) + REUSEPORT epoll
+
+import http;
+
+native main {
+    let server: int = http_listen(19086);
+    http_prepare_sendfile(server, "Hello, World");
+    http_serve_mt(server, 0);
+}

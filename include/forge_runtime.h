@@ -1,6 +1,7 @@
 #ifndef FORGE_RUNTIME_H
 #define FORGE_RUNTIME_H
 
+#include "forge/arena.h"
 #include "forge/io.h"
 #include <stddef.h>
 #include <stdint.h>
@@ -55,7 +56,8 @@ typedef int64_t (*fr_sched_native_fn2_t)(int64_t, int64_t);
 int64_t fr_sched_pool_spawn(fr_sched_native_fn1_t fn, int64_t arg);
 void fr_sched_pool_spawn_indexed(fr_sched_native_fn2_t fn, int64_t count);
 int fr_sched_pool_available(void);
-void fr_sched_pool_submit(fr_scheduler_t *sched, void (*fn)(void *), void *arg);
+int fr_sched_pool_submit(fr_scheduler_t *sched, void (*fn)(void *), void *arg);
+size_t fr_sched_pool_queued(fr_scheduler_t *sched);
 
 fr_process_t *fr_process_create(const char *name);
 void fr_process_destroy(fr_process_t *proc);
@@ -71,6 +73,17 @@ int fr_coro_step(fr_coro_t *coro);
 void fr_coro_set_step(fr_coro_t *coro, int step);
 fr_coro_t *fr_coro_current(void);
 
+/* Per-coroutine scratch arena, lazily created on first use and freed when
+ * the owning process is destroyed. Unlike fr_arena_tls(), this stays bound
+ * to the coroutine across work-stealing moves between worker threads, so a
+ * pointer allocated before a yield remains valid (and un-aliased by an
+ * unrelated coroutine's fr_str_arena_reset()) after the coroutine resumes
+ * on a different OS thread. */
+fr_arena_t *fr_coro_get_arena(fr_coro_t *coro);
+
+/* Returns 1 if the message was enqueued, 0 if the mailbox was full and it
+ * was dropped (payload ownership is released either way -- on drop the
+ * caller's payload is freed here to avoid a leak). */
 void fr_send(fr_process_t *dst, int tag, int64_t value, void *payload, size_t payload_size);
 int fr_try_recv(fr_process_t *self, fr_msg_t *out);
 int fr_recv(fr_process_t *self, fr_msg_t *out);
