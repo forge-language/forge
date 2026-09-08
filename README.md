@@ -332,6 +332,27 @@ process main {
 
 With CMake, use `forge_add_library()` from `cmake/ForgeLibrary.cmake`.
 
+### Out-of-tree Projects
+
+An installed Forge toolchain can be consumed from any external CMake project via
+`find_package(Forge)`:
+
+```bash
+cmake --install build --prefix /path/to/forge-install
+```
+
+```cmake
+find_package(Forge REQUIRED)
+forge_add_library(mylib "${CMAKE_CURRENT_SOURCE_DIR}/mylib.fg")
+forge_add_executable(myapp "${CMAKE_CURRENT_SOURCE_DIR}/main.fg"
+    EXTRA_ARGS -I "${CMAKE_BINARY_DIR}/generated/libs" -l forge_mylib
+    EXTRA_DEPENDS forge_lib_mylib
+)
+```
+
+See [docs/examples/external_project.md](docs/examples/external_project.md) for a full worked example
+(`examples/external-project/`).
+
 ## Language Server (LSP)
 
 Editor support for `.fg` files — syntax highlighting, diagnostics, completion, hover, and document symbols,

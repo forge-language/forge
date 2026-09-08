@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.16)
 project(forge VERSION 0.3.0 LANGUAGES C)
 
+include(GNUInstallDirs)
+
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS OFF)
@@ -108,6 +110,16 @@ add_executable(forge
 )
 target_include_directories(forge PRIVATE include compiler)
 target_sources(forge PRIVATE runtime/platform.c)
+
+install(TARGETS forge
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+)
+install(TARGETS forge_std forge_runtime
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+)
+install(DIRECTORY include/forge DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+install(FILES include/forge_runtime.h DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+install(FILES "${CMAKE_BINARY_DIR}/lib/forge.link" DESTINATION ${CMAKE_INSTALL_LIBDIR} OPTIONAL)
 
 file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/generated")
 
@@ -299,6 +311,30 @@ add_custom_command(
     VERBATIM
 )
 add_custom_target(web_server DEPENDS "${FORGE_WEB_BIN}")
+
+# Install the CMake package config so external, out-of-tree projects can
+# find_package(Forge) and use forge_add_library/forge_add_executable
+# (see cmake/ForgeLibrary.cmake and cmake/ForgeConfig.cmake.in) against an
+# installed toolchain instead of this repo's build tree.
+install(FILES cmake/ForgeLibrary.cmake DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/Forge)
+
+include(CMakePackageConfigHelpers)
+write_basic_package_version_file(
+    "${CMAKE_CURRENT_BINARY_DIR}/ForgeConfigVersion.cmake"
+    VERSION ${PROJECT_VERSION}
+    COMPATIBILITY SameMajorVersion
+)
+configure_package_config_file(
+    cmake/ForgeConfig.cmake.in
+    "${CMAKE_CURRENT_BINARY_DIR}/ForgeConfig.cmake"
+    INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/Forge
+    PATH_VARS CMAKE_INSTALL_BINDIR CMAKE_INSTALL_LIBDIR CMAKE_INSTALL_INCLUDEDIR
+)
+install(FILES
+    "${CMAKE_CURRENT_BINARY_DIR}/ForgeConfig.cmake"
+    "${CMAKE_CURRENT_BINARY_DIR}/ForgeConfigVersion.cmake"
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/Forge
+)
 
 # Forge-native LSP server (self-hosted, used by editors/vscode, Claude Code's LSP tool,
 # and the Neovim/Vim plugins under editors/)

@@ -37,6 +37,7 @@ Runnable tutorials for the example programs under `examples/`. Each page links t
 | [use_module](use_module.md) | Import a `.fg` source module |
 | [mathutil](modules/mathutil.md) | Reusable source module |
 | [use_library](use_library.md) | Prebuilt static libraries |
+| [external_project](external_project.md) | Out-of-tree project via `find_package(Forge)` |
 
 ## Networking
 

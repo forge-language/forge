@@ -171,6 +171,12 @@ static int link_object(const char *obj_path, const char *output_path, const Forg
         snprintf(libdir, n, "-L%s", cfg->lib_dir);
         argv_push(&args, libdir);
     }
+    for (size_t i = 0; i < cfg->extra_lib_dir_count; i++) {
+        size_t n = strlen(cfg->extra_lib_dirs[i]) + 3;
+        char *libdir = (char *)malloc(n);
+        snprintf(libdir, n, "-L%s", cfg->extra_lib_dirs[i]);
+        argv_push(&args, libdir);
+    }
     for (size_t i = 0; i < cfg->link_lib_count; i++) {
         size_t n = strlen(cfg->link_libs[i]) + 3;
         char *lib = (char *)malloc(n);
@@ -229,44 +235,80 @@ void forge_driver_config_init(ForgeDriverConfig *cfg) {
     cfg->opt_level = 3;
 }
 
+/* Returns the start of the rightmost occurrence of `needle` in `haystack`,
+ * or NULL. Used to find the `bin/` segment closest to the executable name,
+ * since an installed path may legitimately contain other `bin` components. */
+static char *find_last_substr(char *haystack, const char *needle) {
+    char *result = NULL;
+    char *p = haystack;
+    while ((p = strstr(p, needle)) != NULL) {
+        result = p;
+        p += 1;
+    }
+    return result;
+}
+
 void forge_driver_detect_paths(ForgeDriverConfig *cfg, const char *argv0) {
     static char rootbuf[PATH_MAX];
     static char libbuf[PATH_MAX];
     static char incbuf[PATH_MAX];
 
-    const char *root = getenv("FORGE_ROOT");
-    if (root && root[0]) {
-        cfg->forge_root = root;
-    } else if (argv0 && argv0[0]) {
+    /* Only auto-detect forge_root when the caller hasn't already pinned one
+     * (e.g. via an explicit --forge-root re-invocation from main.c) — the
+     * argv0 heuristics below are best-effort and must not clobber an
+     * explicit value on a second call. */
+    if (!cfg->forge_root) {
+        const char *root = getenv("FORGE_ROOT");
+        if (root && root[0]) {
+            cfg->forge_root = root;
+        } else if (argv0 && argv0[0]) {
 #if defined(FORGE_OS_WINDOWS)
-        char resolved[PATH_MAX];
-        DWORD n = GetModuleFileNameA(NULL, resolved, (DWORD)sizeof(resolved));
-        if (n > 0 && n < sizeof(resolved)) {
-            char *slash = strstr(resolved, "\\build\\bin\\");
-            if (!slash) slash = strstr(resolved, "/build/bin/");
-            if (slash) {
-                *slash = '\0';
-                snprintf(rootbuf, sizeof(rootbuf), "%s", resolved);
-                fr_path_normalize(rootbuf);
-                cfg->forge_root = rootbuf;
+            char resolved[PATH_MAX];
+            DWORD n = GetModuleFileNameA(NULL, resolved, (DWORD)sizeof(resolved));
+            if (n > 0 && n < sizeof(resolved)) {
+                /* In-tree build layout: <root>/build/bin/forge.exe */
+                char *slash = strstr(resolved, "\\build\\bin\\");
+                if (!slash) slash = strstr(resolved, "/build/bin/");
+                if (!slash) {
+                    /* Installed layout: <prefix>/bin/forge.exe */
+                    char *bin = find_last_substr(resolved, "\\bin\\");
+                    if (!bin) bin = find_last_substr(resolved, "/bin/");
+                    slash = bin;
+                }
+                if (slash) {
+                    *slash = '\0';
+                    snprintf(rootbuf, sizeof(rootbuf), "%s", resolved);
+                    fr_path_normalize(rootbuf);
+                    cfg->forge_root = rootbuf;
+                }
             }
-        }
 #else
-        char resolved[PATH_MAX];
-        if (realpath(argv0, resolved)) {
-            char *slash = strstr(resolved, "/build/bin/");
-            if (slash) {
-                *slash = '\0';
-                snprintf(rootbuf, sizeof(rootbuf), "%s", resolved);
-                cfg->forge_root = rootbuf;
+            char resolved[PATH_MAX];
+            if (realpath(argv0, resolved)) {
+                /* In-tree build layout: <root>/build/bin/forge */
+                char *slash = strstr(resolved, "/build/bin/");
+                if (!slash) {
+                    /* Installed layout: <prefix>/bin/forge */
+                    slash = find_last_substr(resolved, "/bin/");
+                }
+                if (slash) {
+                    *slash = '\0';
+                    snprintf(rootbuf, sizeof(rootbuf), "%s", resolved);
+                    cfg->forge_root = rootbuf;
+                }
             }
-        }
 #endif
+        }
     }
     if (!cfg->forge_root) cfg->forge_root = ".";
 
     if (!cfg->lib_dir) {
+        /* In-tree build layout keeps runtime archives under build/lib;
+         * an installed prefix keeps them directly under lib. */
         snprintf(libbuf, sizeof(libbuf), "%s/build/lib", cfg->forge_root);
+        if (!fr_path_exists(libbuf)) {
+            snprintf(libbuf, sizeof(libbuf), "%s/lib", cfg->forge_root);
+        }
         if (fr_path_exists(libbuf)) cfg->lib_dir = libbuf;
     }
     if (!cfg->include_dir) {

@@ -40,6 +40,7 @@ static void usage(const char *prog) {
     fprintf(stderr, "  --lib-dir PATH     Directory containing libforge_*.a\n");
     fprintf(stderr, "  -I PATH            Extra include directory (also searches for .fg modules)\n");
     fprintf(stderr, "  -l NAME             Link libforge_NAME.a (repeatable)\n");
+    fprintf(stderr, "  -L PATH            Extra library search directory (repeatable)\n");
     fprintf(stderr, "  --cc PATH          C compiler for native output (default: CC, clang, gcc, or cc)\n");
     fprintf(stderr, "  --check            Parse only; exit 0 on success (for LSP / CI)\n");
     fprintf(stderr, "  --symbols-json     Print document symbols as JSON to stdout\n");
@@ -65,8 +66,10 @@ int main(int argc, char **argv) {
 
     const char *includes[32];
     const char *link_libs[32];
+    const char *lib_dirs[32];
     size_t include_count = 0;
     size_t link_lib_count = 0;
+    size_t lib_dir_count = 0;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--lib") == 0) {
@@ -94,6 +97,8 @@ int main(int argc, char **argv) {
             includes[include_count++] = argv[++i];
         } else if (strcmp(argv[i], "-l") == 0 && i + 1 < argc) {
             link_libs[link_lib_count++] = argv[++i];
+        } else if (strcmp(argv[i], "-L") == 0 && i + 1 < argc) {
+            lib_dirs[lib_dir_count++] = argv[++i];
         } else if (argv[i][0] != '-') {
             input = argv[i];
         }
@@ -103,6 +108,8 @@ int main(int argc, char **argv) {
     cfg.extra_include_count = include_count;
     cfg.link_libs = link_libs;
     cfg.link_lib_count = link_lib_count;
+    cfg.extra_lib_dirs = lib_dirs;
+    cfg.extra_lib_dir_count = lib_dir_count;
 
     if (!input) {
         usage(argv[0]);
