@@ -332,19 +332,71 @@ process main {
 
 With CMake, use `forge_add_library()` from `cmake/ForgeLibrary.cmake`.
 
+### Out-of-tree Projects
+
+An installed Forge toolchain can be consumed from any external CMake project via
+`find_package(Forge)`:
+
+```bash
+cmake --install build --prefix /path/to/forge-install
+```
+
+```cmake
+find_package(Forge REQUIRED)
+forge_add_library(mylib "${CMAKE_CURRENT_SOURCE_DIR}/mylib.fg")
+forge_add_executable(myapp "${CMAKE_CURRENT_SOURCE_DIR}/main.fg"
+    EXTRA_ARGS -I "${CMAKE_BINARY_DIR}/generated/libs" -l forge_mylib
+    EXTRA_DEPENDS forge_lib_mylib
+)
+```
+
+See [docs/examples/external_project.md](docs/examples/external_project.md) for a full worked example
+(`examples/external-project/`).
+
 ## Language Server (LSP)
 
-Editor support for `.fg` files — syntax highlighting, diagnostics, completion, hover, and document symbols.
+Editor support for `.fg` files — syntax highlighting, diagnostics, completion, hover, and document symbols,
+served by `forge-lsp`, a self-hosted native Forge program (`tools/forge-lsp/main.fg`).
 
 See [docs/lsp.md](docs/lsp.md) for setup. Quick start:
 
 ```bash
 cmake --build build
-cd lsp && npm install && npm run build
-cd ../editors/vscode && npm install && npm run build
+cd editors/vscode && npm install && npm run build
 ```
 
 Then install the extension from `editors/vscode/` in VS Code or Cursor.
+
+### Claude Code
+
+If you use the [oh-my-claudecode](https://github.com/oh-my-claudecode/oh-my-claudecode) plugin, its
+`lsp_hover`/`lsp_document_symbols`/`lsp_diagnostics`/etc. tools can drive `forge-lsp` directly against
+`.fg` files. Run:
+
+```bash
+./scripts/install-claude-lsp.sh
+```
+
+This patches your installed `oh-my-claudecode` plugin so it recognizes `.fg` files and spawns
+`forge-lsp` for them. It's idempotent — safe to re-run any time, including after a plugin update
+(it detects and skips files that are already patched). Restart Claude Code afterwards so the plugin's
+MCP server process picks up the change.
+
+Note: Claude Code's own built-in `LSP` tool is compiled directly into the `claude` CLI binary rather
+than sourced from this plugin, so this script cannot make *that* tool recognize `.fg` files — only
+the plugin's separately-named `lsp_*` tools.
+
+### Neovim
+
+`editors/nvim/` provides filetype detection, syntax highlighting, and native `forge-lsp` attachment via
+`vim.lsp.start()`. Add it to your `runtimepath` (see `editors/nvim/README.md`) after building
+`forge-lsp`.
+
+### Vim8/Vim9 + vim-lsp
+
+`editors/vim/` provides the same filetype/syntax support plus `forge-lsp` registration for
+[vim-lsp](https://github.com/prabirshrestha/vim-lsp) (installed separately). See
+`editors/vim/README.md`.
 
 ## Project Structure
 
@@ -362,7 +414,8 @@ forge/
 │   ├── phoenix/    # Phoenix (Bandit) benchmark server
 │   └── axum/       # Rust Axum benchmark server
 ├── cmake/          # CMake helpers
-├── lsp/            # TypeScript language server
+├── tools/forge-lsp/ # self-hosted native LSP server (main.fg)
+├── lsp/            # legacy TypeScript language server (unused, kept for reference)
 ├── editors/vscode/ # VS Code / Cursor extension
 └── docs/           # design documents and tutorials
 ```
@@ -383,11 +436,11 @@ forge --lib lib.fg -o libforge_mylib.a --header mylib.h \
 
 ## Contributing
 
-Issues and pull requests are welcome.
+Issues and pull requests are welcome. Please read **[CONTRIBUTING.md](CONTRIBUTING.md)** for PR rules, review expectations, and our AI-friendly contribution policy before opening a PR.
 
 1. Fork the repository and create a branch
 2. Commit your changes
-3. Open a pull request
+3. Open a pull request against `main`
 
 ## License
 

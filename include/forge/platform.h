@@ -57,6 +57,7 @@ int fr_sock_set_tcp_nodelay(int fd);
 int fr_sock_set_nonblocking(int fd);
 int fr_sock_set_blocking(int fd);
 int fr_sock_set_timeout(int fd, int timeout_ms);
+int fr_sock_set_recv_timeout(int fd, int timeout_ms);
 int fr_sock_accept_nb(int listen_fd);
 void fr_sock_close(int fd);
 

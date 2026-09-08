@@ -1,0 +1,6 @@
+import io;
+import greeting_ext;
+
+process main {
+    println(greeting_ext.hello("Forge"));
+}

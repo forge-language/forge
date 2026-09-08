@@ -1,0 +1,64 @@
+name: Bug report
+description: Report incorrect behavior in the compiler, runtime, or tooling
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug. Please include enough detail for someone else to reproduce it.
+
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: Describe the bug clearly.
+      placeholder: The compiler crashes when compiling ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect?
+      placeholder: It should compile without errors.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: Minimal Forge source, commands, or a link to a branch.
+      placeholder: |
+        1. Save as `repro.fg`: ...
+        2. Run: `forge repro.fg -o repro`
+        3. See error: ...
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Forge version or commit
+      placeholder: e.g. main @ abc1234 or v0.3.0
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - Linux
+        - macOS
+        - Windows
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Additional context
+      description: Logs, screenshots, or related PRs/issues.
