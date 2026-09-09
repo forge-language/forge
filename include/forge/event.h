@@ -8,6 +8,10 @@ typedef struct fr_coro fr_coro_t;
 
 typedef void (*fr_event_cb_t)(fr_event_loop_t *loop, int fd, uint32_t events, void *userdata);
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 fr_event_loop_t *fr_event_loop_create(void);
 void fr_event_loop_destroy(fr_event_loop_t *loop);
 int fr_event_loop_add(fr_event_loop_t *loop, int fd, uint32_t events, void *userdata);
@@ -19,5 +23,9 @@ void fr_event_loop_set_cb(fr_event_loop_t *loop, fr_event_cb_t cb);
 #define FR_EVENT_READ  0x001u
 #define FR_EVENT_WRITE 0x002u
 #define FR_EVENT_ONESHOT 0x80000000u
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

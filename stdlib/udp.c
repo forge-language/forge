@@ -14,9 +14,15 @@ typedef struct {
     char peer[64];
 } fr_udp_state_t;
 
+#define UDP_MAX_SOCKETS 256
+
+/* Peer state is indexed by fd. Out-of-range fds get a shared scratch slot
+ * rather than aliasing slot 0, so a socket outside the table cannot overwrite
+ * the peer recorded for a real one. */
 static fr_udp_state_t *udp_state(int64_t sock) {
-    static fr_udp_state_t states[256];
-    if (sock < 0 || sock >= 256) return &states[0];
+    static fr_udp_state_t states[UDP_MAX_SOCKETS];
+    static fr_udp_state_t overflow;
+    if (sock < 0 || sock >= UDP_MAX_SOCKETS) return &overflow;
     return &states[sock];
 }
 
@@ -60,7 +66,8 @@ char *fr_udp_recv(int64_t sock) {
     buf[n] = '\0';
     char ip[INET_ADDRSTRLEN];
     inet_ntop(AF_INET, &addr.sin_addr, ip, sizeof(ip));
-    snprintf(udp_state(sock)->peer, sizeof(udp_state(sock)->peer), "%s:%d", ip, ntohs(addr.sin_port));
+    fr_udp_state_t *st = udp_state(sock);
+    snprintf(st->peer, sizeof(st->peer), "%s:%d", ip, ntohs(addr.sin_port));
     char *out = (char *)malloc((size_t)n + 1);
     if (!out) return NULL;
     memcpy(out, buf, (size_t)n + 1);

@@ -79,10 +79,17 @@ struct fr_process {
 struct fr_scheduler {
     fr_process_t *processes;
     int worker_count;
-    int running;
+    /* running/workers_started/native_pending are read by workers without
+     * sched->lock (the pre-park "is there anything to do?" probe), so they
+     * are atomic to make those reads defined rather than a data race that
+     * the compiler is free to hoist out of the worker loop. native_pending
+     * is still mutated only under sched->lock -- see fr_sched_pool_submit
+     * for why that lock, not the atomicity, is what prevents lost wakeups.
+     * done is touched only by the fr_scheduler_run thread. */
+    atomic_int running;
     int done;
-    int workers_started;
-    int native_pending;
+    atomic_int workers_started;
+    atomic_int native_pending;
     fr_thread_t **workers;
     fr_run_queue_t *worker_queues;
     fr_native_queue_t *native_queues;
@@ -135,10 +142,14 @@ int fr_sched_pool_available(void) {
 }
 
 static int default_worker_count(int n) {
-    if (n > 0) return n;
-    long cpus = fr_platform_cpu_count();
-    return cpus > 0 ? (int)cpus : 4;
+    /* fr_platform_cpu_count() already substitutes a sane default when the OS
+     * won't report a count. */
+    return n > 0 ? n : fr_platform_cpu_count();
 }
+
+/* ---------------------------------------------------------------------- *
+ * Process mailbox -- ring buffer, always accessed under proc->lock.
+ * ---------------------------------------------------------------------- */
 
 static int mailbox_push(fr_mailbox_t *mb, fr_msg_t msg) {
     if (mb->count >= MAILBOX_CAP) return 0;
@@ -155,6 +166,12 @@ static int mailbox_pop(fr_mailbox_t *mb, fr_msg_t *out) {
     mb->count--;
     return 1;
 }
+
+/* ---------------------------------------------------------------------- *
+ * Run-queue handoff. The on_queue CAS is the single gate through which a
+ * coroutine passes from "nobody owns it" to "exactly one worker owns it";
+ * every path that wants to schedule a coroutine goes through enqueue_coro.
+ * ---------------------------------------------------------------------- */
 
 static void enqueue_coro(fr_scheduler_t *sched, fr_coro_t *coro) {
     if (!coro) return;
@@ -196,19 +213,20 @@ static void event_resume_cb(fr_event_loop_t *loop, int fd, uint32_t events, void
     }
 }
 
-#define FR_REDUCTION_BUDGET 2000
+/* ---------------------------------------------------------------------- *
+ * Coroutine execution
+ * ---------------------------------------------------------------------- */
 
-static int run_coro_step(fr_coro_t *c) {
+/* Steps a coroutine that this thread owns, once, and publishes the status it
+ * settled on. Only the owning worker may call this. */
+static void run_coro_step(fr_coro_t *c) {
     tls_current_coro = c;
     fr_coro_status_t st = c->fn(c, c->state);
     tls_current_coro = NULL;
-    c->status = st;
-    if (st == FR_CORO_YIELDED) {
-        c->status = FR_CORO_RUNNING;
-        return 1;
-    }
-    if (st == FR_CORO_WAITING_RECV || st == FR_CORO_WAITING_IO) return 0;
-    return st == FR_CORO_DONE || st == FR_CORO_ERROR ? 1 : 1;
+    /* A yield is a voluntary reschedule point, not a suspension -- the
+     * coroutine is still runnable, so publish RUNNING directly rather than
+     * letting observers see a transient YIELDED. */
+    c->status = (st == FR_CORO_YIELDED) ? FR_CORO_RUNNING : st;
 }
 
 static int process_has_active(fr_process_t *p) {
@@ -244,6 +262,14 @@ static void scan_enqueue_runnable(fr_scheduler_t *sched) {
     }
 }
 
+/* ---------------------------------------------------------------------- *
+ * Worker threads
+ * ---------------------------------------------------------------------- */
+
+/* Steps one coroutine takes before a worker puts it back on the queue, so a
+ * tight non-yielding loop can't monopolise its worker. */
+#define FR_REDUCTION_BUDGET 2000
+
 typedef struct {
     fr_scheduler_t *sched;
     int wid;
@@ -268,10 +294,6 @@ static int sched_has_queued_work(fr_scheduler_t *sched) {
 static int sched_has_work(fr_scheduler_t *sched) {
     if (sched_has_queued_work(sched)) return 1;
     return sched_any_active(sched);
-}
-
-static void run_native_task(fr_native_fn fn, void *arg) {
-    if (fn) fn(arg);
 }
 
 static void *worker_main(void *arg) {
@@ -308,7 +330,7 @@ static void *worker_main(void *arg) {
             if (!nfn) {
                 for (int i = 0; i < sched->worker_count; i++) {
                     if (i == wid) continue;
-                    coro = fr_run_queue_steal(&sched->worker_queues[i], &sched->worker_queues[wid]);
+                    coro = fr_run_queue_steal(&sched->worker_queues[i]);
                     if (coro) break;
                 }
             }
@@ -371,7 +393,7 @@ static void *worker_main(void *arg) {
             fr_mutex_lock(sched->lock);
             if (sched->native_pending > 0) sched->native_pending--;
             fr_mutex_unlock(sched->lock);
-            run_native_task(nfn, narg);
+            nfn(narg);
             continue;
         }
 
@@ -402,22 +424,31 @@ static void *worker_main(void *arg) {
     return NULL;
 }
 
+/* ---------------------------------------------------------------------- *
+ * Scheduler lifecycle
+ * ---------------------------------------------------------------------- */
+
 fr_scheduler_t *fr_scheduler_create(int worker_count) {
     scheduler_register_arena_provider();
     fr_scheduler_t *s = (fr_scheduler_t *)calloc(1, sizeof(fr_scheduler_t));
     if (!s) return NULL;
     s->worker_count = default_worker_count(worker_count);
     s->event_loop = fr_event_loop_create();
-    if (s->event_loop) fr_event_loop_set_cb(s->event_loop, event_resume_cb);
     s->lock = fr_mutex_create();
     s->idle_cond = fr_cond_create();
     s->worker_queues = (fr_run_queue_t *)calloc((size_t)s->worker_count, sizeof(fr_run_queue_t));
     s->native_queues = (fr_native_queue_t *)calloc((size_t)s->worker_count, sizeof(fr_native_queue_t));
     s->workers = (fr_thread_t **)calloc((size_t)s->worker_count, sizeof(fr_thread_t *));
-    if (!s->worker_queues || !s->native_queues || !s->workers) {
+    /* Every one of these is load-bearing: without lock and idle_cond the
+     * mutex and condvar calls degrade to silent no-ops and the workers run
+     * unsynchronized, and without an event loop no coroutine can ever be
+     * woken from fr_await_fd. Fail the whole construction instead. */
+    if (!s->event_loop || !s->lock || !s->idle_cond ||
+        !s->worker_queues || !s->native_queues || !s->workers) {
         fr_scheduler_destroy(s);
         return NULL;
     }
+    fr_event_loop_set_cb(s->event_loop, event_resume_cb);
     for (int i = 0; i < s->worker_count; i++) {
         fr_run_queue_init(&s->worker_queues[i]);
         fr_native_queue_init(&s->native_queues[i]);
@@ -425,10 +456,25 @@ fr_scheduler_t *fr_scheduler_create(int worker_count) {
     return s;
 }
 
+/* Clears `running` and wakes every parked worker.
+ *
+ * The store must happen under sched->lock: a worker parks by re-checking
+ * `running` and the queues while holding that lock and then calling
+ * fr_cond_wait, which only releases the lock atomically as it goes to sleep.
+ * Clearing the flag outside the lock let both the store and the broadcast
+ * land in the window between that re-check and the worker actually being
+ * asleep -- the broadcast then reached no waiter, the worker slept on a flag
+ * that was already false, and the subsequent join hung forever. */
+static void scheduler_signal_stop(fr_scheduler_t *sched) {
+    fr_mutex_lock(sched->lock);
+    atomic_store(&sched->running, 0);
+    fr_mutex_unlock(sched->lock);
+    fr_cond_broadcast(sched->idle_cond);
+}
+
 void fr_scheduler_destroy(fr_scheduler_t *sched) {
     if (!sched) return;
-    sched->running = 0;
-    fr_cond_broadcast(sched->idle_cond);
+    if (sched->lock) scheduler_signal_stop(sched);
     if (sched->workers) {
         for (int i = 0; i < sched->worker_count; i++) {
             if (sched->workers[i]) fr_thread_join(sched->workers[i]);
@@ -482,15 +528,20 @@ void fr_scheduler_start(fr_scheduler_t *sched) {
 
 void fr_scheduler_stop(fr_scheduler_t *sched) {
     if (!sched) return;
-    sched->running = 0;
-    fr_cond_broadcast(sched->idle_cond);
+    scheduler_signal_stop(sched);
     for (int i = 0; i < sched->worker_count; i++) {
         if (sched->workers[i]) fr_thread_join(sched->workers[i]);
         sched->workers[i] = NULL;
     }
-    sched->workers_started = 0;
+    atomic_store(&sched->workers_started, 0);
     if (g_global_sched == sched) g_global_sched = NULL;
 }
+
+/* ---------------------------------------------------------------------- *
+ * Native task pool -- runs plain C callbacks on the same worker threads as
+ * coroutines, for blocking work that has no coroutine representation
+ * (thread.spawn, the io_uring HTTP dispatch path).
+ * ---------------------------------------------------------------------- */
 
 int fr_sched_pool_submit(fr_scheduler_t *sched, void (*fn)(void *), void *arg) {
     if (!sched || !fn) return -1;
@@ -563,7 +614,10 @@ int64_t fr_sched_pool_spawn(fr_sched_native_fn1_t fn, int64_t arg) {
     if (!ctx) return -1;
     ctx->fn = fn;
     ctx->arg = arg;
-    fr_sched_pool_submit(sched, sched_native_trampoline1, ctx);
+    if (fr_sched_pool_submit(sched, sched_native_trampoline1, ctx) != 0) {
+        free(ctx);
+        return -1;
+    }
     return 0;
 }
 
@@ -581,6 +635,7 @@ void fr_sched_pool_spawn_indexed(fr_sched_native_fn2_t fn, int64_t count) {
         return;
     }
 
+    int64_t launched = 0;
     for (int64_t i = 0; i < count; i++) {
         sched_indexed_ctx_t *ctx = (sched_indexed_ctx_t *)calloc(1, sizeof(sched_indexed_ctx_t));
         if (!ctx) break;
@@ -590,10 +645,18 @@ void fr_sched_pool_spawn_indexed(fr_sched_native_fn2_t fn, int64_t count) {
         ctx->lock = lock;
         ctx->remaining = &remaining;
         ctx->done = done;
-        fr_sched_pool_submit(sched, sched_native_trampoline2, ctx);
+        if (fr_sched_pool_submit(sched, sched_native_trampoline2, ctx) != 0) {
+            free(ctx);
+            break;
+        }
+        launched++;
     }
 
     fr_mutex_lock(lock);
+    /* Only the tasks that actually reached a queue will ever run their
+     * trampoline and decrement `remaining`; without discounting the rest,
+     * a single failed submission parks this thread here forever. */
+    remaining -= (int)(count - launched);
     while (remaining > 0) fr_cond_wait(done, lock);
     fr_mutex_unlock(lock);
     fr_mutex_destroy(lock);
@@ -634,6 +697,10 @@ void fr_scheduler_run(fr_scheduler_t *sched) {
     }
     fr_scheduler_stop(sched);
 }
+
+/* ---------------------------------------------------------------------- *
+ * Processes
+ * ---------------------------------------------------------------------- */
 
 fr_process_t *fr_process_create(const char *name) {
     fr_process_t *p = (fr_process_t *)calloc(1, sizeof(fr_process_t));
@@ -679,25 +746,40 @@ void fr_process_set_receive_handler(fr_process_t *proc, fr_coro_fn handler, size
     proc->receive_state_size = state_size;
 }
 
+/* Takes ownership of init_state (freed here, on every path). */
 fr_coro_t *fr_coro_spawn(fr_process_t *proc, fr_coro_fn fn, void *init_state, size_t state_size) {
     fr_coro_t *c = (fr_coro_t *)calloc(1, sizeof(fr_coro_t));
-    if (!c) return NULL;
-    c->id = proc->next_coro_id++;
-    c->fn = fn;
-    c->state_size = state_size;
+    if (!c) {
+        free(init_state);
+        return NULL;
+    }
     c->state = malloc(state_size);
     if (!c->state) {
         free(c);
+        free(init_state);
         return NULL;
     }
     memcpy(c->state, init_state, state_size);
+    free(init_state);
+    c->fn = fn;
+    c->state_size = state_size;
     c->status = FR_CORO_RUNNING;
     c->step = 0;
     c->proc = proc;
     c->await_fd = -1;
+
+    /* proc->coros is walked under proc->lock by process_has_active() and
+     * scan_enqueue_runnable() running on other threads, and a coroutine can
+     * spawn another from whichever worker it happens to be on -- so the
+     * append and the id counter belong under the same lock the readers use.
+     * enqueue_coro stays outside it: the coroutine must be fully linked and
+     * initialised before another worker can pick it up. */
+    fr_mutex_lock(proc->lock);
+    c->id = proc->next_coro_id++;
     if (!proc->coros) proc->coros = proc->coro_tail = c;
     else { proc->coro_tail->next = c; proc->coro_tail = c; }
-    free(init_state);
+    fr_mutex_unlock(proc->lock);
+
     if (proc->sched) enqueue_coro(proc->sched, c);
     return c;
 }
@@ -723,13 +805,24 @@ void fr_coro_set_step(fr_coro_t *coro, int step) {
     if (coro) coro->step = step;
 }
 
+/* Takes ownership of payload: the queued message carries owns_payload, and
+ * the receiver frees it via fr_msg_free_payload. Every path that fails to
+ * hand it over therefore has to free it here rather than leak it. */
 void fr_send(fr_process_t *dst, int tag, int64_t value, void *payload, size_t payload_size) {
-    if (!dst) return;
+    if (!dst) {
+        free(payload);
+        return;
+    }
     fr_msg_t msg = { tag, value, payload, payload_size, payload ? 1 : 0, NULL };
     fr_mutex_lock(dst->lock);
-    mailbox_push(&dst->mailbox, msg);
-    fr_cond_broadcast(dst->msg_cond);
+    int queued = mailbox_push(&dst->mailbox, msg);
+    if (queued) fr_cond_broadcast(dst->msg_cond);
     fr_mutex_unlock(dst->lock);
+    if (!queued) {
+        /* Mailbox full -- the message is dropped. */
+        free(payload);
+        return;
+    }
     if (dst->sched) fr_cond_broadcast(dst->sched->idle_cond);
 }
 
@@ -775,19 +868,32 @@ int64_t fr_await_fd(fr_coro_t *coro, int64_t fd, uint32_t events) {
     return 0;
 }
 
+/* ---------------------------------------------------------------------- *
+ * Supervisors
+ * ---------------------------------------------------------------------- */
+
 fr_process_t *fr_supervisor_create(const char *name, fr_restart_policy_t policy) {
     fr_process_t *p = fr_process_create(name);
+    if (!p) return NULL;
     p->is_supervisor = 1;
     p->restart_policy = policy;
     return p;
 }
 
 void fr_supervisor_add_child(fr_process_t *supervisor, fr_process_t *child) {
-    supervisor->child_count++;
-    supervisor->children = (fr_process_t **)realloc(
-        supervisor->children, supervisor->child_count * sizeof(fr_process_t *));
-    supervisor->children[supervisor->child_count - 1] = child;
+    if (!supervisor) return;
+    size_t n = supervisor->child_count + 1;
+    fr_process_t **grown = (fr_process_t **)realloc(
+        supervisor->children, n * sizeof(fr_process_t *));
+    if (!grown) return; /* keep the existing children rather than losing them */
+    grown[n - 1] = child;
+    supervisor->children = grown;
+    supervisor->child_count = n;
 }
+
+/* ---------------------------------------------------------------------- *
+ * Event-loop bridge exposed to generated code
+ * ---------------------------------------------------------------------- */
 
 int fr_event_poll(fr_scheduler_t *sched, int timeout_ms) {
     if (!sched || !sched->event_loop) return -1;

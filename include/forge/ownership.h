@@ -6,6 +6,10 @@
 
 typedef struct fr_process fr_process_t;
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Take ownership of a heap string (sets *src to NULL). */
 char *fr_own_take(char **src);
 
@@ -14,5 +18,9 @@ void fr_send_move(fr_process_t *dst, int tag, char *payload);
 
 /* Clone for immutable sharing across processes. */
 char *fr_own_clone(const char *s);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

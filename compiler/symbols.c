@@ -11,13 +11,17 @@ static void print_str(FILE *out, ForgeStr s) {
     fputc('"', out);
 }
 
-static void emit_symbol(FILE *out, bool *first, const char *kind, ForgeStr name) {
+static void emit_symbol_begin(FILE *out, bool *first, const char *kind, ForgeStr name) {
     if (!*first) fputs(",", out);
     *first = false;
     fputs("\n  {\"kind\":", out);
     print_str(out, forge_str(kind));
     fputs(",\"name\":", out);
     print_str(out, name);
+}
+
+static void emit_symbol(FILE *out, bool *first, const char *kind, ForgeStr name) {
+    emit_symbol_begin(out, first, kind, name);
     fputs("}", out);
 }
 
@@ -45,16 +49,13 @@ void forge_emit_symbols_json(const Program *prog, FILE *out) {
     }
     for (size_t i = 0; i < prog->module_count; i++) {
         for (size_t j = 0; j < prog->modules[i].fn_count; j++) {
-            if (!first) fputs(",", out);
-            first = false;
-            fputs("\n  {\"kind\":\"function\",\"name\":", out);
-            print_str(out, prog->modules[i].functions[j].name);
+            emit_symbol_begin(out, &first, "function", prog->modules[i].functions[j].name);
             fputs(",\"container\":", out);
             print_str(out, prog->modules[i].name);
             fputs("}", out);
         }
     }
-  for (size_t i = 0; i < prog->process_count; i++) {
+    for (size_t i = 0; i < prog->process_count; i++) {
         ProcessDecl *pd = &prog->processes[i];
         for (size_t j = 0; j < pd->coro_count; j++)
             emit_symbol(out, &first, "coroutine", pd->coros[j].name);

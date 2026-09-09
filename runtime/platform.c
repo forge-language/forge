@@ -16,7 +16,9 @@
 #include <unistd.h>
 #endif
 
+#if defined(FORGE_OS_WINDOWS)
 static int g_net_inited = 0;
+#endif
 
 void fr_platform_init(void) {
 #if defined(FORGE_OS_WINDOWS)
@@ -24,8 +26,6 @@ void fr_platform_init(void) {
         WSADATA wsa;
         if (WSAStartup(MAKEWORD(2, 2), &wsa) == 0) g_net_inited = 1;
     }
-#else
-    (void)g_net_inited;
 #endif
 }
 
@@ -108,18 +108,23 @@ void fr_platform_sleep_forever(void) {
 #endif
 }
 
+/* Sends the whole buffer, looping over short writes. Returns `len` on
+ * success, or the failing send()'s return (0 or -1) -- callers treat any
+ * result other than `len` as a failed send, so the partial byte count is
+ * deliberately not reported. */
 ssize_t fr_sock_send(int fd, const void *buf, size_t len) {
 #if defined(FORGE_OS_WINDOWS)
     return send((SOCKET)fd, (const char *)buf, (int)len, 0);
 #else
-    ssize_t sent = 0;
+    size_t sent = 0;
     const char *p = (const char *)buf;
-    while ((size_t)sent < len) {
-        ssize_t n = send(fd, p + sent, len - (size_t)sent, MSG_NOSIGNAL);
+    while (sent < len) {
+        ssize_t n = send(fd, p + sent, len - sent, MSG_NOSIGNAL);
+        if (n < 0 && errno == EINTR) continue;
         if (n <= 0) return n;
-        sent += n;
+        sent += (size_t)n;
     }
-    return sent;
+    return (ssize_t)sent;
 #endif
 }
 

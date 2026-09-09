@@ -4,6 +4,15 @@
 #include <stdlib.h>
 #include <string.h>
 
+static char *gpu_strdup(const char *s) {
+    if (!s) return NULL;
+    size_t n = strlen(s) + 1;
+    char *out = (char *)fr_arena_alloc(fr_arena_tls(), n, 1);
+    if (!out) return NULL;
+    memcpy(out, s, n);
+    return out;
+}
+
 #if defined(FORGE_HAS_OPENCL)
 #ifdef __APPLE__
 #include <OpenCL/opencl.h>
@@ -43,15 +52,6 @@ static const char *GPU_BUILTIN_SRC =
     "    int i = get_global_id(0);\n"
     "    if (i < n) out[i] = a[i] * b[i];\n"
     "}\n";
-
-static char *gpu_strdup(const char *s) {
-    if (!s) return NULL;
-    size_t n = strlen(s) + 1;
-    char *out = (char *)fr_arena_alloc(fr_arena_tls(), n, 1);
-    if (!out) return NULL;
-    memcpy(out, s, n);
-    return out;
-}
 
 static int gpu_check(cl_int err, const char *where) {
     if (err == CL_SUCCESS) return 0;
@@ -332,15 +332,6 @@ int64_t fr_gpu_run_kernel(const char *source, const char *kernel_name,
 }
 
 #else /* !FORGE_HAS_OPENCL */
-
-static char *gpu_strdup(const char *s) {
-    if (!s) return NULL;
-    size_t n = strlen(s) + 1;
-    char *out = (char *)fr_arena_alloc(fr_arena_tls(), n, 1);
-    if (!out) return NULL;
-    memcpy(out, s, n);
-    return out;
-}
 
 int64_t fr_gpu_available(void) { return 0; }
 const char *fr_gpu_backend(void) { return gpu_strdup("none"); }

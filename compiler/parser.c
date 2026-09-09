@@ -73,6 +73,25 @@ static Stmt *parse_assign(Parser *p, ForgeStr name) {
     return stmt_assign(name, expr_binary(op, expr_ident(name), rhs));
 }
 
+/* Parses a comma-separated, parenthesized argument list. Call after the
+ * opening '(' has already been consumed; consumes the closing ')'. */
+static Expr **parse_arg_list(Parser *p, size_t *out_n) {
+    Expr **args = NULL;
+    size_t n = 0, cap = 0;
+    if (!lexer_match(p->lx, TOK_RPAREN)) {
+        do {
+            if (n == cap) {
+                cap = cap ? cap * 2 : 4;
+                args = (Expr **)realloc(args, cap * sizeof(Expr *));
+            }
+            args[n++] = parse_expr(p);
+        } while (lexer_match(p->lx, TOK_COMMA));
+        expect(p, TOK_RPAREN);
+    }
+    *out_n = n;
+    return args;
+}
+
 static Expr *parse_postfix(Parser *p, Expr *e) {
     for (;;) {
         if (lexer_match(p->lx, TOK_DOT)) {
@@ -99,35 +118,15 @@ static Expr *parse_ident_start(Parser *p, ForgeStr name) {
         Token fn = lexer_peek(p->lx);
         expect(p, TOK_IDENT);
         if (lexer_match(p->lx, TOK_LPAREN)) {
-            Expr **args = NULL;
-            size_t n = 0, cap = 0;
-            if (!lexer_match(p->lx, TOK_RPAREN)) {
-                do {
-                    if (n == cap) {
-                        cap = cap ? cap * 2 : 4;
-                        args = (Expr **)realloc(args, cap * sizeof(Expr *));
-                    }
-                    args[n++] = parse_expr(p);
-                } while (lexer_match(p->lx, TOK_COMMA));
-                expect(p, TOK_RPAREN);
-            }
+            size_t n;
+            Expr **args = parse_arg_list(p, &n);
             return expr_qual_call(name, token_str(fn), args, n);
         }
         return expr_field(expr_ident(name), token_str(fn));
     }
     if (lexer_match(p->lx, TOK_LPAREN)) {
-        Expr **args = NULL;
-        size_t n = 0, cap = 0;
-        if (!lexer_match(p->lx, TOK_RPAREN)) {
-            do {
-                if (n == cap) {
-                    cap = cap ? cap * 2 : 4;
-                    args = (Expr **)realloc(args, cap * sizeof(Expr *));
-                }
-                args[n++] = parse_expr(p);
-            } while (lexer_match(p->lx, TOK_COMMA));
-            expect(p, TOK_RPAREN);
-        }
+        size_t n;
+        Expr **args = parse_arg_list(p, &n);
         return expr_call(name, args, n);
     }
     return expr_ident(name);
@@ -191,74 +190,90 @@ static Expr *parse_unary(Parser *p) {
     return e;
 }
 
+/* One entry in a precedence level's operator table: which token introduces
+ * the operator, and which BinOp it builds. */
+typedef struct {
+    TokenKind tok;
+    BinOp op;
+} BinOpEntry;
+
+/* Left-to-right binary-operator loop shared by every precedence level below:
+ * repeatedly matches any operator in `ops` and folds `left` against a
+ * freshly-parsed right operand (via `next`), until none match. */
+static Expr *parse_binop_level(Parser *p, Expr *left, const BinOpEntry *ops, size_t nops,
+                                Expr *(*next)(Parser *)) {
+    for (;;) {
+        size_t i;
+        for (i = 0; i < nops; i++) {
+            if (lexer_match(p->lx, ops[i].tok)) {
+                left = expr_binary(ops[i].op, left, next(p));
+                break;
+            }
+        }
+        if (i == nops) break;
+    }
+    return left;
+}
+
 /* Each "_from" variant continues precedence-climbing from an already-parsed
  * left operand. This lets callers that had to hand-parse a leading operand
  * (e.g. parse_stmt's ident-led expression-statements) rejoin the normal
  * expression grammar instead of re-implementing a subset of it. */
+static const BinOpEntry MUL_OPS[] = {
+    { TOK_STAR, BIN_MUL }, { TOK_SLASH, BIN_DIV }, { TOK_PERCENT, BIN_MOD },
+};
+
 static Expr *parse_mul_from(Parser *p, Expr *left) {
-    for (;;) {
-        if (lexer_match(p->lx, TOK_STAR)) left = expr_binary(BIN_MUL, left, parse_unary(p));
-        else if (lexer_match(p->lx, TOK_SLASH)) left = expr_binary(BIN_DIV, left, parse_unary(p));
-        else if (lexer_match(p->lx, TOK_PERCENT)) left = expr_binary(BIN_MOD, left, parse_unary(p));
-        else break;
-    }
-    return left;
+    return parse_binop_level(p, left, MUL_OPS, sizeof(MUL_OPS) / sizeof(MUL_OPS[0]), parse_unary);
 }
 
 static Expr *parse_mul(Parser *p) {
     return parse_mul_from(p, parse_unary(p));
 }
 
+static const BinOpEntry ADD_OPS[] = {
+    { TOK_PLUS, BIN_ADD }, { TOK_MINUS, BIN_SUB },
+};
+
 static Expr *parse_add_from(Parser *p, Expr *left) {
     left = parse_mul_from(p, left);
-    for (;;) {
-        if (lexer_match(p->lx, TOK_PLUS)) left = expr_binary(BIN_ADD, left, parse_mul(p));
-        else if (lexer_match(p->lx, TOK_MINUS)) left = expr_binary(BIN_SUB, left, parse_mul(p));
-        else break;
-    }
-    return left;
+    return parse_binop_level(p, left, ADD_OPS, sizeof(ADD_OPS) / sizeof(ADD_OPS[0]), parse_mul);
 }
 
 static Expr *parse_add(Parser *p) {
     return parse_add_from(p, parse_mul(p));
 }
 
+static const BinOpEntry CMP_OPS[] = {
+    { TOK_EQEQ, BIN_EQ }, { TOK_NE, BIN_NE }, { TOK_LT, BIN_LT },
+    { TOK_LE, BIN_LE }, { TOK_GT, BIN_GT }, { TOK_GE, BIN_GE },
+};
+
 static Expr *parse_cmp_from(Parser *p, Expr *left) {
     left = parse_add_from(p, left);
-    for (;;) {
-        if (lexer_match(p->lx, TOK_EQEQ)) left = expr_binary(BIN_EQ, left, parse_add(p));
-        else if (lexer_match(p->lx, TOK_NE)) left = expr_binary(BIN_NE, left, parse_add(p));
-        else if (lexer_match(p->lx, TOK_LT)) left = expr_binary(BIN_LT, left, parse_add(p));
-        else if (lexer_match(p->lx, TOK_LE)) left = expr_binary(BIN_LE, left, parse_add(p));
-        else if (lexer_match(p->lx, TOK_GT)) left = expr_binary(BIN_GT, left, parse_add(p));
-        else if (lexer_match(p->lx, TOK_GE)) left = expr_binary(BIN_GE, left, parse_add(p));
-        else break;
-    }
-    return left;
+    return parse_binop_level(p, left, CMP_OPS, sizeof(CMP_OPS) / sizeof(CMP_OPS[0]), parse_add);
 }
 
 static Expr *parse_cmp(Parser *p) {
     return parse_cmp_from(p, parse_add(p));
 }
 
+static const BinOpEntry AND_OPS[] = { { TOK_ANDAND, BIN_AND } };
+
 static Expr *parse_and_from(Parser *p, Expr *left) {
     left = parse_cmp_from(p, left);
-    while (lexer_match(p->lx, TOK_ANDAND)) {
-        left = expr_binary(BIN_AND, left, parse_cmp(p));
-    }
-    return left;
+    return parse_binop_level(p, left, AND_OPS, sizeof(AND_OPS) / sizeof(AND_OPS[0]), parse_cmp);
 }
 
 static Expr *parse_and(Parser *p) {
     return parse_and_from(p, parse_cmp(p));
 }
 
+static const BinOpEntry OR_OPS[] = { { TOK_OROR, BIN_OR } };
+
 static Expr *parse_or_from(Parser *p, Expr *left) {
     left = parse_and_from(p, left);
-    while (lexer_match(p->lx, TOK_OROR)) {
-        left = expr_binary(BIN_OR, left, parse_and(p));
-    }
-    return left;
+    return parse_binop_level(p, left, OR_OPS, sizeof(OR_OPS) / sizeof(OR_OPS[0]), parse_and);
 }
 
 static Expr *parse_or(Parser *p) {
@@ -457,18 +472,8 @@ static Stmt *parse_stmt(Parser *p) {
         Token name = lexer_peek(p->lx);
         expect(p, TOK_IDENT);
         expect(p, TOK_LPAREN);
-        Expr **args = NULL;
-        size_t n = 0, cap = 0;
-        if (!lexer_match(p->lx, TOK_RPAREN)) {
-            do {
-                if (n == cap) {
-                    cap = cap ? cap * 2 : 4;
-                    args = (Expr **)realloc(args, cap * sizeof(Expr *));
-                }
-                args[n++] = parse_expr(p);
-            } while (lexer_match(p->lx, TOK_COMMA));
-            expect(p, TOK_RPAREN);
-        }
+        size_t n;
+        Expr **args = parse_arg_list(p, &n);
         expect(p, TOK_SEMI);
         return stmt_spawn(token_str(name), args, n);
     }

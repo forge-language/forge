@@ -3,6 +3,10 @@
 
 #include <stdint.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 int64_t fr_str_len(const char *s);
 char *fr_str_concat(const char *a, const char *b);
 int fr_str_eq(const char *a, const char *b);
@@ -14,5 +18,9 @@ char *fr_str_append(const char *s, int64_t ch);
 char *fr_str_append_str(const char *s, const char *t);
 char *fr_str_from_int(int64_t n);
 void fr_str_arena_reset(void);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

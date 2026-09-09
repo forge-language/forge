@@ -3,6 +3,10 @@
 
 #include <stdint.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 void fr_print_int(int64_t value);
 void fr_print_str(const char *value);
 void fr_println(void);
@@ -25,5 +29,9 @@ char *fr_io_read_fd(int64_t fd, int64_t max_bytes);
 int64_t fr_io_stdin_fd(void);
 int64_t fr_io_stdout_fd(void);
 int64_t fr_io_stderr_fd(void);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

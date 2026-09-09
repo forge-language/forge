@@ -3,6 +3,10 @@
 
 #include <stdint.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 int64_t fr_tcp_listen(int64_t port);
 int64_t fr_tcp_listen_reuseport(int64_t port);
 int64_t fr_tcp_accept(int64_t sock);
@@ -11,5 +15,9 @@ int64_t fr_tcp_send(int64_t sock, const char *data);
 char *fr_tcp_recv(int64_t sock);
 void fr_tcp_close(int64_t sock);
 void fr_net_init(void);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

@@ -3,6 +3,10 @@
 
 #include <stdint.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Device discovery */
 int64_t fr_gpu_available(void);
 const char *fr_gpu_backend(void);
@@ -28,5 +32,9 @@ int64_t fr_gpu_mul_i32(int64_t a, int64_t b, int64_t out, int64_t count);
 /* Custom OpenCL kernel: three int32 buffers + element count */
 int64_t fr_gpu_run_kernel(const char *source, const char *kernel_name,
                           int64_t arg0, int64_t arg1, int64_t arg2, int64_t count);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

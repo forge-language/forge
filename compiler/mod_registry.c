@@ -184,27 +184,42 @@ static const ForgeStdFn GPU_FNS[] = {
     {"gpu_run_kernel", "fr_gpu_run_kernel"},
 };
 
+#define FORGE_ARRAY_LEN(a) (sizeof(a) / sizeof((a)[0]))
+
+/* Deriving both the module name's length and the table's entry count from the
+ * literals keeps them from drifting: a hand-written `fn_count` silently hides
+ * the tail of a table the moment someone appends to it. */
+#define FORGE_MODULE(mod_name, hdr, table)                                     \
+    { .name = { (char *)mod_name, sizeof(mod_name) - 1 },                      \
+      .header = hdr, .fns = table, .fn_count = FORGE_ARRAY_LEN(table) }
+
 static const ForgeModule MODULES[] = {
-    { .name = { "io", 2 }, .header = "forge/io.h", .fns = IO_FNS, .fn_count = 17 },
-    { .name = { "strings", 7 }, .header = "forge/string.h", .fns = STRING_FNS, .fn_count = 11 },
-    { .name = { "math", 4 }, .header = "forge/math.h", .fns = MATH_FNS, .fn_count = 6 },
-    { .name = { "time", 4 }, .header = "forge/time.h", .fns = TIME_FNS, .fn_count = 2 },
-    { .name = { "fs", 2 }, .header = "forge/fs.h", .fns = FS_FNS, .fn_count = 13 },
-    { .name = { "os", 2 }, .header = "forge/os.h", .fns = OS_FNS, .fn_count = 4 },
-    { .name = { "tcp", 3 }, .header = "forge/tcp.h", .fns = TCP_FNS, .fn_count = 7 },
-    { .name = { "udp", 3 }, .header = "forge/udp.h", .fns = UDP_FNS, .fn_count = 5 },
-    { .name = { "http", 4 }, .header = "forge/http.h", .fns = HTTP_FNS, .fn_count = 24 },
-    { .name = { "event", 5 }, .header = "forge/event.h", .fns = EVENT_FNS, .fn_count = 2 },
-    { .name = { "json", 4 }, .header = "forge/json.h", .fns = JSON_FNS, .fn_count = 9 },
-    { .name = { "gpu", 3 }, .header = "forge/gpu.h", .fns = GPU_FNS, .fn_count = 15 },
-    { .name = { "thread", 6 }, .header = "forge/threading.h", .fns = THREAD_FNS, .fn_count = 11 },
-    { .name = { "proc", 4 }, .header = "forge/process.h", .fns = PROCESS_FNS, .fn_count = 3 },
-    { .name = { "docstore", 8 }, .header = "forge/docstore.h", .fns = DOCSTORE_FNS, .fn_count = 3 },
-    { .name = { "lsprpc", 6 }, .header = "forge/lsprpc.h", .fns = LSPRPC_FNS, .fn_count = 2 },
+    FORGE_MODULE("io", "forge/io.h", IO_FNS),
+    FORGE_MODULE("strings", "forge/string.h", STRING_FNS),
+    FORGE_MODULE("math", "forge/math.h", MATH_FNS),
+    FORGE_MODULE("time", "forge/time.h", TIME_FNS),
+    FORGE_MODULE("fs", "forge/fs.h", FS_FNS),
+    FORGE_MODULE("os", "forge/os.h", OS_FNS),
+    FORGE_MODULE("tcp", "forge/tcp.h", TCP_FNS),
+    FORGE_MODULE("udp", "forge/udp.h", UDP_FNS),
+    FORGE_MODULE("http", "forge/http.h", HTTP_FNS),
+    FORGE_MODULE("event", "forge/event.h", EVENT_FNS),
+    FORGE_MODULE("json", "forge/json.h", JSON_FNS),
+    FORGE_MODULE("gpu", "forge/gpu.h", GPU_FNS),
+    FORGE_MODULE("thread", "forge/threading.h", THREAD_FNS),
+    FORGE_MODULE("proc", "forge/process.h", PROCESS_FNS),
+    FORGE_MODULE("docstore", "forge/docstore.h", DOCSTORE_FNS),
+    FORGE_MODULE("lsprpc", "forge/lsprpc.h", LSPRPC_FNS),
 };
 
+/* `a` is a slice and need not be NUL-terminated; `b` is a C string. Avoids the
+ * strlen(b) that comparing via forge_str(b) would cost on every probe. */
+static bool str_eq_cstr(ForgeStr a, const char *b) {
+    return strncmp(a.data, b, a.len) == 0 && b[a.len] == '\0';
+}
+
 const ForgeModule *forge_std_module(ForgeStr name) {
-    for (size_t i = 0; i < sizeof(MODULES) / sizeof(MODULES[0]); i++) {
+    for (size_t i = 0; i < FORGE_ARRAY_LEN(MODULES); i++) {
         if (forge_str_eq(MODULES[i].name, name)) return &MODULES[i];
     }
     return NULL;
@@ -215,8 +230,7 @@ const char *forge_std_c_name(ForgeStr fr_name, ForgeStr *imports, size_t import_
         const ForgeModule *mod = forge_std_module(imports[i]);
         if (!mod) continue;
         for (size_t j = 0; j < mod->fn_count; j++) {
-            ForgeStr fn = forge_str(mod->fns[j].fr_name);
-            if (forge_str_eq(fn, fr_name)) return mod->fns[j].c_name;
+            if (str_eq_cstr(fr_name, mod->fns[j].fr_name)) return mod->fns[j].c_name;
         }
     }
     return NULL;

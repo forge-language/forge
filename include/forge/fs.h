@@ -3,6 +3,10 @@
 
 #include <stdint.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 char *fr_fs_read(const char *path);
 int fr_fs_write(const char *path, const char *content);
 int fr_fs_append(const char *path, const char *content);
@@ -16,5 +20,9 @@ int fr_fs_rename(const char *old_path, const char *new_path);
 int fr_fs_copy(const char *src, const char *dst);
 char *fr_fs_list_dir(const char *path);
 char *fr_fs_temp_path(const char *prefix, const char *suffix);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

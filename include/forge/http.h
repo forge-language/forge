@@ -3,6 +3,10 @@
 
 #include <stdint.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 char *fr_http_get(const char *url);
 char *fr_http_post(const char *url, const char *body);
 int64_t fr_http_listen(int64_t port);
@@ -30,5 +34,9 @@ void fr_http_serve_routing_mt(int64_t port, int64_t threads);
 int fr_http_has_sendfile(void);
 int fr_http_has_uring(void);
 int fr_http_has_tls(void);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif

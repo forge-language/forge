@@ -19,6 +19,12 @@
 
 #define FR_EVENT_ONESHOT 0x80000000u
 
+/* Descriptors the select() fallback backend can track at once. */
+#define FR_EVENT_MAX_ENTRIES 128
+
+/* Descriptors reported per poll by the epoll/kqueue backends. */
+#define FR_EVENT_BATCH 64
+
 struct fr_event_entry {
     int fd;
     uint32_t events;
@@ -32,7 +38,7 @@ struct fr_event_loop {
 #elif defined(FORGE_OS_MACOS)
     int kqfd;
 #else
-    struct fr_event_entry entries[128];
+    struct fr_event_entry entries[FR_EVENT_MAX_ENTRIES];
     int entry_count;
 #endif
     fr_event_cb_t cb;
@@ -65,19 +71,31 @@ void fr_event_loop_set_cb(fr_event_loop_t *loop, fr_event_cb_t cb) {
     if (loop) loop->cb = cb;
 }
 
-static struct fr_event_entry *find_entry(fr_event_loop_t *loop, int fd) {
-#if defined(FORGE_OS_LINUX) || defined(FORGE_OS_MACOS)
-    (void)loop; (void)fd;
-    return NULL;
+#if !defined(FORGE_OS_LINUX) && !defined(FORGE_OS_MACOS)
+/* A POSIX fd_set is a bitmap indexed by the descriptor, so FD_SET on an fd
+ * at or past FD_SETSIZE writes out of bounds. Winsock's fd_set is instead a
+ * bounded array of SOCKETs, where the limit is how many we register rather
+ * than how large their values are. Either way, silently skipping is better
+ * than the out-of-bounds write the unguarded version would perform. */
+static int fd_selectable(int fd, int registered) {
+#if defined(FORGE_OS_WINDOWS)
+    (void)fd;
+    return registered < FD_SETSIZE;
 #else
+    (void)registered;
+    return fd >= 0 && fd < FD_SETSIZE;
+#endif
+}
+
+static struct fr_event_entry *find_entry(fr_event_loop_t *loop, int fd) {
     for (int i = 0; i < loop->entry_count; i++) {
         if (loop->entries[i].active && loop->entries[i].fd == fd) {
             return &loop->entries[i];
         }
     }
     return NULL;
-#endif
 }
+#endif
 
 int fr_event_loop_add(fr_event_loop_t *loop, int fd, uint32_t events, void *userdata) {
     if (!loop || fd < 0) return -1;
@@ -103,9 +121,13 @@ int fr_event_loop_add(fr_event_loop_t *loop, int fd, uint32_t events, void *user
     }
     return kevent(loop->kqfd, changes, n, NULL, 0, NULL);
 #else
-    if (loop->entry_count >= 128) return -1;
+    /* Re-registering an fd reuses its slot, so check for that before
+     * declaring the table full. */
     struct fr_event_entry *e = find_entry(loop, fd);
-    if (!e) e = &loop->entries[loop->entry_count++];
+    if (!e) {
+        if (loop->entry_count >= FR_EVENT_MAX_ENTRIES) return -1;
+        e = &loop->entries[loop->entry_count++];
+    }
     e->fd = fd;
     e->events = events | (oneshot ? FR_EVENT_ONESHOT : 0);
     e->userdata = userdata;
@@ -139,15 +161,19 @@ int fr_event_loop_del(fr_event_loop_t *loop, int fd) {
 int fr_event_loop_poll(fr_event_loop_t *loop, int timeout_ms) {
     if (!loop) return -1;
 #if defined(FORGE_OS_LINUX)
-    struct epoll_event events[64];
-    int n = epoll_wait(loop->epfd, events, 64, timeout_ms);
+    struct epoll_event events[FR_EVENT_BATCH];
+    int n = epoll_wait(loop->epfd, events, FR_EVENT_BATCH, timeout_ms);
     if (n < 0) return -1;
     for (int i = 0; i < n; i++) {
-        if (loop->cb) loop->cb(loop, 0, events[i].events, events[i].data.ptr);
+        /* epoll's data field is a union, and the userdata pointer is what
+         * callers actually need, so there is no fd to report back here. The
+         * raw epoll event bits are passed through as-is; the scheduler's
+         * callback keys off the userdata pointer, not the fd or the bits. */
+        if (loop->cb) loop->cb(loop, -1, events[i].events, events[i].data.ptr);
     }
     return n;
 #elif defined(FORGE_OS_MACOS)
-    struct kevent events[64];
+    struct kevent events[FR_EVENT_BATCH];
     struct timespec ts;
     struct timespec *tp = NULL;
     if (timeout_ms >= 0) {
@@ -165,14 +191,20 @@ int fr_event_loop_poll(fr_event_loop_t *loop, int timeout_ms) {
     }
     return n;
 #else
-#if defined(FORGE_OS_WINDOWS)
+    /* Winsock's select() and POSIX select() are close enough here that one
+     * body serves both: the fd_set/FD_* macros and the timeval argument are
+     * spelled identically, and platform.h has already pulled in the right
+     * headers for each. */
     fd_set rfds, wfds;
     FD_ZERO(&rfds);
     FD_ZERO(&wfds);
     int maxfd = 0;
+    int registered = 0;
     for (int i = 0; i < loop->entry_count; i++) {
         if (!loop->entries[i].active) continue;
         int fd = loop->entries[i].fd;
+        if (!fd_selectable(fd, registered)) continue;
+        registered++;
         if (fd > maxfd) maxfd = fd;
         if (loop->entries[i].events & FR_EVENT_READ) FD_SET(fd, &rfds);
         if (loop->entries[i].events & FR_EVENT_WRITE) FD_SET(fd, &wfds);
@@ -187,9 +219,14 @@ int fr_event_loop_poll(fr_event_loop_t *loop, int timeout_ms) {
     int n = select(maxfd + 1, &rfds, &wfds, NULL, tvp);
     if (n < 0) return -1;
     int fired = 0;
+    /* Re-derives the same subset the loop above registered, in the same
+     * order, so the counter tracks identically. */
+    int checked = 0;
     for (int i = 0; i < loop->entry_count; i++) {
         if (!loop->entries[i].active) continue;
         int fd = loop->entries[i].fd;
+        if (!fd_selectable(fd, checked)) continue;
+        checked++;
         uint32_t ev = 0;
         if (FD_ISSET(fd, &rfds)) ev |= FR_EVENT_READ;
         if (FD_ISSET(fd, &wfds)) ev |= FR_EVENT_WRITE;
@@ -199,40 +236,5 @@ int fr_event_loop_poll(fr_event_loop_t *loop, int timeout_ms) {
         fired++;
     }
     return fired;
-#else
-    fd_set rfds, wfds;
-    FD_ZERO(&rfds);
-    FD_ZERO(&wfds);
-    int maxfd = 0;
-    for (int i = 0; i < loop->entry_count; i++) {
-        if (!loop->entries[i].active) continue;
-        int fd = loop->entries[i].fd;
-        if (fd > maxfd) maxfd = fd;
-        if (loop->entries[i].events & FR_EVENT_READ) FD_SET(fd, &rfds);
-        if (loop->entries[i].events & FR_EVENT_WRITE) FD_SET(fd, &wfds);
-    }
-    struct timeval tv;
-    struct timeval *tvp = NULL;
-    if (timeout_ms >= 0) {
-        tv.tv_sec = timeout_ms / 1000;
-        tv.tv_usec = (timeout_ms % 1000) * 1000;
-        tvp = &tv;
-    }
-    int n = select(maxfd + 1, &rfds, &wfds, NULL, tvp);
-    if (n < 0) return -1;
-    int fired = 0;
-    for (int i = 0; i < loop->entry_count; i++) {
-        if (!loop->entries[i].active) continue;
-        int fd = loop->entries[i].fd;
-        uint32_t ev = 0;
-        if (FD_ISSET(fd, &rfds)) ev |= FR_EVENT_READ;
-        if (FD_ISSET(fd, &wfds)) ev |= FR_EVENT_WRITE;
-        if (!ev) continue;
-        if (loop->cb) loop->cb(loop, fd, ev, loop->entries[i].userdata);
-        if (loop->entries[i].events & FR_EVENT_ONESHOT) loop->entries[i].active = 0;
-        fired++;
-    }
-    return fired;
-#endif
 #endif
 }

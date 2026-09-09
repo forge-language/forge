@@ -80,19 +80,20 @@ static void argv_add_lto(Argv *a) {
 #endif
 }
 
+/* Builds "<prefix><value>" (e.g. "-I/usr/include") and pushes it as an
+ * owned argv entry. */
+static void argv_push_prefixed(Argv *a, const char *prefix, const char *value) {
+    size_t n = strlen(prefix) + strlen(value) + 1;
+    char *s = (char *)malloc(n);
+    if (!s) forge_die("out of memory");
+    snprintf(s, n, "%s%s", prefix, value);
+    argv_push_owned(a, s);
+}
+
 static void argv_add_includes(Argv *a, const ForgeDriverConfig *cfg) {
-    if (cfg->include_dir) {
-        size_t n = strlen(cfg->include_dir) + 3;
-        char *inc = (char *)malloc(n);
-        snprintf(inc, n, "-I%s", cfg->include_dir);
-        argv_push_owned(a, inc);
-    }
-    for (size_t i = 0; i < cfg->extra_include_count; i++) {
-        size_t n = strlen(cfg->extra_includes[i]) + 3;
-        char *inc = (char *)malloc(n);
-        snprintf(inc, n, "-I%s", cfg->extra_includes[i]);
-        argv_push_owned(a, inc);
-    }
+    if (cfg->include_dir) argv_push_prefixed(a, "-I", cfg->include_dir);
+    for (size_t i = 0; i < cfg->extra_include_count; i++)
+        argv_push_prefixed(a, "-I", cfg->extra_includes[i]);
 }
 
 static int exec_argv(Argv *a) {
@@ -188,12 +189,7 @@ static int link_object(const char *obj_path, const char *output_path, const Forg
     argv_push(&args, (char *)obj_path);
     argv_push(&args, "-o");
     argv_push(&args, (char *)output_path);
-    if (cfg->lib_dir) {
-        size_t n = strlen(cfg->lib_dir) + 3;
-        char *libdir = (char *)malloc(n);
-        snprintf(libdir, n, "-L%s", cfg->lib_dir);
-        argv_push_owned(&args, libdir);
-    }
+    if (cfg->lib_dir) argv_push_prefixed(&args, "-L", cfg->lib_dir);
     for (size_t i = 0; i < cfg->extra_lib_dir_count; i++) {
         size_t n = strlen(cfg->extra_lib_dirs[i]) + 3;
         char *libdir = (char *)malloc(n);
@@ -201,12 +197,8 @@ static int link_object(const char *obj_path, const char *output_path, const Forg
         snprintf(libdir, n, "-L%s", cfg->extra_lib_dirs[i]);
         argv_push_owned(&args, libdir);
     }
-    for (size_t i = 0; i < cfg->link_lib_count; i++) {
-        size_t n = strlen(cfg->link_libs[i]) + 3;
-        char *lib = (char *)malloc(n);
-        snprintf(lib, n, "-l%s", cfg->link_libs[i]);
-        argv_push_owned(&args, lib);
-    }
+    for (size_t i = 0; i < cfg->link_lib_count; i++)
+        argv_push_prefixed(&args, "-l", cfg->link_libs[i]);
     argv_push(&args, "-lforge_std");
     argv_push(&args, "-lforge_runtime");
     argv_add_link_extras(&args, cfg);

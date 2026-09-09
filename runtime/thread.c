@@ -118,7 +118,11 @@ struct fr_thread {
 
 fr_mutex_t *fr_mutex_create(void) {
     fr_mutex_t *m = (fr_mutex_t *)calloc(1, sizeof(fr_mutex_t));
-    if (m) pthread_mutex_init(&m->lock, NULL);
+    if (!m) return NULL;
+    if (pthread_mutex_init(&m->lock, NULL) != 0) {
+        free(m);
+        return NULL;
+    }
     return m;
 }
 
@@ -138,7 +142,11 @@ void fr_mutex_unlock(fr_mutex_t *m) {
 
 fr_cond_t *fr_cond_create(void) {
     fr_cond_t *c = (fr_cond_t *)calloc(1, sizeof(fr_cond_t));
-    if (c) pthread_cond_init(&c->cv, NULL);
+    if (!c) return NULL;
+    if (pthread_cond_init(&c->cv, NULL) != 0) {
+        free(c);
+        return NULL;
+    }
     return c;
 }
 
@@ -188,6 +196,13 @@ void fr_thread_yield(void) {
     sched_yield();
 }
 
+/* NOTE: FORGE_OS_LINUX comes from forge/platform.h, which this file does not
+ * include, so pinning is currently inert on every platform. That is
+ * deliberate for now -- hard affinity hurts as often as it helps once
+ * workers run blocking native tasks (a pinned worker's core idles while its
+ * peers queue up), and the scheduler is tuned against the unpinned
+ * behaviour. Include platform.h here to turn it on, and re-run the
+ * scheduler benchmark before keeping it. */
 void fr_thread_pin_cpu(int cpu) {
 #if defined(FORGE_OS_LINUX)
     cpu_set_t set;

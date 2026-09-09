@@ -119,10 +119,26 @@ int fr_fs_rename(const char *old_path, const char *new_path) {
 }
 
 int fr_fs_copy(const char *src, const char *dst) {
-    char *data = fr_fs_read(src);
-    if (!data) return 0;
-    int ok = fr_fs_write(dst, data);
-    free(data);
+    if (!src || !dst) return 0;
+    FILE *in = fopen(src, "rb");
+    if (!in) return 0;
+    FILE *out = fopen(dst, "wb");
+    if (!out) { fclose(in); return 0; }
+
+    /* Stream in fixed-size chunks rather than buffering the whole file in
+     * memory: keeps peak memory flat regardless of file size, and (unlike
+     * the previous fr_fs_read+fr_fs_write path, which round-tripped through
+     * a NUL-terminated string) correctly copies files containing embedded
+     * NUL bytes instead of silently truncating at the first one. */
+    char buf[65536];
+    size_t n;
+    int ok = 1;
+    while ((n = fread(buf, 1, sizeof(buf), in)) > 0) {
+        if (fwrite(buf, 1, n, out) != n) { ok = 0; break; }
+    }
+    if (ferror(in)) ok = 0;
+    fclose(in);
+    fclose(out);
     return ok;
 }
 

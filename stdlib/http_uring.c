@@ -50,47 +50,21 @@ static int uring_accept_one(struct io_uring *ring, int listen_fd) {
     return res;
 }
 
-typedef struct {
-    int client;
-    fr_http_server_state_t *srv;
-} uring_serve_ctx_t;
-
 static void uring_serve_task(void *arg) {
-    uring_serve_ctx_t *ctx = (uring_serve_ctx_t *)arg;
-    if (!ctx) return;
-    int client = ctx->client;
-    fr_http_server_state_t *srv = ctx->srv;
-    free(ctx);
-
-    if (fr_sock_set_blocking(client) != 0 ||
-        fr_sock_set_timeout(client, 5000) != 0 ||
-        fr_http_discard_headers(client) < 0 ||
-        fr_http_send_prepared(client, srv) < 0) {
-        fr_sock_close(client);
-        return;
-    }
-    fr_sock_close(client);
+    fr_http_job_t *job = (fr_http_job_t *)arg;
+    if (!job) return;
+    fr_http_serve_cached(job->client, job->srv);
+    free(job);
 }
 
-static int submit_uring_client(fr_http_server_state_t *srv, int client) {
-    if (!g_uring_sched ||
-        fr_sched_pool_queued(g_uring_sched) >= URING_QUEUE_HIGH_WATER) {
+static void uring_dispatch_client(int client, fr_http_server_state_t *srv) {
+    /* This mode exists to keep the accept loop free of per-request work, so
+     * with no pool to hand off to there is nothing useful to do but shed the
+     * connection rather than block the uring loop on it. */
+    if (fr_http_pool_submit(g_uring_sched, URING_QUEUE_HIGH_WATER,
+                            uring_serve_task, client, srv) == FR_HTTP_SUBMIT_NO_POOL) {
         fr_sock_close(client);
-        return -1;
     }
-    uring_serve_ctx_t *ctx = (uring_serve_ctx_t *)malloc(sizeof(*ctx));
-    if (!ctx) {
-        fr_sock_close(client);
-        return -1;
-    }
-    ctx->client = client;
-    ctx->srv = srv;
-    if (fr_sched_pool_submit(g_uring_sched, uring_serve_task, ctx) != 0) {
-        free(ctx);
-        fr_sock_close(client);
-        return -1;
-    }
-    return 0;
 }
 
 static void http_uring_event_loop(int listen_fd, fr_http_server_state_t *srv) {
@@ -105,14 +79,13 @@ static void http_uring_event_loop(int listen_fd, fr_http_server_state_t *srv) {
     for (;;) {
         int client = uring_accept_one(&ring, listen_fd);
         if (client < 0) continue;
-        submit_uring_client(srv, client);
+        uring_dispatch_client(client, srv);
     }
 }
 
 void fr_http_serve_uring(int64_t server, int64_t threads) {
-    if (server < 0) return;
-    fr_http_server_state_t *srv = fr_http_state(server);
-    if (!srv || !srv->cached_resp || srv->cached_len == 0) return;
+    fr_http_server_state_t *srv = fr_http_prepared_state(server);
+    if (!srv) return;
 
     int cpus = fr_platform_cpu_count();
     if (cpus < 1) cpus = 1;
@@ -123,7 +96,7 @@ void fr_http_serve_uring(int64_t server, int64_t threads) {
         return;
     }
     fr_scheduler_start(g_uring_sched);
-    fr_http_spawn_workers(server, srv, threads, http_uring_event_loop);
+    fr_http_spawn_workers(server, srv, (int)threads, http_uring_event_loop);
 }
 
 #else

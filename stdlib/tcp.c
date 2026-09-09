@@ -7,6 +7,7 @@
 #ifndef SO_REUSEPORT
 #define SO_REUSEPORT 15
 #endif
+#include <errno.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
@@ -100,9 +101,32 @@ int64_t fr_tcp_connect(const char *host, int64_t port) {
 int64_t fr_tcp_send(int64_t sock, const char *data) {
     if (sock < 0 || !data) return -1;
     size_t total = strlen(data);
-    ssize_t sent = fr_sock_send(sock, data, total);
-    return sent < 0 ? -1 : (int64_t)sent;
+    size_t sent = 0;
+    /* Loop rather than trusting one send(): a partial write is normal once the
+     * payload exceeds the socket buffer, and returning early would silently
+     * truncate the caller's message (HTTP request heads and bodies go out
+     * through here). */
+    while (sent < total) {
+        ssize_t n = fr_sock_send((int)sock, data + sent, total - sent);
+        if (n < 0) {
+#if !defined(FORGE_OS_WINDOWS)
+            if (errno == EINTR) continue;
+#endif
+            return -1;
+        }
+        if (n == 0) return -1;
+        sent += (size_t)n;
+    }
+    return (int64_t)sent;
 }
+
+/* Reads until the peer half-closes, so the total length is chosen by the
+ * remote end. Without a ceiling a single client that streams and never closes
+ * grows this buffer until the process dies -- one socket, no authentication,
+ * no special payload. Cap the total and fail the read instead: this API hands
+ * back a NUL-terminated string and is not a bulk-transfer path, so anything
+ * approaching the cap is a caller using the wrong tool or an attacker. */
+#define FR_TCP_RECV_MAX ((size_t)8 * 1024 * 1024)
 
 char *fr_tcp_recv(int64_t sock) {
     if (sock < 0) return NULL;
@@ -111,10 +135,13 @@ char *fr_tcp_recv(int64_t sock) {
     if (!buf) return NULL;
     for (;;) {
         if (len + 1 >= cap) {
-            cap *= 2;
-            char *nbuf = (char *)realloc(buf, cap);
+            if (cap >= FR_TCP_RECV_MAX) { free(buf); return NULL; }
+            size_t ncap = cap * 2;
+            if (ncap > FR_TCP_RECV_MAX) ncap = FR_TCP_RECV_MAX;
+            char *nbuf = (char *)realloc(buf, ncap);
             if (!nbuf) { free(buf); return NULL; }
             buf = nbuf;
+            cap = ncap;
         }
         ssize_t n = fr_sock_recv(sock, buf + len, cap - len - 1);
         if (n < 0) { free(buf); return NULL; }

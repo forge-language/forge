@@ -114,9 +114,15 @@ char *fr_json_stringify_str(const char *key, const char *value) {
 }
 
 char *fr_json_stringify_int(const char *key, int64_t value) {
-    char *out = (char *)malloc(256);
-    if (!out) return NULL;
-    snprintf(out, 256, "{\"%s\":%lld}", key ? key : "", (long long)value);
+    size_t key_cap = (key ? strlen(key) : 0) * 6 + 1;
+    char *ekey = (char *)malloc(key_cap);
+    if (!ekey) return NULL;
+    json_escape(key, ekey, key_cap);
+
+    size_t cap = strlen(ekey) + 48;
+    char *out = (char *)malloc(cap);
+    if (out) snprintf(out, cap, "{\"%s\":%lld}", ekey, (long long)value);
+    free(ekey);
     return out;
 }
 

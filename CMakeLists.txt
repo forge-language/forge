@@ -143,6 +143,11 @@ add_executable(forge
     compiler/parser.c
     compiler/ast.c
     compiler/codegen.c
+    compiler/codegen_util.c
+    compiler/codegen_symbols.c
+    compiler/codegen_expr.c
+    compiler/codegen_stmt.c
+    compiler/codegen_coro.c
     compiler/mod_registry.c
     compiler/module_loader.c
     compiler/symbols.c
