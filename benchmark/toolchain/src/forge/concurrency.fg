@@ -1,0 +1,19 @@
+// Toolchain devex benchmark: spawn 10000 lightweight units of work that
+// each yield once, then (implicitly) join before the process exits.
+// Mirrors benchmark/forge/bench_coro.fg but at the 10000-unit scale asked
+// for by the toolchain benchmark rather than that file's 100000.
+
+process main {
+    let workers: int = 10000;
+
+    coroutine tick() {
+        yield;
+    }
+
+    let i: int = 0;
+    while (i < workers) {
+        spawn tick();
+        i += 1;
+    }
+    println("done:", workers);
+}

@@ -1,0 +1,16 @@
+[package]
+name = "bench_rust_async"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "bench_rust_async"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1.53.0", features = ["rt", "rt-multi-thread", "macros", "time"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1

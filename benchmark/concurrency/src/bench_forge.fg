@@ -1,0 +1,30 @@
+// Forge concurrency-primitive benchmark: spawn N coroutines, each yields
+// once and then performs one unit of observable work (bc_bump), on the M:N
+// work-stealing scheduler.
+//
+// N is a compile-time constant because Forge's `process main` body runs
+// entirely BEFORE fr_scheduler_run() drains the coroutines, so os_argv()
+// would work but the harness recompiles per N anyway to keep the program
+// as simple as the language allows (no error handling, no generics).
+
+import io;
+
+extern fn bc_start(n: int): int;
+extern fn bc_bump(): int;
+
+const UNITS = 1000;
+
+process main {
+    coroutine unit() {
+        yield;
+        bc_bump();
+    }
+
+    bc_start(UNITS);
+    let i: int = 0;
+    while (i < UNITS) {
+        spawn unit();
+        i += 1;
+    }
+    println("spawned", UNITS);
+}

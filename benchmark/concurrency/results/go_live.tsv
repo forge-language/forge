@@ -1,0 +1,21 @@
+# Go hold-live variant: all N goroutines parked and confirmed alive before
+# peak RSS is sampled, then released. This is the apples-to-apples
+# counterpart to bench_forge.fg, whose `process main` body must queue all
+# N coroutines before fr_scheduler_run() drains any of them.
+#
+# bench_go.go (in raw.tsv) measures something different and easier:
+# goroutines retire while the loop is still spawning, so peak-alive is far
+# below N and its RSS must NOT be compared against Forge's.
+lang	kind	n	rep	status	spawn_ms	total_ms	maxrss_kb	bytes_per_task
+go	lightweight-live	1000	1	ok	1.254	1.492	10168	10412.0
+go	lightweight-live	1000	2	ok	2.186	2.419	12216	12509.2
+go	lightweight-live	1000	3	ok	2.240	2.457	10164	10407.9
+go	lightweight-live	10000	1	ok	8.958	10.488	39512	4046.0
+go	lightweight-live	10000	2	ok	9.659	11.401	39536	4048.5
+go	lightweight-live	10000	3	ok	9.695	11.127	39544	4049.3
+go	lightweight-live	100000	1	ok	118.778	135.907	279368	2860.7
+go	lightweight-live	100000	2	ok	110.217	131.024	278792	2854.8
+go	lightweight-live	100000	3	ok	149.458	166.012	278528	2852.1
+go	lightweight-live	1000000	1	ok	2132.850	2420.905	2685844	2750.3
+go	lightweight-live	1000000	2	ok	2447.555	2755.770	2679100	2743.4
+go	lightweight-live	1000000	3	ok	2565.980	2873.019	2676676	2740.9

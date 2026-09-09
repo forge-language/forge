@@ -1,0 +1,103 @@
+Forge toolchain benchmark
+Date: 2026-09-09 02:56:03 UTC
+Host: Linux archlinux 7.1.2-arch3-1 #1 SMP PREEMPT_DYNAMIC Fri, 03 Jul 2026 23:25:36 +0000 x86_64 GNU/Linux
+CPU cores: 18
+Build runs per measurement: 3 (median reported)
+Cold-start iterations: 60
+Cold-start timer: bash EPOCHREALTIME loop fallback (hyperfine not installed) -- median and p99 over 60 runs
+Forge binary: /home/helloworld0822/code/forge/build-xlang/bin/forge (build dir: build-xlang)
+Versions:
+  clang:  clang version 22.1.6
+  rustc:  rustc 1.96.1 (31fca3adb 2026-06-26)
+  go:     go version go1.26.4-X:nodwarf5 linux/amd64
+  javac:  javac 17.0.19
+  node:   v24.18.0
+  python: Python 3.14.6
+Note on -j1 / single-threaded builds (per task instructions, 18 cores available):
+  go:    go build -p 1 (caps parallel build actions at 1)
+  rust:  rustc -C codegen-units=1 (forces serial single-unit codegen; rustc has no
+         stable frontend -j flag, this is the closest real knob)
+  clang/forge/javac: single translation unit / single file, no parallelism to disable
+
+=== SECTION 1: COMPILE / BUILD TIME (median of 3 runs, milliseconds) ===
+
+  forge    hello          cold      152.966 ms
+  forge    hello          warm      130.807 ms
+    -> hello split: forge-frontend(.fg->C)=3.825ms  clang-compile(.c->.o)=53.102ms  clang-link=60.342ms  (sum=117.269ms vs directly-measured forge-native-build=150.423ms)
+  forge    concurrency    cold      165.858 ms
+  forge    concurrency    warm      155.554 ms
+    -> concurrency split: forge-frontend(.fg->C)=3.687ms  clang-compile(.c->.o)=54.928ms  clang-link=60.198ms  (sum=118.813ms vs directly-measured forge-native-build=157.305ms)
+
+  c        hello          cold       96.311 ms
+  c        hello          warm       89.741 ms
+  c        concurrency    cold      113.709 ms
+  c        concurrency    warm      105.213 ms
+
+  rust     hello          cold      118.231 ms
+  rust     hello          warm       92.030 ms
+  rust     concurrency    cold      270.976 ms
+  rust     concurrency    warm      276.830 ms
+
+  go       hello          cold     5389.962 ms
+  go       hello          warm      235.630 ms
+  go       concurrency    cold     5479.400 ms
+  go       concurrency    warm      255.712 ms
+
+  java     hello          cold      440.020 ms
+  java     hello          warm      445.496 ms
+  java     concurrency    cold      492.505 ms
+  java     concurrency    warm      484.178 ms
+
+  node     hello          cold   n/a (interpreted) ms
+  node     hello          warm   n/a (interpreted) ms
+  node     concurrency    cold   n/a (interpreted) ms
+  node     concurrency    warm   n/a (interpreted) ms
+  python   hello          cold   n/a (interpreted) ms
+  python   hello          warm   n/a (interpreted) ms
+  python   concurrency    cold   n/a (interpreted) ms
+  python   concurrency    warm   n/a (interpreted) ms
+
+=== SECTION 2: ARTIFACT SIZE ===
+
+  forge (hello): unstripped=49KiB (49320 B)  stripped=39KiB (39536 B)
+    ldd: 	linux-vdso.so.1 (0x00007f0e626e6000) 	libOpenCL.so.1 => /usr/lib/libOpenCL.so.1 (0x00007f0e6266f000) 	liburing.so.2 => /usr/lib/liburing.so.2 (0x00007f0e62668000) 	libssl.so.3 => /usr/lib/libssl.so.3 (0x00007f0e62571000) 	libcrypto.so.3 => /usr/lib/libcrypto.so.3 (0x00007f0e61e00000) 	libm.so.6 => /usr/lib/libm.so.6 (0x00007f0e6243e000) 	libc.so.6 => /usr/lib/libc.so.6 (0x00007f0e61a00000) 	/lib64/ld-linux-x86-64.so.2 => /usr/lib64/ld-linux-x86-64.so.2 (0x00007f0e626e8000) 	libz.so.1 => /usr/lib/libz.so.1 (0x00007f0e62421000) 	libbrotlienc.so.1 => /usr/lib/libbrotlienc.so.1 (0x00007f0e61d40000) 	libbrotlidec.so.1 => /usr/lib/libbrotlidec.so.1 (0x00007f0e62412000) 	libzstd.so.1 => /usr/lib/libzstd.so.1 (0x00007f0e61c5a000) 	libbrotlicommon.so.1 => /usr/lib/libbrotlicommon.so.1 (0x00007f0e623ef000) 
+  c (hello): unstripped=16KiB (15984 B)  stripped=15KiB (14488 B)
+    ldd: 	linux-vdso.so.1 (0x00007f2ef5193000) 	libc.so.6 => /usr/lib/libc.so.6 (0x00007f2ef4e00000) 	/lib64/ld-linux-x86-64.so.2 => /usr/lib64/ld-linux-x86-64.so.2 (0x00007f2ef5195000) 
+  rust (hello): unstripped=4.2MiB (4335360 B)  stripped=336KiB (343528 B)
+    ldd: 	linux-vdso.so.1 (0x00007ff67d4aa000) 	libgcc_s.so.1 => /usr/lib/libgcc_s.so.1 (0x00007ff67d3ee000) 	libc.so.6 => /usr/lib/libc.so.6 (0x00007ff67d000000) 	/lib64/ld-linux-x86-64.so.2 => /usr/lib64/ld-linux-x86-64.so.2 (0x00007ff67d4ac000) 
+  go (hello): unstripped=2.4MiB (2458843 B)  stripped=1.6MiB (1588312 B)
+    ldd: 	not a dynamic executable 
+  java (hello): Hello.class=417B (417 B), hello.jar=753B (753 B)
+    runtime dependency: requires a JVM to run (this machine's JDK 17 install is ~421 MiB, see SECTION 4); the .class file is not a standalone deployable artifact
+  node (hello): hello.js source=30B (30 B)
+    runtime dependency: requires the Node.js runtime to execute (this machine's node binary is ~118 MiB, see SECTION 4); not a standalone deployable artifact
+  python (hello): hello.py source=23B (23 B)
+    runtime dependency: requires a Python 3 interpreter to execute (this machine's python3 install is ~73 MiB, see SECTION 4); not a standalone deployable artifact
+
+=== SECTION 3: COLD START (hello world, ms; median / p99 over 60 runs) ===
+
+  forge : median=5.440ms p99=7.781ms
+  c     : median=1.535ms p99=2.308ms
+  rust  : median=2.005ms p99=2.929ms
+  go    : median=2.474ms p99=3.561ms
+  java  : median=43.608ms p99=50.728ms
+  node  : median=36.531ms p99=45.327ms
+  python: median=23.160ms p99=33.495ms
+
+=== SECTION 4: TOOLCHAIN FOOTPRINT (installed size, best-effort) ===
+
+  forge: compiler binary=136K, libforge_*.a dir=184K
+    Forge has no toolchain of its own for the C stage -- it shells out to the
+    system C compiler (clang, by default here), whose footprint is the 'c' row below.
+  c (clang via pacman): 254.42 MiB
+  rust (rustup toolchain dir): 1.5G + cargo/rustup bin 20M
+    (excludes ~/.cargo/registry -- that's downloaded crate cache from unrelated
+    builds, not part of the rust toolchain itself)
+  go (pacman): 215.60 MiB
+  java (jdk17-openjdk via pacman): 421.30 MiB
+  node (runtime binary only): 118M
+    (this machine's nvm node dir also contains ~1.6GB of unrelated globally-
+    installed npm packages -- excluded, since those aren't the node toolchain)
+  python (pacman): 73.41 MiB
+
+Done. Full results written to /home/helloworld0822/code/forge/benchmark/toolchain/results.txt

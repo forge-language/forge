@@ -1,5 +1,9 @@
 # Build
 build/
+# Sanitizer, benchmark and verification build trees, all cmake-generated.
+build-*/
+# CTest scratch directory.
+Testing/
 *.o
 *.a
 
@@ -38,8 +42,30 @@ erl_crash.dump
 # Rust / Axum benchmark
 benchmark/axum/**/target/
 
+# Lean4 prover: elan/lake artifacts and generated benchmark instances
+lean-prover/.lake/
+lean-prover/bench/cnf/
+
 # Benchmark output
 benchmark/results.txt
+benchmark/*.log
+
+# Compiled benchmark servers and the load generator. Sources are tracked; the
+# harness rebuilds each of these on every run, so the artifacts are not.
+benchmark/c/bench_server
+benchmark/go/server
+benchmark/go/bench_server_go
+benchmark/loadgen/loadgen
+benchmark/erlang/*.beam
+benchmark/concurrency/bin/
+
+# oh-my-claudecode agent state (project-scoped skills are the exception)
+/.omc/*
+!/.omc/skills
+
+# Claude Code local session state
+/.claude/settings.local.json
+/.claude/scheduled_tasks.lock
 
 # Local practice builds
 practice/a.out

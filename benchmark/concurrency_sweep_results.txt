@@ -1,0 +1,46 @@
+Forge HTTP Concurrency Sweep
+Date: 2026-08-27 23:48:13 UTC
+Host: Linux 7.1.2-arch3-1 x86_64
+CPU cores: 18
+Requests per level: 50000, Concurrency levels: 100 500 1000 2500 5000 10000
+
+=== Epoll MT (baseline) (port 19080) ===
+concurrency=100 requests=50000 errors=0 retries=0 duration_s=3.9882 rps=12537.05
+concurrency=500 requests=50000 errors=0 retries=0 duration_s=3.8271 rps=13064.89
+concurrency=1000 requests=50000 errors=0 retries=0 duration_s=3.8767 rps=12897.51
+concurrency=2500 requests=50000 errors=0 retries=0 duration_s=3.7363 rps=13382.08
+concurrency=5000 requests=50000 errors=0 retries=0 duration_s=4.1779 rps=11967.77
+concurrency=10000 requests=50000 errors=0 retries=0 duration_s=3.3994 rps=14708.69
+
+=== Sendfile MT (memfd) (port 19086) ===
+concurrency=100 requests=50000 errors=0 retries=0 duration_s=3.8620 rps=12946.62
+concurrency=500 requests=50000 errors=0 retries=0 duration_s=3.7759 rps=13241.93
+concurrency=1000 requests=50000 errors=0 retries=0 duration_s=4.0285 rps=12411.59
+concurrency=2500 requests=50000 errors=0 retries=0 duration_s=3.7377 rps=13377.18
+concurrency=5000 requests=50000 errors=0 retries=0 duration_s=3.5583 rps=14051.84
+concurrency=10000 requests=50000 errors=0 retries=0 duration_s=3.4408 rps=14531.67
+
+=== io_uring MT (port 19087) ===
+concurrency=100 requests=50000 errors=0 retries=0 duration_s=7.2754 rps=6872.44
+concurrency=500 requests=50000 errors=0 retries=0 duration_s=5.6078 rps=8916.14
+concurrency=1000 requests=50000 errors=0 retries=0 duration_s=7.5849 rps=6592.03
+concurrency=2500 requests=50000 errors=0 retries=0 duration_s=6.2831 rps=7957.88
+concurrency=5000 requests=50000 errors=0 retries=0 duration_s=5.1225 rps=9760.95
+concurrency=10000 requests=50000 errors=0 retries=0 duration_s=4.6013 rps=10866.53
+
+=== TLS MT (OpenSSL) (port 19088) ===
+concurrency=100 requests=50000 errors=0 retries=0 duration_s=58.0705 rps=861.02
+concurrency=500 requests=50000 errors=0 retries=0 duration_s=61.8768 rps=808.06
+concurrency=1000 requests=50000 errors=0 retries=0 duration_s=64.6572 rps=773.31
+concurrency=2500 requests=50000 errors=0 retries=0 duration_s=71.3197 rps=701.07
+concurrency=5000 requests=50000 errors=0 retries=0 duration_s=68.6763 rps=728.05
+concurrency=10000 requests=50000 errors=0 retries=0 duration_s=69.7545 rps=716.80
+
+=== Routing MT (9 JSON routes) (port 19089) ===
+concurrency=100 requests=50000 errors=0 retries=0 duration_s=3.9188 rps=12759.12
+concurrency=500 requests=50000 errors=0 retries=0 duration_s=3.8174 rps=13097.94
+concurrency=1000 requests=50000 errors=0 retries=0 duration_s=3.7900 rps=13192.58
+concurrency=2500 requests=50000 errors=0 retries=0 duration_s=3.6200 rps=13812.20
+concurrency=5000 requests=50000 errors=0 retries=0 duration_s=3.5181 rps=14212.34
+concurrency=10000 requests=50000 errors=0 retries=0 duration_s=3.4982 rps=14293.26
+

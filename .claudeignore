@@ -1,10 +1,7 @@
-# Build
+# Build output (large generated/binary artifacts)
 build/
 *.o
 *.a
-
-# OMC agent local state
-.omc/
 
 # Editor
 .vscode/
@@ -56,3 +53,27 @@ editors/vscode/server/
 
 # Git internals
 .git/
+
+# oh-my-claudecode agent state (session data, not project source)
+/.omc/*
+!/.omc/skills
+
+# Secrets — self-signed benchmark TLS cert/key (regenerated on demand,
+# see benchmark/run_advanced_benchmark.sh:ensure_tls_certs)
+benchmark/tls/*.pem
+
+# Ad-hoc benchmark run logs (curated results live in *_results.txt)
+benchmark/*.log
+
+# Dependency/package caches
+node_modules/
+__pycache__/
+*.pyc
+venv/
+.venv/
+benchmark/python/.venv/
+benchmark/phoenix/**/_build/
+benchmark/phoenix/**/deps/
+benchmark/axum/**/target/
+lsp/node_modules/
+editors/vscode/node_modules/

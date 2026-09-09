@@ -1,0 +1,21 @@
+# Erlang/BEAM hold-live: all N processes confirmed alive before memory is
+# sampled. Forge copies its process, supervisor, mailbox and
+# reduction-budget design from this runtime, so it is the reference the
+# Forge concurrency numbers should be read against.
+#
+# proc_mem_kb is erlang:memory(processes) -- what the processes themselves
+# cost. peak_rss_kb is the whole emulator including its preallocated
+# carriers, which is what the other runtimes' maxrss figures measure.
+lang	kind	n	rep	status	spawn_ms	total_ms	proc_mem_kb	maxrss_kb	bytes_per_task
+erlang	lightweight-live	1000	1	ok	1.862	4.494	28606	92508	29292.8
+erlang	lightweight-live	1000	2	ok	1.826	3.935	28617	92040	29303.9
+erlang	lightweight-live	1000	3	ok	2.079	5.008	28607	93328	29293.7
+erlang	lightweight-live	10000	1	ok	17.195	25.259	52505	121804	5376.6
+erlang	lightweight-live	10000	2	ok	17.533	28.561	52773	123104	5404.0
+erlang	lightweight-live	10000	3	ok	22.113	31.343	52500	123256	5376.1
+erlang	lightweight-live	100000	1	ok	241.141	325.435	288770	427092	2957.0
+erlang	lightweight-live	100000	2	ok	217.173	356.037	288808	434336	2957.4
+erlang	lightweight-live	100000	3	ok	191.700	340.113	288825	426360	2957.6
+erlang	lightweight-live	1000000	1	ok	3394.746	4805.317	2644012	3121744	2707.5
+erlang	lightweight-live	1000000	2	ok	3400.418	5020.147	2644046	3111404	2707.5
+erlang	lightweight-live	1000000	3	ok	4146.210	5837.736	2644053	2980808	2707.5

@@ -1,0 +1,190 @@
+Forge cross-language HTTP benchmark
+Date: 2026-09-09 12:00:20 UTC
+Host: Linux 7.1.2-arch3-1 x86_64, 18 cores, 15 GB RAM
+Forge: ddae0a8 (http-serving-modes-and-runtime-hardening)
+Load: 300000 requests, concurrency 400, 3 runs per server
+
+Every server returns the same 12-byte body and closes the connection.
+Forge has no HTTP keep-alive (stdlib/http.c hardcodes Connection:
+close), so connection-per-request is the only shape all of these
+servers can share. Read rps_per_core, not rps: raw rps rewards a
+server for consuming more of the 18 cores.
+
+Runs are round-major -- every server once, then every server again
+-- and each one waits for the CPU package to fall back to
+78 C before it is timed. This box throttles hard under load,
+and without both of those a server's place in the list shows up in
+its numbers. Each row records the temperature and mean clock it
+started at; if those drift apart across servers, distrust the run.
+
+########## round 1 of 3 ##########
+
+== forge-mt (port 19080), run 1 ==
+    cooling from 101 C to 78 C (1s)
+forge-mt       run 1  rps=177139.9  rps/core=94223.3  cores=1.88  p50=1.974649 p99=6.966308 peakRSS=4.2     errs=0 retries=0  @67C/868MHz
+{"server": "forge-mt", "status": "ok", "run": 1, "port": 19080, "rps": 177139.9, "rps_per_core": 94223.3, "cores_used": 1.88, "ok": 300000, "errors": 0, "retries": 0, "elapsed_seconds": 1.69357694, "p50_ms": 1.974649, "p90_ms": 4.060042, "p99_ms": 6.966308, "max_ms": 14.265088, "peak_rss_mb": 4.2, "peak_procs": 1, "cpu_seconds": 3.18, "response_bytes": 70, "extra_headers": [], "monitor_samples": 18, "start_pkg_c": 67, "start_mean_mhz": 868}
+
+== forge-hybrid (port 19084), run 1 ==
+    cooling from 93 C to 78 C (1s)
+forge-hybrid   run 1  rps=152360.1  rps/core=51647.5  cores=2.95  p50=2.345233 p99=7.525556 peakRSS=4.7     errs=0 retries=0  @68C/1356MHz
+{"server": "forge-hybrid", "status": "ok", "run": 1, "port": 19084, "rps": 152360.1, "rps_per_core": 51647.5, "cores_used": 2.95, "ok": 300000, "errors": 0, "retries": 0, "elapsed_seconds": 1.969019867, "p50_ms": 2.345233, "p90_ms": 4.504145, "p99_ms": 7.525556, "max_ms": 22.393585, "peak_rss_mb": 4.7, "peak_procs": 1, "cpu_seconds": 5.8, "response_bytes": 70, "extra_headers": [], "monitor_samples": 21, "start_pkg_c": 68, "start_mean_mhz": 1356}
+
+== forge-uring (port 19087), run 1 ==
+    cooling from 99 C to 78 C (1s)
+forge-uring    run 1  rps=133290.1  rps/core=36122.0  cores=3.69  p50=2.54007 p99=10.462523 peakRSS=5.1     errs=0 retries=0  @73C/1074MHz
+{"server": "forge-uring", "status": "ok", "run": 1, "port": 19087, "rps": 133290.1, "rps_per_core": 36122.0, "cores_used": 3.69, "ok": 300000, "errors": 0, "retries": 0, "elapsed_seconds": 2.250729672, "p50_ms": 2.54007, "p90_ms": 5.436842, "p99_ms": 10.462523, "max_ms": 25.699187, "peak_rss_mb": 5.1, "peak_procs": 1, "cpu_seconds": 8.31, "response_bytes": 70, "extra_headers": [], "monitor_samples": 24, "start_pkg_c": 73, "start_mean_mhz": 1074}
+
+== c-pthread (port 19090), run 1 ==
+    cooling from 94 C to 78 C (1s)
+c-pthread      run 1  rps=154124.6  rps/core=89089.4  cores=1.73  p50=2.228796 p99=8.434643 peakRSS=1.9     errs=0 retries=0  @73C/1078MHz
+{"server": "c-pthread", "status": "ok", "run": 1, "port": 19090, "rps": 154124.6, "rps_per_core": 89089.4, "cores_used": 1.73, "ok": 300000, "errors": 0, "retries": 0, "elapsed_seconds": 1.946476937, "p50_ms": 2.228796, "p90_ms": 4.651921, "p99_ms": 8.434643, "max_ms": 33.79211, "peak_rss_mb": 1.9, "peak_procs": 1, "cpu_seconds": 3.36, "response_bytes": 70, "extra_headers": [], "monitor_samples": 20, "start_pkg_c": 73, "start_mean_mhz": 1078}
+
+== rust-axum (port 19083), run 1 ==
+    cooling from 99 C to 78 C (1s)
+rust-axum      run 1  rps=60301.0   rps/core=21459.4  cores=2.81  p50=1.466928 p99=6.408412 peakRSS=5.5     errs=0 retries=0  @77C/1395MHz
+{"server": "rust-axum", "status": "ok", "run": 1, "port": 19083, "rps": 60301.0, "rps_per_core": 21459.4, "cores_used": 2.81, "ok": 300000, "errors": 0, "retries": 0, "elapsed_seconds": 4.975044171, "p50_ms": 1.466928, "p90_ms": 2.507654, "p99_ms": 6.408412, "max_ms": 3127.006166, "peak_rss_mb": 5.5, "peak_procs": 1, "cpu_seconds": 13.99, "response_bytes": 148, "extra_headers": ["content-type", "date"], "monitor_samples": 63, "start_pkg_c": 77, "start_mean_mhz": 1395}
+
+== go-nethttp (port 19091), run 1 ==
+    cooling from 89 C to 78 C (2s)
+go-nethttp     run 1  rps=57016.5   rps/core=11731.8  cores=4.86  p50=6.081742 p99=24.382541 peakRSS=20.1    errs=0 retries=0  @73C/871MHz
+{"server": "go-nethttp", "status": "ok", "run": 1, "port": 19091, "rps": 57016.5, "rps_per_core": 11731.8, "cores_used": 4.86, "ok": 300000, "errors": 0, "retries": 0, "elapsed_seconds": 5.261630983, "p50_ms": 6.081742, "p90_ms": 9.728875, "p99_ms": 24.382541, "max_ms": 36.658397, "peak_rss_mb": 20.1, "peak_procs": 1, "cpu_seconds": 25.57, "response_bytes": 70, "extra_headers": [], "monitor_samples": 53, "start_pkg_c": 73, "start_mean_mhz": 871}
+
+== go-raw (port 19092), run 1 ==
+    cooling from 94 C to 78 C (1s)
+go-raw         run 1  rps=78239.8   rps/core=15902.4  cores=4.92  p50=3.290752 p99=29.135188 peakRSS=20.4    errs=0 retries=0  @77C/1099MHz
+{"server": "go-raw", "status": "ok", "run": 1, "port": 19092, "rps": 78239.8, "rps_per_core": 15902.4, "cores_used": 4.92, "ok": 300000, "errors": 0, "retries": 0, "elapsed_seconds": 3.834365047, "p50_ms": 3.290752, "p90_ms": 11.098392, "p99_ms": 29.135188, "max_ms": 62.364299, "peak_rss_mb": 20.4, "peak_procs": 1, "cpu_seconds": 18.86, "response_bytes": 70, "extra_headers": [], "monitor_samples": 39, "start_pkg_c": 77, "start_mean_mhz": 1099}
+
+== node-cluster (port 19093), run 1 ==
+    cooling from 101 C to 78 C (3s)
+node-cluster   run 1  rps=17553.1   rps/core=2558.8   cores=6.86  p50=16.124442 p99=58.68404 peakRSS=2400.4  errs=0 retries=0  @78C/1100MHz
+{"server": "node-cluster", "status": "ok", "run": 1, "port": 19093, "rps": 17553.1, "rps_per_core": 2558.8, "cores_used": 6.86, "ok": 300000, "errors": 0, "retries": 0, "elapsed_seconds": 17.090994415, "p50_ms": 16.124442, "p90_ms": 43.101233, "p99_ms": 58.68404, "max_ms": 115.832699, "peak_rss_mb": 2400.4, "peak_procs": 19, "cpu_seconds": 117.28, "response_bytes": 70, "extra_headers": [], "monitor_samples": 163, "start_pkg_c": 78, "start_mean_mhz": 1100}
+
+== node-single (port 19094), run 1 ==
+    cooling from 96 C to 78 C (4s)
+node-single    run 1  rps=13897.2   rps/core=15973.8  cores=0.87  p50=24.382727 p99=61.109377 peakRSS=125.5   errs=0 retries=0  @79C/1243MHz
+{"server": "node-single", "status": "ok", "run": 1, "port": 19094, "rps": 13897.2, "rps_per_core": 15973.8, "cores_used": 0.87, "ok": 300000, "errors": 0, "retries": 0, "elapsed_seconds": 21.587012214, "p50_ms": 24.382727, "p90_ms": 45.376934, "p99_ms": 61.109377, "max_ms": 76.329059, "peak_rss_mb": 125.5, "peak_procs": 1, "cpu_seconds": 18.71, "response_bytes": 70, "extra_headers": [], "monitor_samples": 216, "start_pkg_c": 79, "start_mean_mhz": 1243}
+
+== erlang-beam (port 19095), run 1 ==
+    cooling from 95 C to 78 C (1s)
+erlang-beam    run 1  rps=46591.5   rps/core=5973.3   cores=7.8   p50=5.130608 p99=36.975649 peakRSS=104.7   errs=0 retries=0  @79C/1102MHz
+{"server": "erlang-beam", "status": "ok", "run": 1, "port": 19095, "rps": 46591.5, "rps_per_core": 5973.3, "cores_used": 7.8, "ok": 300000, "errors": 0, "retries": 0, "elapsed_seconds": 6.438939838, "p50_ms": 5.130608, "p90_ms": 20.519832, "p99_ms": 36.975649, "max_ms": 79.205267, "peak_rss_mb": 104.7, "peak_procs": 2, "cpu_seconds": 50.23, "response_bytes": 70, "extra_headers": [], "monitor_samples": 64, "start_pkg_c": 79, "start_mean_mhz": 1102}
+
+== python-sync (port 19081), run 1 ==
+    cooling from 98 C to 78 C (4s)
+python-sync    run 1  rps=32414.0   rps/core=45653.5  cores=0.71  p50=9.518865 p99=36.414107 peakRSS=9.8     errs=0 retries=0  @79C/1084MHz
+{"server": "python-sync", "status": "ok", "run": 1, "port": 19081, "rps": 32414.0, "rps_per_core": 45653.5, "cores_used": 0.71, "ok": 300000, "errors": 0, "retries": 0, "elapsed_seconds": 9.255269445, "p50_ms": 9.518865, "p90_ms": 22.892113, "p99_ms": 36.414107, "max_ms": 45.162237, "peak_rss_mb": 9.8, "peak_procs": 1, "cpu_seconds": 6.53, "response_bytes": 70, "extra_headers": [], "monitor_samples": 93, "start_pkg_c": 79, "start_mean_mhz": 1084}
+
+########## round 2 of 3 ##########
+
+== forge-mt (port 19080), run 2 ==
+    cooling from 96 C to 78 C (3s)
+forge-mt       run 2  rps=98350.8   rps/core=48211.2  cores=2.04  p50=2.823347 p99=21.967001 peakRSS=4.2     errs=0 retries=0  @93C/1458MHz
+{"server": "forge-mt", "status": "ok", "run": 2, "port": 19080, "rps": 98350.8, "rps_per_core": 48211.2, "cores_used": 2.04, "ok": 300000, "errors": 0, "retries": 0, "elapsed_seconds": 3.050305739, "p50_ms": 2.823347, "p90_ms": 8.112288, "p99_ms": 21.967001, "max_ms": 49.120006, "peak_rss_mb": 4.2, "peak_procs": 1, "cpu_seconds": 6.23, "response_bytes": 70, "extra_headers": [], "monitor_samples": 31, "start_pkg_c": 93, "start_mean_mhz": 1458}
+
+== forge-hybrid (port 19084), run 2 ==
+    cooling from 95 C to 78 C (3s)
+forge-hybrid   run 2  rps=89181.0   rps/core=26542.0  cores=3.36  p50=3.120464 p99=24.379968 peakRSS=4.6     errs=0 retries=0  @79C/1449MHz
+{"server": "forge-hybrid", "status": "ok", "run": 2, "port": 19084, "rps": 89181.0, "rps_per_core": 26542.0, "cores_used": 3.36, "ok": 300000, "errors": 0, "retries": 0, "elapsed_seconds": 3.363945495, "p50_ms": 3.120464, "p90_ms": 8.913961, "p99_ms": 24.379968, "max_ms": 49.051538, "peak_rss_mb": 4.6, "peak_procs": 1, "cpu_seconds": 11.31, "response_bytes": 70, "extra_headers": [], "monitor_samples": 35, "start_pkg_c": 79, "start_mean_mhz": 1449}
+
+== forge-uring (port 19087), run 2 ==
+    cooling from 98 C to 78 C (2s)
+forge-uring    run 2  rps=78240.2   rps/core=20428.2  cores=3.83  p50=3.256878 p99=29.720609 peakRSS=5.0     errs=0 retries=0  @79C/1196MHz
+{"server": "forge-uring", "status": "ok", "run": 2, "port": 19087, "rps": 78240.2, "rps_per_core": 20428.2, "cores_used": 3.83, "ok": 300000, "errors": 0, "retries": 0, "elapsed_seconds": 3.834347337, "p50_ms": 3.256878, "p90_ms": 11.109775, "p99_ms": 29.720609, "max_ms": 62.460803, "peak_rss_mb": 5.0, "peak_procs": 1, "cpu_seconds": 14.7, "response_bytes": 70, "extra_headers": [], "monitor_samples": 40, "start_pkg_c": 79, "start_mean_mhz": 1196}
+
+== c-pthread (port 19090), run 2 ==
+    cooling from 95 C to 78 C (6s)
+c-pthread      run 2  rps=113609.7  rps/core=60430.7  cores=1.88  p50=2.637805 p99=18.833916 peakRSS=1.9     errs=0 retries=0  @79C/1064MHz
+{"server": "c-pthread", "status": "ok", "run": 2, "port": 19090, "rps": 113609.7, "rps_per_core": 60430.7, "cores_used": 1.88, "ok": 300000, "errors": 0, "retries": 0, "elapsed_seconds": 2.640620592, "p50_ms": 2.637805, "p90_ms": 6.357423, "p99_ms": 18.833916, "max_ms": 47.443617, "peak_rss_mb": 1.9, "peak_procs": 1, "cpu_seconds": 4.97, "response_bytes": 70, "extra_headers": [], "monitor_samples": 27, "start_pkg_c": 79, "start_mean_mhz": 1064}
+
+== rust-axum (port 19083), run 2 ==
+    cooling from 95 C to 78 C (3s)
+rust-axum      run 2  rps=47477.5   rps/core=15566.4  cores=3.05  p50=1.590003 p99=11.635728 peakRSS=5.4     errs=0 retries=13  @78C/998MHz
+{"server": "rust-axum", "status": "ok", "run": 2, "port": 19083, "rps": 47477.5, "rps_per_core": 15566.4, "cores_used": 3.05, "ok": 300000, "errors": 0, "retries": 13, "elapsed_seconds": 6.318786891, "p50_ms": 1.590003, "p90_ms": 4.557168, "p99_ms": 11.635728, "max_ms": 4344.816707, "peak_rss_mb": 5.4, "peak_procs": 1, "cpu_seconds": 19.29, "response_bytes": 148, "extra_headers": ["content-type", "date"], "monitor_samples": 75, "start_pkg_c": 78, "start_mean_mhz": 998}
+
+== go-nethttp (port 19091), run 2 ==
+    cooling from 94 C to 78 C (2s)
+go-nethttp     run 2  rps=38353.4   rps/core=7763.8   cores=4.94  p50=7.019243 p99=36.245199 peakRSS=18.7    errs=0 retries=0  @80C/1237MHz
+{"server": "go-nethttp", "status": "ok", "run": 2, "port": 19091, "rps": 38353.4, "rps_per_core": 7763.8, "cores_used": 4.94, "ok": 300000, "errors": 0, "retries": 0, "elapsed_seconds": 7.821995942, "p50_ms": 7.019243, "p90_ms": 23.544856, "p99_ms": 36.245199, "max_ms": 47.094312, "peak_rss_mb": 18.7, "peak_procs": 1, "cpu_seconds": 38.63, "response_bytes": 70, "extra_headers": [], "monitor_samples": 78, "start_pkg_c": 80, "start_mean_mhz": 1237}
+
+== go-raw (port 19092), run 2 ==
+    cooling from 101 C to 78 C (4s)
+go-raw         run 2  rps=63002.1   rps/core=12600.4  cores=5.0   p50=3.650597 p99=40.815878 peakRSS=21.3    errs=0 retries=0  @79C/950MHz
+{"server": "go-raw", "status": "ok", "run": 2, "port": 19092, "rps": 63002.1, "rps_per_core": 12600.4, "cores_used": 5.0, "ok": 300000, "errors": 0, "retries": 0, "elapsed_seconds": 4.761744147, "p50_ms": 3.650597, "p90_ms": 14.485177, "p99_ms": 40.815878, "max_ms": 74.922448, "peak_rss_mb": 21.3, "peak_procs": 1, "cpu_seconds": 23.82, "response_bytes": 70, "extra_headers": [], "monitor_samples": 47, "start_pkg_c": 79, "start_mean_mhz": 950}
+
+== node-cluster (port 19093), run 2 ==
+    cooling from 96 C to 78 C (5s)
+node-cluster   run 2  rps=14653.0   rps/core=2254.3   cores=6.5   p50=18.77646 p99=65.44471 peakRSS=2360.5  errs=0 retries=0  @79C/1292MHz
+{"server": "node-cluster", "status": "ok", "run": 2, "port": 19093, "rps": 14653.0, "rps_per_core": 2254.3, "cores_used": 6.5, "ok": 300000, "errors": 0, "retries": 0, "elapsed_seconds": 20.473633473, "p50_ms": 18.77646, "p90_ms": 53.590185, "p99_ms": 65.44471, "max_ms": 98.610849, "peak_rss_mb": 2360.5, "peak_procs": 19, "cpu_seconds": 133.06, "response_bytes": 70, "extra_headers": [], "monitor_samples": 195, "start_pkg_c": 79, "start_mean_mhz": 1292}
+
+== node-single (port 19094), run 2 ==
+    cooling from 98 C to 78 C (6s)
+node-single    run 2  rps=11786.0   rps/core=13704.6  cores=0.86  p50=26.893196 p99=72.386057 peakRSS=121.0   errs=0 retries=0  @80C/1252MHz
+{"server": "node-single", "status": "ok", "run": 2, "port": 19094, "rps": 11786.0, "rps_per_core": 13704.6, "cores_used": 0.86, "ok": 300000, "errors": 0, "retries": 0, "elapsed_seconds": 25.453943438, "p50_ms": 26.893196, "p90_ms": 58.176498, "p99_ms": 72.386057, "max_ms": 88.700165, "peak_rss_mb": 121.0, "peak_procs": 1, "cpu_seconds": 22.01, "response_bytes": 70, "extra_headers": [], "monitor_samples": 254, "start_pkg_c": 80, "start_mean_mhz": 1252}
+
+== erlang-beam (port 19095), run 2 ==
+    cooling from 96 C to 78 C (7s)
+erlang-beam    run 2  rps=51408.2   rps/core=6370.3   cores=8.07  p50=4.903597 p99=35.559354 peakRSS=101.9   errs=0 retries=0  @79C/1251MHz
+{"server": "erlang-beam", "status": "ok", "run": 2, "port": 19095, "rps": 51408.2, "rps_per_core": 6370.3, "cores_used": 8.07, "ok": 300000, "errors": 0, "retries": 0, "elapsed_seconds": 5.835641282, "p50_ms": 4.903597, "p90_ms": 17.162067, "p99_ms": 35.559354, "max_ms": 64.512367, "peak_rss_mb": 101.9, "peak_procs": 2, "cpu_seconds": 47.09, "response_bytes": 70, "extra_headers": [], "monitor_samples": 58, "start_pkg_c": 79, "start_mean_mhz": 1251}
+
+== python-sync (port 19081), run 2 ==
+    cooling from 96 C to 78 C (6s)
+python-sync    run 2  rps=32711.2   rps/core=46072.1  cores=0.71  p50=8.744581 p99=39.619875 peakRSS=9.8     errs=0 retries=0  @79C/1597MHz
+{"server": "python-sync", "status": "ok", "run": 2, "port": 19081, "rps": 32711.2, "rps_per_core": 46072.1, "cores_used": 0.71, "ok": 300000, "errors": 0, "retries": 0, "elapsed_seconds": 9.171179392, "p50_ms": 8.744581, "p90_ms": 23.701721, "p99_ms": 39.619875, "max_ms": 63.115619, "peak_rss_mb": 9.8, "peak_procs": 1, "cpu_seconds": 6.48, "response_bytes": 70, "extra_headers": [], "monitor_samples": 92, "start_pkg_c": 79, "start_mean_mhz": 1597}
+
+########## round 3 of 3 ##########
+
+== forge-mt (port 19080), run 3 ==
+    cooling from 103 C to 78 C (6s)
+forge-mt       run 3  rps=90794.2   rps/core=47536.2  cores=1.91  p50=3.17638 p99=24.5393 peakRSS=4.2     errs=0 retries=0  @79C/1379MHz
+{"server": "forge-mt", "status": "ok", "run": 3, "port": 19080, "rps": 90794.2, "rps_per_core": 47536.2, "cores_used": 1.91, "ok": 300000, "errors": 0, "retries": 0, "elapsed_seconds": 3.3041752349999998, "p50_ms": 3.17638, "p90_ms": 8.328423, "p99_ms": 24.5393, "max_ms": 50.521838, "peak_rss_mb": 4.2, "peak_procs": 1, "cpu_seconds": 6.3, "response_bytes": 70, "extra_headers": [], "monitor_samples": 33, "start_pkg_c": 79, "start_mean_mhz": 1379}
+
+== forge-hybrid (port 19084), run 3 ==
+    cooling from 96 C to 78 C (8s)
+forge-hybrid   run 3  rps=93883.6   rps/core=30781.5  cores=3.05  p50=3.077167 p99=24.173691 peakRSS=4.6     errs=0 retries=0  @78C/1365MHz
+{"server": "forge-hybrid", "status": "ok", "run": 3, "port": 19084, "rps": 93883.6, "rps_per_core": 30781.5, "cores_used": 3.05, "ok": 300000, "errors": 0, "retries": 0, "elapsed_seconds": 3.195446122, "p50_ms": 3.077167, "p90_ms": 7.782827, "p99_ms": 24.173691, "max_ms": 56.891013, "peak_rss_mb": 4.6, "peak_procs": 1, "cpu_seconds": 9.74, "response_bytes": 70, "extra_headers": [], "monitor_samples": 32, "start_pkg_c": 78, "start_mean_mhz": 1365}
+
+== forge-uring (port 19087), run 3 ==
+    cooling from 97 C to 78 C (5s)
+forge-uring    run 3  rps=82615.5   rps/core=25111.1  cores=3.29  p50=3.320746 p99=29.052817 peakRSS=5.1     errs=0 retries=0  @78C/1317MHz
+{"server": "forge-uring", "status": "ok", "run": 3, "port": 19087, "rps": 82615.5, "rps_per_core": 25111.1, "cores_used": 3.29, "ok": 300000, "errors": 0, "retries": 0, "elapsed_seconds": 3.63128017, "p50_ms": 3.320746, "p90_ms": 9.263538, "p99_ms": 29.052817, "max_ms": 76.145634, "peak_rss_mb": 5.1, "peak_procs": 1, "cpu_seconds": 11.96, "response_bytes": 70, "extra_headers": [], "monitor_samples": 37, "start_pkg_c": 78, "start_mean_mhz": 1317}
+
+== c-pthread (port 19090), run 3 ==
+    cooling from 96 C to 78 C (5s)
+c-pthread      run 3  rps=99730.7   rps/core=56028.5  cores=1.78  p50=2.902094 p99=22.779211 peakRSS=1.9     errs=0 retries=0  @78C/1179MHz
+{"server": "c-pthread", "status": "ok", "run": 3, "port": 19090, "rps": 99730.7, "rps_per_core": 56028.5, "cores_used": 1.78, "ok": 300000, "errors": 0, "retries": 0, "elapsed_seconds": 3.008101796, "p50_ms": 2.902094, "p90_ms": 7.382242, "p99_ms": 22.779211, "max_ms": 54.519051, "peak_rss_mb": 1.9, "peak_procs": 1, "cpu_seconds": 5.36, "response_bytes": 70, "extra_headers": [], "monitor_samples": 31, "start_pkg_c": 78, "start_mean_mhz": 1179}
+
+== rust-axum (port 19083), run 3 ==
+    cooling from 100 C to 78 C (4s)
+rust-axum      run 3  rps=42330.1   rps/core=14252.6  cores=2.97  p50=1.723153 p99=14.281223 peakRSS=5.6     errs=0 retries=0  @79C/1175MHz
+{"server": "rust-axum", "status": "ok", "run": 3, "port": 19083, "rps": 42330.1, "rps_per_core": 14252.6, "cores_used": 2.97, "ok": 300000, "errors": 0, "retries": 0, "elapsed_seconds": 7.087157941, "p50_ms": 1.723153, "p90_ms": 5.296151, "p99_ms": 14.281223, "max_ms": 4089.285908, "peak_rss_mb": 5.6, "peak_procs": 1, "cpu_seconds": 21.03, "response_bytes": 148, "extra_headers": ["content-type", "date"], "monitor_samples": 82, "start_pkg_c": 79, "start_mean_mhz": 1175}
+
+== go-nethttp (port 19091), run 3 ==
+    cooling from 96 C to 78 C (4s)
+go-nethttp     run 3  rps=33743.6   rps/core=7000.8   cores=4.82  p50=7.603047 p99=43.841802 peakRSS=19.9    errs=0 retries=0  @79C/1104MHz
+{"server": "go-nethttp", "status": "ok", "run": 3, "port": 19091, "rps": 33743.6, "rps_per_core": 7000.8, "cores_used": 4.82, "ok": 300000, "errors": 0, "retries": 0, "elapsed_seconds": 8.890569979, "p50_ms": 7.603047, "p90_ms": 28.970683, "p99_ms": 43.841802, "max_ms": 59.031377, "peak_rss_mb": 19.9, "peak_procs": 1, "cpu_seconds": 42.81, "response_bytes": 70, "extra_headers": [], "monitor_samples": 88, "start_pkg_c": 79, "start_mean_mhz": 1104}
+
+== go-raw (port 19092), run 3 ==
+    cooling from 102 C to 78 C (8s)
+go-raw         run 3  rps=55653.2   rps/core=12151.4  cores=4.58  p50=4.173599 p99=46.79211 peakRSS=21.7    errs=0 retries=0  @79C/1048MHz
+{"server": "go-raw", "status": "ok", "run": 3, "port": 19092, "rps": 55653.2, "rps_per_core": 12151.4, "cores_used": 4.58, "ok": 300000, "errors": 0, "retries": 0, "elapsed_seconds": 5.3905229, "p50_ms": 4.173599, "p90_ms": 16.117161, "p99_ms": 46.79211, "max_ms": 83.166242, "peak_rss_mb": 21.7, "peak_procs": 1, "cpu_seconds": 24.67, "response_bytes": 70, "extra_headers": [], "monitor_samples": 54, "start_pkg_c": 79, "start_mean_mhz": 1048}
+
+== node-cluster (port 19093), run 3 ==
+    cooling from 101 C to 78 C (7s)
+node-cluster   run 3  rps=13374.7   rps/core=2160.7   cores=6.19  p50=19.724061 p99=74.794906 peakRSS=2371.7  errs=0 retries=0  @79C/1194MHz
+{"server": "node-cluster", "status": "ok", "run": 3, "port": 19093, "rps": 13374.7, "rps_per_core": 2160.7, "cores_used": 6.19, "ok": 300000, "errors": 0, "retries": 0, "elapsed_seconds": 22.43040241, "p50_ms": 19.724061, "p90_ms": 60.660152, "p99_ms": 74.794906, "max_ms": 110.899763, "peak_rss_mb": 2371.7, "peak_procs": 19, "cpu_seconds": 138.8, "response_bytes": 70, "extra_headers": [], "monitor_samples": 214, "start_pkg_c": 79, "start_mean_mhz": 1194}
+
+== node-single (port 19094), run 3 ==
+    cooling from 103 C to 78 C (10s)
+node-single    run 3  rps=11605.7   rps/core=13495.0  cores=0.86  p50=27.584156 p99=74.946257 peakRSS=124.4   errs=0 retries=0  @80C/1100MHz
+{"server": "node-single", "status": "ok", "run": 3, "port": 19094, "rps": 11605.7, "rps_per_core": 13495.0, "cores_used": 0.86, "ok": 300000, "errors": 0, "retries": 0, "elapsed_seconds": 25.849450346, "p50_ms": 27.584156, "p90_ms": 59.031857, "p99_ms": 74.946257, "max_ms": 90.292811, "peak_rss_mb": 124.4, "peak_procs": 1, "cpu_seconds": 22.34, "response_bytes": 70, "extra_headers": [], "monitor_samples": 256, "start_pkg_c": 80, "start_mean_mhz": 1100}
+
+== erlang-beam (port 19095), run 3 ==
+    cooling from 98 C to 78 C (12s)
+erlang-beam    run 3  rps=51882.1   rps/core=6405.2   cores=8.1   p50=5.026652 p99=35.590016 peakRSS=101.2   errs=0 retries=0  @79C/1082MHz
+{"server": "erlang-beam", "status": "ok", "run": 3, "port": 19095, "rps": 51882.1, "rps_per_core": 6405.2, "cores_used": 8.1, "ok": 300000, "errors": 0, "retries": 0, "elapsed_seconds": 5.782337211, "p50_ms": 5.026652, "p90_ms": 16.300231, "p99_ms": 35.590016, "max_ms": 72.935782, "peak_rss_mb": 101.2, "peak_procs": 2, "cpu_seconds": 46.82, "response_bytes": 70, "extra_headers": [], "monitor_samples": 57, "start_pkg_c": 79, "start_mean_mhz": 1082}
+
+== python-sync (port 19081), run 3 ==
+    cooling from 97 C to 78 C (9s)
+python-sync    run 3  rps=32979.9   rps/core=46450.6  cores=0.71  p50=8.617596 p99=37.723479 peakRSS=9.8     errs=0 retries=0  @79C/995MHz
+{"server": "python-sync", "status": "ok", "run": 3, "port": 19081, "rps": 32979.9, "rps_per_core": 46450.6, "cores_used": 0.71, "ok": 300000, "errors": 0, "retries": 0, "elapsed_seconds": 9.096444294, "p50_ms": 8.617596, "p90_ms": 24.891335, "p99_ms": 37.723479, "max_ms": 50.829169, "peak_rss_mb": 9.8, "peak_procs": 1, "cpu_seconds": 6.42, "response_bytes": 70, "extra_headers": [], "monitor_samples": 91, "start_pkg_c": 79, "start_mean_mhz": 995}
+
