@@ -7,7 +7,7 @@
 
 A **Hybrid Lightweight Process + Coroutine** language — an AOT-compiled language that combines Elixir/Erlang-style lightweight processes with coroutines.
 
-Forge source (`.fg`) is compiled directly to native binaries. The compiler streams generated code to `clang` in memory — no `.c` files are written unless you pass `--emit-c`.
+Forge source (`.fg`) is compiled to native binaries through a C backend. The driver writes a temporary C file, invokes the selected C compiler, and removes intermediates by default. Use `--emit-c` for persistent C output or `--keep-temp` to retain intermediates.
 
 ## Features
 
@@ -26,9 +26,9 @@ Forge source (`.fg`) is compiled directly to native binaries. The compiler strea
 - **Pattern matching** — `match expr { pat => stmt, _ => default }` on integers
 - **Comptime constants** — `const NAME = expr` folded at compile time
 - **Arena allocator** — bump allocation for HTTP request bodies (per-request reset)
-- **Preemptive scheduling** — 2000-reduction budget per coroutine (BEAM-style)
+- **Cooperative scheduling** — a budget of 2000 coroutine resumptions; long-running coroutine bodies must yield explicitly
 - **Ownership** — `own let` for heap strings, `move(x)` and `send proc, tag, move(msg)` for move semantics
-- **Supervisor** — Elixir-style fault-recovery policies
+- **Supervisor declarations** — restart-policy registration; automatic fault recovery is not implemented
 
 ## Requirements
 
@@ -72,6 +72,7 @@ cd forge
 
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build
+ctest --test-dir build --output-on-failure
 ```
 
 ### Windows (MSYS2 / MinGW)
@@ -186,6 +187,16 @@ cmake --build build --target bench_server
 Ensure ports **19080**–**19083** are free before running (`fuser -k 19080/tcp 19081/tcp 19082/tcp 19083/tcp` if a prior run left servers behind).
 
 Results are written to `benchmark/results.txt` (gitignored).
+
+## Current limitations
+
+Forge is an experimental language. `--check` parses, loads modules, and runs the optimizer; it does not perform complete type or ownership checking. Ownership diagnostics currently run during code generation. Scheduler synchronization, coroutine control flow, and fault recovery need further work before production use.
+
+The Lean proofs cover an abstract expression model, not the entire C compiler or runtime. In particular, the model uses unbounded integers and does not cover C signed overflow, floating-point behavior, or effects.
+
+The HTTP results describe a cached-response C runtime path with minimal request handling. They do not establish that Forge is generally faster than other languages or full HTTP frameworks.
+
+A source-based review, verified fixes, and reproducible regression commands are recorded in [the September 2026 review](docs/language-review-2026-09-30.md).
 
 ## Runtime: M:N Scheduler + Event Loop
 
@@ -396,3 +407,24 @@ Issues and pull requests are welcome. Please read **[CONTRIBUTING.md](CONTRIBUTI
 ## Design Docs
 
 For the execution model and design goals, see [docs/first.md](docs/first.md).
+
+## Browser output and distribution
+
+`forge main.fg --emit-js -o main.js` emits JavaScript for functions, source modules,
+enums, control flow and native main. Integers use BigInt and 64-bit arithmetic.
+Extern functions resolve through `globalThis.ForgeNative`. Native processes,
+coroutines, structs and linking archives are rejected in this mode. String
+length/index use UTF-8 bytes; slicing must stay on valid UTF-8 boundaries in a
+browser. The JavaScript backend does not supply ownership or memory safety.
+
+The separate [Forge Platform](https://github.com/Helloworld0822/forge-platform)
+contains the React/TypeScript/Tailwind website, Forge registry backend, Forge
+package manager and SHA-256-checked `curl | bash` installer. Preview releases
+support Linux x86_64 with glibc 2.35+ and a C compiler.
+[Forge Browser](https://github.com/Helloworld0822/forge-browser) provides generic
+DOM/HTTP primitives for Forge applications.
+
+The [portfolio migration](https://github.com/Helloworld0822/portfolio-platform/pull/1)
+uses Forge server and browser application code with independent PostgreSQL, web
+and browser modules. Its performance report compares complete implementations
+on one host; it is not a universal Forge-versus-Rust benchmark.

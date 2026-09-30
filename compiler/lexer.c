@@ -1,4 +1,6 @@
 #include "lexer.h"
+#include <errno.h>
+#include <math.h>
 
 static bool is_ident_start(char c) {
     return isalpha((unsigned char)c) || c == '_';
@@ -93,15 +95,19 @@ static Token read_number(Lexer *lx) {
         }
     }
     ForgeStr lex = { (char *)lx->src + start, lx->pos - start };
-    char buf[64];
-    size_t n = lex.len < 63 ? lex.len : 63;
-    memcpy(buf, lex.data, n);
-    buf[n] = '\0';
+    char *buf = forge_strdup(lex);
+    if (!buf) forge_die("out of memory");
     Token t = make_token(lx, is_float ? TOK_FLOAT : TOK_INT, lex);
     t.line = lx->line;
     t.col = col;
-    if (is_float) t.float_val = atof(buf);
-    else t.int_val = atoll(buf);
+    errno = 0;
+    if (is_float) t.float_val = strtod(buf, NULL);
+    else t.int_val = strtoll(buf, NULL, 10);
+    free(buf);
+    if (errno == ERANGE || (is_float && !isfinite(t.float_val))) {
+        fprintf(stderr, "forge:%d:%d: numeric literal out of range\n", t.line, t.col);
+        exit(1);
+    }
     return t;
 }
 

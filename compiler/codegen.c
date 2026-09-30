@@ -145,7 +145,7 @@ static void cg_build_fn_table(Codegen *cg) {
   if (!cg->fn_table) forge_die("out of memory");
     size_t k = 0;
     for (size_t i = 0; i < prog->fn_count; i++)
-        if (!prog->functions[i].is_extern) cg->fn_table[k++] = &prog->functions[i];
+        cg->fn_table[k++] = &prog->functions[i];
     if (prog->library.present) {
         for (size_t i = 0; i < prog->library.fn_count; i++)
             cg->fn_table[k++] = &prog->library.functions[i];
@@ -215,10 +215,14 @@ static int cg_expr_is_string(Codegen *cg, Expr *e) {
     if (e->kind == EXPR_IDENT) return cg_lookup_local(cg, e->as.ident).kind == TY_STRING;
     if (e->kind == EXPR_CALL) {
         if (cg_stdlib_returns_string(cg, e->as.call.name)) return 1;
-        FnDecl *fn = cg_lookup_fn(cg, e->as.call.name);
+        FnDecl *fn = cg_resolve_fn_ref(cg, e->as.call.name);
         return fn && fn->ret_type.kind == TY_STRING;
     }
-    if (e->kind == EXPR_QUAL_CALL) return qual_call_returns_string(e->as.qual_call.name);
+    if (e->kind == EXPR_QUAL_CALL) {
+        FnDecl *fn = lookup_module_fn(cg->prog, e->as.qual_call.module, e->as.qual_call.name);
+        if (fn) return fn->ret_type.kind == TY_STRING;
+        return qual_call_returns_string(e->as.qual_call.name);
+    }
     return 0;
 }
 
@@ -258,16 +262,25 @@ static void c_type_name(FILE *out, ForgeType ty) {
 }
 
 static void emit_stmts(Codegen *cg, Stmt *s, const char *proc_var, bool in_coro, const char *state_var);
-static CoroDecl *find_coro(ProcessDecl *proc, ForgeStr name);
 
 static void emit_expr(Codegen *cg, Expr *e) {
     switch (e->kind) {
     case EXPR_INT:
-        fprintf(cg->out, "%lld", (long long)e->as.int_val);
+        if (e->as.int_val == INT64_MIN) {
+            fputs("(-INT64_C(9223372036854775807) - INT64_C(1))", cg->out);
+        } else if (e->as.int_val < 0) {
+            fprintf(cg->out, "(-INT64_C(%lld))", (long long)-e->as.int_val);
+        } else {
+            fprintf(cg->out, "INT64_C(%lld)", (long long)e->as.int_val);
+        }
         break;
-    case EXPR_FLOAT:
-        fprintf(cg->out, "%g", e->as.float_val);
+    case EXPR_FLOAT: {
+        char literal[64];
+        snprintf(literal, sizeof(literal), "%.17g", e->as.float_val);
+        fputs(literal, cg->out);
+        if (!strpbrk(literal, ".eE")) fputs(".0", cg->out);
         break;
+    }
     case EXPR_BOOL:
         fprintf(cg->out, "%s", e->as.bool_val ? "1" : "0");
         break;
@@ -275,6 +288,15 @@ static void emit_expr(Codegen *cg, Expr *e) {
         fputc('"', cg->out);
         for (size_t i = 0; i < e->as.string_val.len; i++) {
             char c = e->as.string_val.data[i];
+            if (c == '\\' && i + 1 < e->as.string_val.len &&
+                strchr("nrt\\\"", e->as.string_val.data[i + 1])) {
+                fputc('\\', cg->out);
+                fputc(e->as.string_val.data[++i], cg->out);
+                continue;
+            }
+            if (c == '\n') { fputs("\\n", cg->out); continue; }
+            if (c == '\r') { fputs("\\r", cg->out); continue; }
+            if (c == '\t') { fputs("\\t", cg->out); continue; }
             if (c == '"' || c == '\\') fputc('\\', cg->out);
             fputc(c, cg->out);
         }
@@ -413,47 +435,6 @@ static void emit_expr(Codegen *cg, Expr *e) {
     }
 }
 
-static int stmt_has_suspend(Stmt *s) {
-    if (!s) return 0;
-    if (s->kind == STMT_YIELD || s->kind == STMT_AWAIT) return 1;
-    if (s->kind == STMT_IF) {
-        return stmt_has_suspend(s->as.if_stmt.then_br->first) ||
-               (s->as.if_stmt.else_br && stmt_has_suspend(s->as.if_stmt.else_br->first));
-    }
-    if (s->kind == STMT_WHILE) return stmt_has_suspend(s->as.while_stmt.body->first);
-    if (s->kind == STMT_BLOCK) return stmt_has_suspend(s->as.block->first);
-    return 0;
-}
-
-static int coro_body_has_suspend(CoroDecl *coro) {
-    for (Stmt *s = coro->body.first; s; s = s->next) {
-        if (stmt_has_suspend(s)) return 1;
-    }
-    return 0;
-}
-
-static void emit_coro_spawn_inits(Codegen *cg, CoroDecl *coro) {
-    for (Stmt *s = coro->body.first; s; s = s->next) {
-        if (stmt_has_suspend(s)) break;
-        if (s->kind == STMT_LET && s->as.let.init) {
-            cg_indent(cg);
-            fprintf(cg->out, "init->%.*s = ", (int)s->as.let.name.len, s->as.let.name.data);
-            const char *saved = cg->state_prefix;
-            cg->state_prefix = "init->";
-            emit_expr(cg, s->as.let.init);
-            cg->state_prefix = saved;
-            fputs(";\n", cg->out);
-        }
-    }
-}
-
-static CoroDecl *find_coro(ProcessDecl *proc, ForgeStr name) {
-    for (size_t i = 0; i < proc->coro_count; i++) {
-        if (forge_str_eq(proc->coros[i].name, name)) return &proc->coros[i];
-    }
-    return NULL;
-}
-
 static void emit_coro_state_struct(Codegen *cg, CoroDecl *coro) {
     fprintf(cg->out, "typedef struct {\n");
     fprintf(cg->out, "    int _forge_step;\n");
@@ -470,46 +451,26 @@ static void emit_coro_state_struct(Codegen *cg, CoroDecl *coro) {
     fprintf(cg->out, "} %.*s_state_t;\n\n", (int)coro->name.len, coro->name.data);
 }
 
-static int count_yield_points(Stmt *s) {
-    int n = 0;
-    while (s) {
-        switch (s->kind) {
-        case STMT_YIELD: n++; break;
-        case STMT_AWAIT: n++; break;
-        case STMT_IF:
-            n += count_yield_points(s->as.if_stmt.then_br->first);
-            if (s->as.if_stmt.else_br) n += count_yield_points(s->as.if_stmt.else_br->first);
-            break;
-        case STMT_WHILE: n += count_yield_points(s->as.while_stmt.body->first); break;
-        case STMT_BLOCK: n += count_yield_points(s->as.block->first); break;
-        default: break;
-        }
-        s = s->next;
-    }
-    return n;
-}
-
-static void emit_coro_body(Codegen *cg, CoroDecl *coro, const char *state_var) {
-    int step = 0;
+static void emit_coro_body(Codegen *cg, CoroDecl *coro, const char *state_var, int *next_step) {
     Stmt *s = coro->body.first;
     while (s) {
         if (s->kind == STMT_YIELD) {
-            cg_line(cg, "case %d:", step++);
-            cg_line(cg, "    fr_coro_set_step(__coro, %d);", step);
-            cg_line(cg, "    return fr_yield(__coro);");
-            cg_line(cg, "case %d:", step);
+            int resume_step = (*next_step)++;
+            cg_line(cg, "fr_coro_set_step(__coro, %d);", resume_step);
+            cg_line(cg, "return fr_yield(__coro);");
+            cg_line(cg, "case %d:;", resume_step);
             s = s->next;
             continue;
         }
 
         if (s->kind == STMT_AWAIT) {
-            cg_line(cg, "case %d:", step++);
-            cg_line(cg, "    fr_coro_set_step(__coro, %d);", step);
+            int resume_step = (*next_step)++;
+            cg_line(cg, "fr_coro_set_step(__coro, %d);", resume_step);
+            cg_line(cg, "case %d:;", resume_step);
             cg_indent(cg);
             fputs("if (!fr_await_fd(__coro, ", cg->out);
             emit_expr(cg, s->as.await_expr);
-            fputs(", FR_EVENT_READ)) return fr_yield(__coro);\n", cg->out);
-            cg_line(cg, "case %d:", step++);
+            fputs(", FR_EVENT_READ)) return FR_CORO_WAITING_IO;\n", cg->out);
             s = s->next;
             continue;
         }
@@ -523,11 +484,6 @@ static void emit_coro_body(Codegen *cg, CoroDecl *coro, const char *state_var) {
             fputs(";\n", cg->out);
             s = s->next;
             continue;
-        }
-
-        if (count_yield_points(s) > 0 || s->kind == STMT_IF || s->kind == STMT_WHILE ||
-            s->kind == STMT_BLOCK || s->kind == STMT_AWAIT) {
-            cg_line(cg, "case %d:", step++);
         }
 
         switch (s->kind) {
@@ -547,14 +503,14 @@ static void emit_coro_body(Codegen *cg, CoroDecl *coro, const char *state_var) {
             emit_expr(cg, s->as.if_stmt.cond);
             fputs(") {\n", cg->out);
             cg->indent++;
-            emit_coro_body(cg, &(CoroDecl){ .body = *s->as.if_stmt.then_br }, state_var);
+            emit_coro_body(cg, &(CoroDecl){ .body = *s->as.if_stmt.then_br }, state_var, next_step);
             cg->indent--;
             cg_indent(cg);
             fputs("}", cg->out);
             if (s->as.if_stmt.else_br) {
                 fputs(" else {\n", cg->out);
                 cg->indent++;
-                emit_coro_body(cg, &(CoroDecl){ .body = *s->as.if_stmt.else_br }, state_var);
+                emit_coro_body(cg, &(CoroDecl){ .body = *s->as.if_stmt.else_br }, state_var, next_step);
                 cg->indent--;
                 cg_line(cg, "}");
             } else {
@@ -566,7 +522,7 @@ static void emit_coro_body(Codegen *cg, CoroDecl *coro, const char *state_var) {
             emit_expr(cg, s->as.while_stmt.cond);
             fputs(") {\n", cg->out);
             cg->indent++;
-            emit_coro_body(cg, &(CoroDecl){ .body = *s->as.while_stmt.body }, state_var);
+            emit_coro_body(cg, &(CoroDecl){ .body = *s->as.while_stmt.body }, state_var, next_step);
             cg->indent--;
             cg_line(cg, "}");
             break;
@@ -604,7 +560,7 @@ static void emit_coro_body(Codegen *cg, CoroDecl *coro, const char *state_var) {
             break;
         case STMT_BLOCK:
             cg->indent++;
-            emit_coro_body(cg, &(CoroDecl){ .body = *s->as.block }, state_var);
+            emit_coro_body(cg, &(CoroDecl){ .body = *s->as.block }, state_var, next_step);
             cg->indent--;
             break;
         default:
@@ -614,7 +570,7 @@ static void emit_coro_body(Codegen *cg, CoroDecl *coro, const char *state_var) {
     }
 }
 
-static void emit_coro_fn(Codegen *cg, ProcessDecl *proc, CoroDecl *coro) {
+static void emit_coro_fn(Codegen *cg, CoroDecl *coro) {
     emit_coro_state_struct(cg, coro);
     fprintf(cg->out, "static fr_coro_status_t %.*s_fn(fr_coro_t *__coro, void *__userdata) {\n",
             (int)coro->name.len, coro->name.data);
@@ -632,7 +588,8 @@ static void emit_coro_fn(Codegen *cg, ProcessDecl *proc, CoroDecl *coro) {
     for (Stmt *s = coro->body.first; s; s = s->next) {
         if (s->kind == STMT_LET) cg_push_local(cg, s->as.let.name, s->as.let.type);
     }
-    emit_coro_body(cg, coro, "st");
+    int next_step = 1;
+    emit_coro_body(cg, coro, "st", &next_step);
     cg->state_prefix = saved_prefix;
     cg->local_count = 0;
     cg->indent--;
@@ -654,7 +611,6 @@ static void emit_coro_fn(Codegen *cg, ProcessDecl *proc, CoroDecl *coro) {
         fprintf(cg->out, "    init->%.*s = %.*s;\n", (int)p->name.len, p->name.data,
                 (int)p->name.len, p->name.data);
     }
-    emit_coro_spawn_inits(cg, coro);
     fprintf(cg->out, "    fr_coro_spawn(proc, %.*s_fn, init, sizeof(%.*s_state_t));\n",
             (int)coro->name.len, coro->name.data,
             (int)coro->name.len, coro->name.data);
@@ -958,7 +914,8 @@ void codegen_emit_library(Program *prog, FILE *out_c, FILE *out_h, const char *r
     }
     fputs("\n", out_c);
 
-    Codegen cg = { out_c, 0, prog, NULL, NULL, 0, 0, lib->imports, lib->import_count, 0, NULL, 0 };
+    Codegen cg = { .out = out_c, .prog = prog, .imports = lib->imports,
+                   .import_count = lib->import_count };
     cg_build_fn_table(&cg);
     for (size_t i = 0; i < lib->fn_count; i++) {
         FnDecl *fn = &lib->functions[i];
@@ -979,7 +936,8 @@ void codegen_emit_library(Program *prog, FILE *out_c, FILE *out_h, const char *r
 }
 
 void codegen_emit(Program *prog, FILE *out, const char *runtime_include) {
-    Codegen cg = { out, 0, prog, NULL, NULL, 0, 0, prog->imports, prog->import_count, 0, NULL, 0 };
+    Codegen cg = { .out = out, .prog = prog, .imports = prog->imports,
+                   .import_count = prog->import_count };
     cg_build_fn_table(&cg);
 
     fputs("// Generated by Forge compiler (native backend)\n", out);
@@ -1019,10 +977,22 @@ void codegen_emit(Program *prog, FILE *out, const char *runtime_include) {
     }
     fputs("\n", out);
 
+    for (size_t i = 0; i < prog->module_count; i++) {
+        FileModule *mod = &prog->modules[i];
+        for (size_t j = 0; j < mod->fn_count; j++) {
+            char sym[128];
+            forge_mod_mangle(sym, sizeof(sym), mod->name, mod->functions[j].name);
+            fputs("static ", out);
+            emit_fn_signature(out, sym, &mod->functions[j]);
+            fputs(";\n", out);
+        }
+    }
+    fputs("\n", out);
+
     for (size_t i = 0; i < prog->process_count; i++) {
         ProcessDecl *proc = &prog->processes[i];
         for (size_t j = 0; j < proc->coro_count; j++) {
-            emit_coro_fn(&cg, proc, &proc->coros[j]);
+            emit_coro_fn(&cg, &proc->coros[j]);
         }
     }
 

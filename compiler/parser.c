@@ -453,44 +453,16 @@ static Stmt *parse_stmt(Parser *p) {
         return stmt_block(b);
     }
     if (lexer_peek(p->lx).kind == TOK_IDENT) {
-        Token name = lexer_peek(p->lx);
-        lexer_next(p->lx);
-        if (lexer_peek(p->lx).kind == TOK_EQ || lexer_peek(p->lx).kind == TOK_PLUSEQ ||
-            lexer_peek(p->lx).kind == TOK_MINUSEQ || lexer_peek(p->lx).kind == TOK_STAREQ ||
-            lexer_peek(p->lx).kind == TOK_SLASHEQ || lexer_peek(p->lx).kind == TOK_PERCENTEQ) {
+        Lexer saved = *p->lx;
+        Token name = lexer_next(p->lx);
+        TokenKind next = lexer_peek(p->lx).kind;
+        if (next == TOK_EQ || next == TOK_PLUSEQ || next == TOK_MINUSEQ ||
+            next == TOK_STAREQ || next == TOK_SLASHEQ || next == TOK_PERCENTEQ) {
             Stmt *s = parse_assign(p, token_str(name));
             expect(p, TOK_SEMI);
             return s;
         }
-        /* rewind: ident as start of expression */
-        Expr *e = expr_ident(token_str(name));
-        if (lexer_match(p->lx, TOK_LPAREN)) {
-            Expr **args = NULL;
-            size_t n = 0, cap = 0;
-            if (!lexer_match(p->lx, TOK_RPAREN)) {
-                do {
-                    if (n == cap) {
-                        cap = cap ? cap * 2 : 4;
-                        args = (Expr **)realloc(args, cap * sizeof(Expr *));
-                    }
-                    args[n++] = parse_expr(p);
-                } while (lexer_match(p->lx, TOK_COMMA));
-                expect(p, TOK_RPAREN);
-            }
-            e = expr_call(token_str(name), args, n);
-        } else {
-            while (lexer_peek(p->lx).kind == TOK_PLUS || lexer_peek(p->lx).kind == TOK_MINUS ||
-                   lexer_peek(p->lx).kind == TOK_STAR || lexer_peek(p->lx).kind == TOK_SLASH) {
-                Token op = lexer_next(p->lx);
-                BinOp bop = BIN_ADD;
-                if (op.kind == TOK_MINUS) bop = BIN_SUB;
-                else if (op.kind == TOK_STAR) bop = BIN_MUL;
-                else if (op.kind == TOK_SLASH) bop = BIN_DIV;
-                e = expr_binary(bop, e, parse_unary(p));
-            }
-        }
-        expect(p, TOK_SEMI);
-        return stmt_expr(e);
+        *p->lx = saved;
     }
     Expr *e = parse_expr(p);
     expect(p, TOK_SEMI);

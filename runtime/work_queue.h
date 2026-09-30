@@ -8,6 +8,7 @@ typedef struct fr_coro fr_coro_t;
 
 typedef struct fr_run_node {
     fr_coro_t *coro;
+    struct fr_run_node *prev;
     struct fr_run_node *next;
 } fr_run_node_t;
 
@@ -29,6 +30,7 @@ typedef void (*fr_native_fn)(void *arg);
 typedef struct fr_native_node {
     fr_native_fn fn;
     void *arg;
+    struct fr_native_node *prev;
     struct fr_native_node *next;
 } fr_native_node_t;
 
