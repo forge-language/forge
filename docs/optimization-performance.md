@@ -11,10 +11,10 @@ also runs other applications; small differences are not causal proof.
 | 16 KiB byte append | 83.029 ms | 0.0664 ms | Builder avoids quadratic copying/arena retention, 7 runs |
 | Two workers waiting on a pipe for 500 ms, process CPU | 1005.656 ms | 3.101 ms | 99.69% less CPU while idle, 5 alternating runs |
 | Same pipe wait, wall clock | 501.447 ms | 500.688 ms | No material completion-latency penalty in this workload |
-| Warm run-queue push/pop | 22.65 ns | 15.09 ns | 1.50×, bounded node reuse |
-| Warm native-queue push/pop | 22.87 ns | 15.63 ns | 1.46× |
-| Bulk run-queue steal | 13.34 ns | 13.82 ns | About 3.6% slower; no throughput improvement claimed |
-| Bulk native-queue steal | 14.24 ns | 14.18 ns | Effectively unchanged |
+| Warm run-queue push/pop | 22.63 ns | 15.57 ns | 1.45×, bounded node reuse |
+| Warm native-queue push/pop | 23.03 ns | 15.97 ns | 1.44× |
+| Bulk run-queue steal | 13.40 ns | 14.12 ns | About 5.4% slower; no throughput improvement claimed |
+| Bulk native-queue steal | 13.99 ns | 14.29 ns | About 2.1% slower |
 
 The queue node cache retains at most 256 nodes per queue; peak backlog does not
 permanently retain unlimited nodes. Owner FIFO and tail stealing are preserved.
