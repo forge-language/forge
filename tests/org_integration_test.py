@@ -42,11 +42,17 @@ class OrganizationIntegration(unittest.TestCase):
         with sock:
             sock.settimeout(3);sock.sendall(('GET '+path+' HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n').encode())
             data=b''
-            while b'\r\n\r\n' not in data:data+=sock.recv(65536)
+            while b'\r\n\r\n' not in data:
+                chunk=sock.recv(65536)
+                if not chunk:self.fail('HTTP response ended before headers')
+                data+=chunk
             headers,body=data.split(b'\r\n\r\n',1)
             lengths=[x.split(b':',1)[1].strip() for x in headers.split(b'\r\n') if x.lower().startswith(b'content-length:')]
             expected=int(lengths[0]) if lengths else len(body)
-            while len(body)<expected:body+=sock.recv(65536)
+            while len(body)<expected:
+                chunk=sock.recv(65536)
+                if not chunk:self.fail('HTTP body ended early')
+                body+=chunk
         self.assertIn(b'200',headers.split(b'\r\n')[0]);return body
     def server(self,binary):
         process=subprocess.Popen([str(binary)],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
@@ -74,13 +80,18 @@ class OrganizationIntegration(unittest.TestCase):
         port=self.port();binary=self.compile('import http;native main{let s: int=http_listen_tls('+str(port)+',"'+str(cert)+'","'+str(key)+'");http_prepare(s,"tls ok");http_serve_tls_mt(s,2);}')
         self.assertEqual(self.request(self.server(binary),port,tls=True),b'tls ok')
     def test_lsp_initialize_shutdown(self):
-        messages=[{'jsonrpc':'2.0','id':1,'method':'initialize','params':{'rootUri':None,'capabilities':{}}},{'jsonrpc':'2.0','id':2,'method':'shutdown','params':None},{'jsonrpc':'2.0','method':'exit'}]
+        messages=[{'jsonrpc':'2.0','id':1,'method':'initialize','params':{'rootUri':None,'capabilities':{}}},{'jsonrpc':'2.0','id':2,'method':'textDocument/completion','params':{'textDocument':{'uri':'file:///tmp/forge-integration.fg'},'position':{'line':0,'character':0}}},{'jsonrpc':'2.0','id':3,'method':'shutdown','params':None},{'jsonrpc':'2.0','method':'exit'}]
         payload=b''.join(b'Content-Length: '+str(len(body)).encode()+b'\r\n\r\n'+body for body in [json.dumps(m).encode() for m in messages])
         r=subprocess.run([config.lsp],input=payload,capture_output=True,timeout=10)
         self.assertEqual(r.returncode,0,r.stderr);out=r.stdout;responses=[]
         while out:
             header,out=out.split(b'\r\n\r\n',1);length=int(header.split(b':',1)[1]);responses.append(json.loads(out[:length]));out=out[length:]
-        self.assertEqual([x['id'] for x in responses],[1,2]);self.assertIn('capabilities',responses[0]['result'])
+        self.assertEqual([x['id'] for x in responses],[1,2,3]);self.assertIn('capabilities',responses[0]['result']);self.assertIn('str_builder', [x['label'] for x in responses[1]['result']])
+    def test_coroutine_arena_isolation(self):
+        binary=self.compile('import strings;process main{coroutine first(){let b: int=0;b=str_builder();str_builder_append(b,"preserved");yield;println(str_builder_finish(b));}coroutine second(){str_reset_arena();yield;str_reset_arena();}spawn first();spawn second();}')
+        r=subprocess.run([str(binary)],capture_output=True,text=True,timeout=5)
+        self.assertEqual(r.returncode,0,r.stderr);self.assertEqual(r.stdout,'preserved\n')
+
     def test_nested_json_and_string_escapes(self):
         binary=self.compile(r'''import json;native main{println(json_get_path_int("{\"nested\":{\"value\":9007199254740993}}","nested.value"));println("literal\\n");println("actual\nnewline");return 0;}''')
         r=subprocess.run([str(binary)],capture_output=True,text=True,timeout=5)

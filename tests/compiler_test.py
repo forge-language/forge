@@ -40,6 +40,9 @@ class CompilerRegressionTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout, expected)
 
+    def test_string_views_and_builder_snapshots(self):
+        self.run_program('import strings;native main{let v: int=str_view("한글");println(str_view_len(v));println(str_view_at(v,0));println(str_view_at(v,9));let b: int=str_builder();str_builder_append(b,"one");let first: string=str_builder_finish(b);str_builder_char(b,65);println(first);println(str_builder_finish(b));println(str_builder_char(b,0));return 0;}', '6\n237\n-1\none\noneA\n0\n')
+
     def test_imported_extern_and_forward_module_calls(self):
         (Path(self.temp.name) / 'bridge.fg').write_text('extern fn fr_os_getenv(name: string): string;\nfn later(): string { return earlier(); }\nfn earlier(): string { return fr_os_getenv("FORGE_MODULE_TEST"); }\nfn number(): int { return 42; }\n')
         binary = self.compile_program('import bridge;\nnative main { println(bridge.later()); println(bridge.number()); bridge.number(); return 0; }')
@@ -194,7 +197,9 @@ native main {
         (self.source.parent / 'dependency_64' / 'tail.fg').write_text('fn value(): int { return 42; }')
         self.source.write_text('import tail; native main { println(tail.value()); return 0; }')
         binary = self.source.parent / 'many_dependencies'
-        result = self.invoke(self.source, '-o', binary, *directories)
+        result = self.invoke(self.source, '-o', binary, *directories,
+                             '--cc', config.cc, '--forge-root', config.root,
+                             '--lib-dir', config.lib_dir)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(subprocess.check_output([str(binary)], text=True), '42\n')
 

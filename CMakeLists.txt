@@ -465,13 +465,46 @@ if(BUILD_TESTING)
     add_test(NAME work_queue_regressions COMMAND work_queue_test)
     set_tests_properties(work_queue_regressions PROPERTIES TIMEOUT 30)
 
+    add_executable(string_test tests/string_test.c)
+    target_link_libraries(string_test PRIVATE forge_runtime)
+    add_test(NAME string_regressions COMMAND string_test)
+
+    if(UNIX)
+        add_executable(scheduler_test tests/scheduler_test.c)
+        target_link_libraries(scheduler_test PRIVATE forge_runtime)
+        if(NOT MSVC)
+            target_compile_options(scheduler_test PRIVATE -UNDEBUG)
+        endif()
+        add_test(NAME scheduler_regressions COMMAND scheduler_test)
+        set_tests_properties(scheduler_regressions PROPERTIES TIMEOUT 30)
+    endif()
+
+    foreach(test_target optimizer_test arena_test work_queue_test string_test)
+        if(MSVC)
+            target_compile_options(${test_target} PRIVATE /UNDEBUG)
+        else()
+            target_compile_options(${test_target} PRIVATE -UNDEBUG)
+        endif()
+    endforeach()
+
     find_package(Python3 COMPONENTS Interpreter)
     if(Python3_Interpreter_FOUND)
+        add_test(NAME module_merge_regressions
+            COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/module_merge_test.py"
+                "$<TARGET_FILE:forge>")
         add_test(NAME compiler_regressions
             COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/compiler_test.py"
                 --forge "$<TARGET_FILE:forge>" --root "${CMAKE_SOURCE_DIR}"
                 --lib-dir "${CMAKE_BINARY_DIR}/lib" --cc "${CMAKE_C_COMPILER}")
         set_tests_properties(compiler_regressions PROPERTIES TIMEOUT 120)
+        if(UNIX)
+            add_test(NAME organization_integration_regressions
+                COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/org_integration_test.py"
+                    --forge "$<TARGET_FILE:forge>" --root "${CMAKE_SOURCE_DIR}"
+                    --lib-dir "${CMAKE_BINARY_DIR}/lib" --cc "${CMAKE_C_COMPILER}"
+                    --lsp "${FORGE_LSP_BIN}")
+            set_tests_properties(organization_integration_regressions PROPERTIES TIMEOUT 120)
+        endif()
         find_program(FORGE_NODE node)
         if(FORGE_NODE)
             add_test(NAME javascript_regressions COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/js_test.py" "$<TARGET_FILE:forge>")
@@ -482,3 +515,11 @@ endif()
 add_executable(work_queue_bench EXCLUDE_FROM_ALL benchmark/work_queue_bench.c)
 target_include_directories(work_queue_bench PRIVATE runtime)
 target_link_libraries(work_queue_bench PRIVATE forge_runtime)
+
+add_executable(string_bench EXCLUDE_FROM_ALL benchmark/string_bench.c)
+target_link_libraries(string_bench PRIVATE forge_runtime)
+
+if(UNIX)
+    add_executable(scheduler_bench EXCLUDE_FROM_ALL benchmark/scheduler_bench.c)
+    target_link_libraries(scheduler_bench PRIVATE forge_runtime)
+endif()

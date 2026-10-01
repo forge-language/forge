@@ -1,6 +1,7 @@
 #include "forge/arena.h"
 #include <stdlib.h>
 #include <string.h>
+#include <stdatomic.h>
 #ifndef _WIN32
 #include <pthread.h>
 #endif
@@ -19,8 +20,8 @@ struct fr_arena {
 };
 
 static _Thread_local fr_arena_t *tls_arena = NULL;
-static fr_arena_coro_provider_fn g_coro_provider = NULL;
-void fr_arena_set_coro_provider(fr_arena_coro_provider_fn fn) { g_coro_provider = fn; }
+static _Atomic(fr_arena_coro_provider_fn) g_coro_provider = NULL;
+void fr_arena_set_coro_provider(fr_arena_coro_provider_fn fn) { atomic_store(&g_coro_provider, fn); }
 #ifndef _WIN32
 static pthread_key_t tls_arena_key;
 static pthread_once_t tls_arena_once = PTHREAD_ONCE_INIT;
@@ -105,8 +106,9 @@ void fr_arena_reset(fr_arena_t *a) {
 }
 
 fr_arena_t *fr_arena_tls(void) {
-    if (g_coro_provider) {
-        fr_arena_t *arena = g_coro_provider();
+    fr_arena_coro_provider_fn provider = atomic_load(&g_coro_provider);
+    if (provider) {
+        fr_arena_t *arena = provider();
         if (arena) return arena;
     }
     if (!tls_arena) {
@@ -126,8 +128,9 @@ fr_arena_t *fr_arena_tls(void) {
 }
 
 void fr_arena_tls_reset(void) {
-    if (g_coro_provider) {
-        fr_arena_t *arena = g_coro_provider();
+    fr_arena_coro_provider_fn provider = atomic_load(&g_coro_provider);
+    if (provider) {
+        fr_arena_t *arena = provider();
         if (arena) { fr_arena_reset(arena); return; }
     }
     if (tls_arena) fr_arena_reset(tls_arena);

@@ -190,11 +190,105 @@ static void test_concurrent_native(void) {
     free(items);
 }
 
+/* Drain a burst larger than the retained cache, then reuse nodes repeatedly.
+ * Validate both the retention bound and FIFO/LIFO behavior after recycling. */
+static void test_recycling(void) {
+    fr_run_queue_t run;
+    fr_native_queue_t native;
+    item_t items[1000];
+    fr_run_queue_init(&run);
+    fr_native_queue_init(&native);
+    for (size_t i = 0; i < 1000; i++) {
+        items[i].id = i;
+        CHECK(fr_run_queue_try_push(&run, (fr_coro_t *)&items[i]));
+        CHECK(fr_native_queue_try_push(&native, native_task, &items[i]));
+    }
+    for (size_t i = 0; i < 1000; i++) {
+        void *arg;
+        CHECK(fr_run_queue_pop(&run) == (fr_coro_t *)&items[i]);
+        CHECK(fr_native_queue_pop(&native, &arg) == native_task);
+        CHECK(arg == &items[i]);
+    }
+    CHECK(run.free_count == 256 && native.free_count == 256);
+    fr_run_node_t *run_cached = run.free_nodes;
+    fr_native_node_t *native_cached = native.free_nodes;
+    for (size_t i = 0; i < 20000; i++) {
+        void *arg;
+        fr_run_queue_push(&run, (fr_coro_t *)&items[0]);
+        fr_native_queue_push(&native, native_task, &items[0]);
+        CHECK(run.head == run_cached && native.head == native_cached);
+        CHECK(fr_run_queue_steal(&run, NULL) == (fr_coro_t *)&items[0]);
+        CHECK(fr_native_queue_steal(&native, &arg) == native_task && arg == &items[0]);
+        CHECK(run.free_count == 256 && native.free_count == 256);
+        check_run_links(&run);
+        check_native_links(&native);
+    }
+    fr_run_queue_destroy(&run);
+    fr_native_queue_destroy(&native);
+}
+
+typedef struct {
+    fr_run_queue_t *queue;
+    item_t *items;
+    atomic_uint *seen;
+    atomic_int *producers;
+    unsigned id;
+} mixed_worker_t;
+static void *produce_mixed(void *arg) {
+    mixed_worker_t *w = arg;
+    for (size_t i = w->id; i < ITEM_COUNT; i += THREAD_COUNT)
+        CHECK(fr_run_queue_try_push(w->queue, (fr_coro_t *)&w->items[i]));
+    atomic_fetch_sub(w->producers, 1);
+    return NULL;
+}
+static void *consume_mixed(void *arg) {
+    mixed_worker_t *w = arg;
+    for (;;) {
+        fr_coro_t *c = w->id & 1 ? fr_run_queue_steal(w->queue, NULL) : fr_run_queue_pop(w->queue);
+        if (c) {
+            item_t *item = (item_t *)c;
+            atomic_fetch_add(&w->seen[item->id], 1);
+        } else if (atomic_load(w->producers) == 0) {
+            /* A producer may have published between the first empty pop and
+             * its completion. Recheck after observing all producers done. */
+            c = fr_run_queue_pop(w->queue);
+            if (!c) break;
+            item_t *item = (item_t *)c;
+            atomic_fetch_add(&w->seen[item->id], 1);
+        } else fr_thread_yield();
+    }
+    return NULL;
+}
+static void test_concurrent_recycling(void) {
+    fr_run_queue_t q;
+    item_t *items = calloc(ITEM_COUNT, sizeof(*items));
+    atomic_uint *seen = calloc(ITEM_COUNT, sizeof(*seen));
+    atomic_int producers = THREAD_COUNT;
+    fr_thread_t *producer_threads[THREAD_COUNT], *consumer_threads[THREAD_COUNT];
+    mixed_worker_t workers[THREAD_COUNT];
+    CHECK(items && seen);
+    fr_run_queue_init(&q);
+    for (size_t i = 0; i < ITEM_COUNT; i++) { items[i].id = i; atomic_init(&seen[i], 0); }
+    for (unsigned i = 0; i < THREAD_COUNT; i++) {
+        workers[i] = (mixed_worker_t){&q, items, seen, &producers, i};
+        CHECK(fr_thread_start(&consumer_threads[i], consume_mixed, &workers[i]) == 0);
+        CHECK(fr_thread_start(&producer_threads[i], produce_mixed, &workers[i]) == 0);
+    }
+    for (int i = 0; i < THREAD_COUNT; i++) CHECK(fr_thread_join(producer_threads[i]) == 0);
+    for (int i = 0; i < THREAD_COUNT; i++) CHECK(fr_thread_join(consumer_threads[i]) == 0);
+    for (size_t i = 0; i < ITEM_COUNT; i++) CHECK(atomic_load(&seen[i]) == 1);
+    CHECK(q.count == 0 && q.free_count <= 256);
+    fr_run_queue_destroy(&q);
+    free(items); free(seen);
+}
+
 int main(void) {
     test_run_operations();
     test_native_operations();
     test_concurrent_run();
     test_concurrent_native();
+    test_recycling();
+    test_concurrent_recycling();
     puts("work queue tests passed");
     return 0;
 }

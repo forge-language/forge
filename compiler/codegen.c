@@ -318,7 +318,7 @@ static const char *const STDLIB_STRING_FNS[] = {
     "fr_io_prompt", "fr_io_read_fd", "fr_io_read_line", "fr_io_read_stdin",
     "fr_json_get_string", "fr_json_stringify_int", "fr_json_stringify_str",
     "fr_os_argv", "fr_os_getenv",
-    "fr_str_append", "fr_str_append_str", "fr_str_concat", "fr_str_from_int",
+    "fr_str_append", "fr_str_append_str", "fr_str_builder_finish", "fr_str_concat", "fr_str_from_int",
     "fr_str_sub", "fr_str_trim",
     "fr_tcp_recv",
     "fr_udp_peer", "fr_udp_recv",

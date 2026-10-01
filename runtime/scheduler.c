@@ -1,12 +1,11 @@
 #include "forge_runtime.h"
 #include "work_queue.h"
-#include "forge/arena.h"
 #include "forge/event.h"
 #include "forge/platform.h"
 #include "forge/thread.h"
-#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdatomic.h>
 
 static char *fr_strdup(const char *s) {
     size_t n = strlen(s);
@@ -30,30 +29,15 @@ struct fr_coro {
     fr_coro_fn fn;
     void *state;
     size_t state_size;
-    /* status and await_ready are written by whichever thread currently
-     * "owns" this coroutine (see on_queue below), but read from other
-     * threads too (e.g. process_has_active() from the poller thread, or
-     * event_resume_cb() checking in on a wakeup) -- _Atomic makes those
-     * cross-thread accesses well-defined instead of a plain data race. */
-    _Atomic fr_coro_status_t status;
+    fr_coro_status_t status;
     int step;
-    /* Tracks whether this coroutine is currently "claimed" by a worker
-     * (either sitting in a run queue, or actively being executed by
-     * worker_main). It must stay non-zero for the coroutine's *entire*
-     * execution window -- including any fr_await_fd registration it makes
-     * -- so that a concurrent event_resume_cb() cannot re-enqueue (and
-     * thus double-execute) a coroutine that is still running. See
-     * worker_main() and event_resume_cb() for the full protocol. */
-    atomic_int on_queue;
+    int on_queue;
+    int executing;
     fr_process_t *proc;
     int await_fd;
     uint32_t await_events;
-    _Atomic int await_ready;
+    int await_ready;
     struct fr_coro *next;
-    /* Per-coroutine scratch arena (see fr_arena_tls()). Bound to the
-     * coroutine rather than the OS thread it happens to run on, since
-     * work-stealing can move a coroutine between worker threads between
-     * steps. Lazily created on first use; freed in fr_process_destroy. */
     fr_arena_t *arena;
 };
 
@@ -79,9 +63,12 @@ struct fr_process {
 struct fr_scheduler {
     fr_process_t *processes;
     int worker_count;
-    int running;
-    int done;
-    int workers_started;
+    atomic_int running;
+    atomic_int workers_started;
+    int stopping;
+    size_t runnable;
+    unsigned next_queue;
+    unsigned next_worker;
     int native_pending;
     fr_thread_t **workers;
     fr_run_queue_t *worker_queues;
@@ -89,11 +76,12 @@ struct fr_scheduler {
     fr_event_loop_t *event_loop;
     fr_mutex_t *lock;
     fr_cond_t *idle_cond;
+    fr_cond_t *state_cond;
 };
 
 static _Thread_local fr_coro_t *tls_current_coro = NULL;
 static _Thread_local int tls_worker_id = -1;
-static fr_scheduler_t *g_global_sched = NULL;
+static _Atomic(fr_scheduler_t *) g_global_sched = NULL;
 
 fr_coro_t *fr_coro_current(void) {
     return tls_current_coro;
@@ -105,21 +93,8 @@ fr_arena_t *fr_coro_get_arena(fr_coro_t *coro) {
     return coro->arena;
 }
 
-/* Bridges fr_arena_tls()/fr_arena_tls_reset() (called from stdlib code that
- * has no scheduler context of its own) to the current coroutine's own
- * arena, so a pointer allocated before a yield stays valid -- and isn't
- * silently aliased by an unrelated coroutine's str_reset_arena() -- after
- * work-stealing resumes this coroutine on a different worker thread. */
 static fr_arena_t *scheduler_coro_arena_provider(void) {
     return fr_coro_get_arena(tls_current_coro);
-}
-
-static void scheduler_register_arena_provider(void) {
-    static atomic_int registered;
-    int expected = 0;
-    if (atomic_compare_exchange_strong(&registered, &expected, 1)) {
-        fr_arena_set_coro_provider(scheduler_coro_arena_provider);
-    }
 }
 
 fr_scheduler_t *fr_scheduler_global(void) {
@@ -131,7 +106,8 @@ void fr_scheduler_set_global(fr_scheduler_t *sched) {
 }
 
 int fr_sched_pool_available(void) {
-    return g_global_sched && g_global_sched->running && g_global_sched->workers_started;
+    fr_scheduler_t *sched = g_global_sched;
+    return sched && sched->running && sched->workers_started;
 }
 
 static int default_worker_count(int n) {
@@ -156,19 +132,19 @@ static int mailbox_pop(fr_mailbox_t *mb, fr_msg_t *out) {
     return 1;
 }
 
-static void enqueue_coro(fr_scheduler_t *sched, fr_coro_t *coro) {
-    if (!coro) return;
-    if (coro->status == FR_CORO_DONE || coro->status == FR_CORO_ERROR) return;
-    /* Atomic check-and-set: only the thread that wins the 0->1 transition
-     * may push this coroutine onto a run queue. This prevents two racing
-     * callers (e.g. event_resume_cb on the event-loop thread and a worker
-     * re-enqueuing after a run step) from both observing "not on queue"
-     * and double-scheduling the same coroutine. */
-    int expected = 0;
-    if (!atomic_compare_exchange_strong(&coro->on_queue, &expected, 1)) return;
+/* Scheduler state and queue publication share this mutex. A running coroutine
+ * stays exclusively owned by its worker until the worker commits its result. */
+static void enqueue_coro_locked(fr_scheduler_t *sched, fr_coro_t *coro) {
+    if (!coro || coro->on_queue || coro->executing) return;
+    if (coro->status != FR_CORO_RUNNING) return;
     int wid = coro->proc->worker_id % sched->worker_count;
-    fr_run_queue_push(&sched->worker_queues[wid], coro);
-    fr_cond_broadcast(sched->idle_cond);
+    if (!fr_run_queue_try_push(&sched->worker_queues[wid], coro)) {
+        coro->status = FR_CORO_ERROR;
+        return;
+    }
+    coro->on_queue = 1;
+    sched->runnable++;
+    fr_cond_signal(sched->idle_cond);
 }
 
 static void event_resume_cb(fr_event_loop_t *loop, int fd, uint32_t events, void *userdata) {
@@ -176,71 +152,35 @@ static void event_resume_cb(fr_event_loop_t *loop, int fd, uint32_t events, void
     (void)fd;
     (void)events;
     fr_coro_t *coro = (fr_coro_t *)userdata;
-    if (!coro) return;
-    /* Deliberately do NOT touch coro->status here. This callback can run
-     * concurrently (on the poller thread) with the coroutine still being
-     * actively executed by a worker thread -- writing status directly
-     * from here raced with run_coro_step()'s own status write and could
-     * hand the coroutine to a second worker while the first was still
-     * mid-execution (double-execution / state corruption). Only the
-     * worker that currently owns the coroutine (tracked via on_queue) is
-     * allowed to transition status; this callback just records that the
-     * wakeup happened and attempts the handoff via the same CAS gate
-     * everyone else uses. If the owning worker hasn't released on_queue
-     * yet, this enqueue_coro() call is a harmless no-op -- the owner
-     * rechecks await_ready itself right before releasing ownership, so
-     * the wakeup is never lost (see worker_main). */
-    coro->await_ready = 1;
-    if (coro->proc && coro->proc->sched) {
-        enqueue_coro(coro->proc->sched, coro);
+    if (!coro || !coro->proc || !coro->proc->sched) return;
+    fr_scheduler_t *sched = coro->proc->sched;
+    fr_mutex_lock(sched->lock);
+    if (coro->await_fd >= 0) {
+        coro->await_ready = 1;
+        if (!coro->executing && coro->status == FR_CORO_WAITING_IO) {
+            coro->status = FR_CORO_RUNNING;
+            enqueue_coro_locked(sched, coro);
+        }
     }
+    fr_mutex_unlock(sched->lock);
 }
 
 #define FR_REDUCTION_BUDGET 2000
 
-static int run_coro_step(fr_coro_t *c) {
-    tls_current_coro = c;
-    fr_coro_status_t st = c->fn(c, c->state);
-    tls_current_coro = NULL;
-    c->status = st;
-    if (st == FR_CORO_YIELDED) {
-        c->status = FR_CORO_RUNNING;
-        return 1;
-    }
-    if (st == FR_CORO_WAITING_RECV || st == FR_CORO_WAITING_IO) return 0;
-    return st == FR_CORO_DONE || st == FR_CORO_ERROR ? 1 : 1;
-}
-
-static int process_has_active(fr_process_t *p) {
-    /* proc->lock guards the coros linked-list shape itself (fr_coro_spawn
-     * can append to it concurrently from a coroutine running on another
-     * worker); the individual c->status reads are already race-free since
-     * status is _Atomic. */
-    fr_mutex_lock(p->lock);
-    int active = 0;
-    for (fr_coro_t *c = p->coros; c; c = c->next) {
-        if (c->status != FR_CORO_DONE && c->status != FR_CORO_ERROR) { active = 1; break; }
-    }
-    fr_mutex_unlock(p->lock);
-    return active;
-}
-
 static int sched_any_active(fr_scheduler_t *sched) {
     for (fr_process_t *p = sched->processes; p; p = p->next) {
-        if (process_has_active(p)) return 1;
+        for (fr_coro_t *c = p->coros; c; c = c->next) {
+            if (c->executing || (c->status != FR_CORO_DONE && c->status != FR_CORO_ERROR))
+                return 1;
+        }
     }
     return 0;
 }
 
 static void scan_enqueue_runnable(fr_scheduler_t *sched) {
     for (fr_process_t *p = sched->processes; p; p = p->next) {
-        fr_mutex_lock(p->lock);
-        for (fr_coro_t *c = p->coros; c; c = c->next) {
-            if (c->status == FR_CORO_RUNNING) {
-                enqueue_coro(sched, c);
-            }
-        }
-        fr_mutex_unlock(p->lock);
+        for (fr_coro_t *c = p->coros; c; c = c->next)
+            enqueue_coro_locked(sched, c);
     }
 }
 
@@ -248,31 +188,6 @@ typedef struct {
     fr_scheduler_t *sched;
     int wid;
 } fr_worker_arg_t;
-
-/* True if there is a runnable coroutine or native task sitting in a queue
- * right now -- i.e. something a worker could immediately dequeue and run. */
-static int sched_has_queued_work(fr_scheduler_t *sched) {
-    if (sched->native_pending > 0) return 1;
-    for (int i = 0; i < sched->worker_count; i++) {
-        if (sched->worker_queues[i].count > 0) return 1;
-        if (sched->native_queues[i].count > 0) return 1;
-    }
-    return 0;
-}
-
-/* True if there is queued work OR any coroutine that is merely alive
- * (including ones parked on WAITING_IO/WAITING_RECV). Used to decide
- * whether the scheduler as a whole is done, not whether a worker has
- * something to do right now -- a coroutine waiting on IO doesn't become
- * queued work until its fd fires or a message arrives. */
-static int sched_has_work(fr_scheduler_t *sched) {
-    if (sched_has_queued_work(sched)) return 1;
-    return sched_any_active(sched);
-}
-
-static void run_native_task(fr_native_fn fn, void *arg) {
-    if (fn) fn(arg);
-}
 
 static void *worker_main(void *arg) {
     fr_worker_arg_t *wa = (fr_worker_arg_t *)arg;
@@ -284,7 +199,12 @@ static void *worker_main(void *arg) {
     if (cpus > 0) fr_thread_pin_cpu(wid % cpus);
     tls_worker_id = wid;
 
-    while (sched->running) {
+    for (;;) {
+        fr_mutex_lock(sched->lock);
+        while (sched->running && sched->runnable == 0)
+            fr_cond_wait(sched->idle_cond, sched->lock);
+        if (!sched->running) { fr_mutex_unlock(sched->lock); break; }
+
         fr_coro_t *coro = fr_run_queue_pop(&sched->worker_queues[wid]);
         if (!coro) {
             for (int i = 0; i < sched->worker_count; i++) {
@@ -293,50 +213,33 @@ static void *worker_main(void *arg) {
                 if (coro) break;
             }
         }
-
         if (coro) {
-            /* This worker now exclusively owns the coroutine. Unlike
-             * before, on_queue is *not* released yet -- it stays non-zero
-             * for this entire block, including any fr_await_fd()
-             * registration run_coro_step() may perform. That is what
-             * prevents event_resume_cb() (running concurrently on the
-             * poller thread) from re-enqueuing this same coroutine onto
-             * another worker's queue while it is still being executed
-             * here, which used to cause double-execution / state
-             * corruption. on_queue is only released just below, after
-             * this worker is done with it for now. */
-            if ((coro->status == FR_CORO_WAITING_IO || coro->status == FR_CORO_WAITING_RECV) &&
-                coro->await_ready) {
-                /* Its wakeup condition was already satisfied by the time
-                 * we got to it (e.g. the fd was immediately readable) --
-                 * resume it. Only this owning worker ever makes this
-                 * transition. */
-                coro->status = FR_CORO_RUNNING;
-            }
+            sched->runnable--;
+            coro->on_queue = 0;
+            coro->executing = 1;
+            fr_mutex_unlock(sched->lock);
+            fr_coro_status_t status = FR_CORO_RUNNING;
             int budget = FR_REDUCTION_BUDGET;
-            while (budget-- > 0) {
-                if (coro->status != FR_CORO_RUNNING) break;
-                run_coro_step(coro);
-                if (coro->status == FR_CORO_WAITING_IO || coro->status == FR_CORO_WAITING_RECV) break;
-                if (coro->status == FR_CORO_DONE || coro->status == FR_CORO_ERROR) break;
+            tls_current_coro = coro;
+            while (budget-- > 0 && sched->running) {
+                status = coro->fn(coro, coro->state);
+                if (status == FR_CORO_YIELDED) status = FR_CORO_RUNNING;
+                if (status != FR_CORO_RUNNING) break;
             }
-            /* Release ownership. Only from this point can a concurrent
-             * event_resume_cb() win the on_queue CAS and re-enqueue this
-             * coroutine -- guaranteeing any fr_await_fd() registration
-             * performed above has already fully completed. */
-            atomic_store(&coro->on_queue, 0);
-            if (coro->status == FR_CORO_RUNNING) {
-                enqueue_coro(sched, coro);
-            } else if ((coro->status == FR_CORO_WAITING_IO || coro->status == FR_CORO_WAITING_RECV) &&
-                       coro->await_ready) {
-                /* Lost-wakeup guard: the event fired while we still held
-                 * on_queue (i.e. event_resume_cb's own enqueue_coro()
-                 * call above was a guaranteed-fail CAS against our still-
-                 * held ownership). Finish the handoff ourselves now that
-                 * ownership is released, so the wakeup is never dropped. */
-                coro->status = FR_CORO_RUNNING;
-                enqueue_coro(sched, coro);
+            tls_current_coro = NULL;
+            fr_mutex_lock(sched->lock);
+            coro->executing = 0;
+            if (status == FR_CORO_WAITING_IO && coro->await_ready)
+                status = FR_CORO_RUNNING;
+            if (status == FR_CORO_WAITING_RECV) {
+                fr_mutex_lock(coro->proc->lock);
+                if (coro->proc->mailbox.count > 0) status = FR_CORO_RUNNING;
+                fr_mutex_unlock(coro->proc->lock);
             }
+            coro->status = status;
+            enqueue_coro_locked(sched, coro);
+            fr_cond_signal(sched->state_cond);
+            fr_mutex_unlock(sched->lock);
             continue;
         }
 
@@ -350,53 +253,36 @@ static void *worker_main(void *arg) {
             }
         }
         if (nfn) {
-            fr_mutex_lock(sched->lock);
-            if (sched->native_pending > 0) sched->native_pending--;
+            sched->runnable--;
             fr_mutex_unlock(sched->lock);
-            run_native_task(nfn, narg);
-            continue;
-        }
-
-        if (!sched_has_queued_work(sched)) {
-            /* Nothing immediately runnable. Coroutines that are merely
-             * WAITING_IO/WAITING_RECV don't count as queued work -- they
-             * become queued (via enqueue_coro's fr_cond_broadcast) only
-             * when their fd fires or a message arrives, so it's safe to
-             * park here instead of busy-spinning on fr_thread_yield(). */
-            if (!sched->running) break;
+            nfn(narg);
             fr_mutex_lock(sched->lock);
-            if (!sched_has_queued_work(sched)) {
-                if (!sched->running) {
-                    fr_mutex_unlock(sched->lock);
-                    break;
-                }
-                fr_cond_wait(sched->idle_cond, sched->lock);
-            }
-            fr_mutex_unlock(sched->lock);
-            continue;
+            sched->native_pending--;
+            fr_cond_signal(sched->state_cond);
         }
-        /* Queued work exists somewhere but we raced with another worker
-         * (stealing) and came up empty this iteration -- brief yield and
-         * retry rather than a hard spin. */
-        fr_thread_yield();
+        fr_mutex_unlock(sched->lock);
     }
     tls_worker_id = -1;
     return NULL;
 }
 
 fr_scheduler_t *fr_scheduler_create(int worker_count) {
-    scheduler_register_arena_provider();
+    fr_arena_set_coro_provider(scheduler_coro_arena_provider);
     fr_scheduler_t *s = (fr_scheduler_t *)calloc(1, sizeof(fr_scheduler_t));
     if (!s) return NULL;
+    atomic_init(&s->running, 0);
+    atomic_init(&s->workers_started, 0);
     s->worker_count = default_worker_count(worker_count);
     s->event_loop = fr_event_loop_create();
     if (s->event_loop) fr_event_loop_set_cb(s->event_loop, event_resume_cb);
     s->lock = fr_mutex_create();
     s->idle_cond = fr_cond_create();
+    s->state_cond = fr_cond_create();
     s->worker_queues = (fr_run_queue_t *)calloc((size_t)s->worker_count, sizeof(fr_run_queue_t));
     s->native_queues = (fr_native_queue_t *)calloc((size_t)s->worker_count, sizeof(fr_native_queue_t));
     s->workers = (fr_thread_t **)calloc((size_t)s->worker_count, sizeof(fr_thread_t *));
-    if (!s->worker_queues || !s->native_queues || !s->workers) {
+    if (!s->event_loop || !s->lock || !s->idle_cond || !s->state_cond ||
+        !s->worker_queues || !s->native_queues || !s->workers) {
         fr_scheduler_destroy(s);
         return NULL;
     }
@@ -409,13 +295,7 @@ fr_scheduler_t *fr_scheduler_create(int worker_count) {
 
 void fr_scheduler_destroy(fr_scheduler_t *sched) {
     if (!sched) return;
-    sched->running = 0;
-    fr_cond_broadcast(sched->idle_cond);
-    if (sched->workers) {
-        for (int i = 0; i < sched->worker_count; i++) {
-            if (sched->workers[i]) fr_thread_join(sched->workers[i]);
-        }
-    }
+    fr_scheduler_stop(sched);
     if (sched->worker_queues) {
         for (int i = 0; i < sched->worker_count; i++) {
             fr_run_queue_destroy(&sched->worker_queues[i]);
@@ -435,6 +315,7 @@ void fr_scheduler_destroy(fr_scheduler_t *sched) {
     fr_event_loop_destroy(sched->event_loop);
     fr_mutex_destroy(sched->lock);
     fr_cond_destroy(sched->idle_cond);
+    fr_cond_destroy(sched->state_cond);
     free(sched->worker_queues);
     free(sched->native_queues);
     free(sched->workers);
@@ -449,50 +330,68 @@ static void scheduler_start_workers(fr_scheduler_t *sched) {
         if (!wa) continue;
         wa->sched = sched;
         wa->wid = i;
-        fr_thread_start(&sched->workers[i], worker_main, wa);
+        if (fr_thread_start(&sched->workers[i], worker_main, wa) != 0) free(wa);
     }
 }
 
 void fr_scheduler_start(fr_scheduler_t *sched) {
     if (!sched) return;
     sched->running = 1;
-    sched->done = 0;
     fr_scheduler_set_global(sched);
+    fr_mutex_lock(sched->lock);
     scan_enqueue_runnable(sched);
     scheduler_start_workers(sched);
+    fr_mutex_unlock(sched->lock);
 }
 
 void fr_scheduler_stop(fr_scheduler_t *sched) {
     if (!sched) return;
+    fr_mutex_lock(sched->lock);
+    while (sched->stopping) fr_cond_wait(sched->idle_cond, sched->lock);
+    sched->stopping = 1;
     sched->running = 0;
     fr_cond_broadcast(sched->idle_cond);
-    for (int i = 0; i < sched->worker_count; i++) {
+    fr_cond_broadcast(sched->state_cond);
+    fr_mutex_unlock(sched->lock);
+    for (int i = 0; sched->workers && i < sched->worker_count; i++) {
         if (sched->workers[i]) fr_thread_join(sched->workers[i]);
         sched->workers[i] = NULL;
     }
+    fr_mutex_lock(sched->lock);
     sched->workers_started = 0;
-    if (g_global_sched == sched) g_global_sched = NULL;
+    sched->stopping = 0;
+    fr_cond_broadcast(sched->idle_cond);
+    fr_mutex_unlock(sched->lock);
+    fr_scheduler_t *expected = sched;
+    atomic_compare_exchange_strong(&g_global_sched, &expected, NULL);
+}
+
+static int sched_pool_submit(fr_scheduler_t *sched, fr_native_fn fn, void *arg) {
+    if (!sched || !fn) return 0;
+    fr_mutex_lock(sched->lock);
+    int q = (int)(sched->next_queue++ % (unsigned)sched->worker_count);
+    int ok = fr_native_queue_try_push(&sched->native_queues[q], fn, arg);
+    if (ok) {
+        sched->native_pending++;
+        sched->runnable++;
+        fr_cond_signal(sched->idle_cond);
+    }
+    fr_mutex_unlock(sched->lock);
+    return ok;
 }
 
 int fr_sched_pool_submit(fr_scheduler_t *sched, void (*fn)(void *), void *arg) {
-    if (!sched || !fn) return -1;
-    static atomic_int next_q;
-    int q = atomic_fetch_add_explicit(&next_q, 1, memory_order_relaxed) % sched->worker_count;
-    if (fr_native_queue_push(&sched->native_queues[q], fn, arg) != 0) return -1;
-    fr_mutex_lock(sched->lock);
-    sched->native_pending++;
-    fr_mutex_unlock(sched->lock);
-    fr_cond_broadcast(sched->idle_cond);
-    return 0;
+    return sched_pool_submit(sched, fn, arg) ? 0 : -1;
 }
 
 size_t fr_sched_pool_queued(fr_scheduler_t *sched) {
     if (!sched) return 0;
-    size_t total = 0;
-    for (int i = 0; i < sched->worker_count; i++) {
-        total += fr_native_queue_count(&sched->native_queues[i]);
-    }
-    return total;
+    fr_mutex_lock(sched->lock);
+    size_t count = 0;
+    for (int i = 0; i < sched->worker_count; i++)
+        count += fr_native_queue_count(&sched->native_queues[i]);
+    fr_mutex_unlock(sched->lock);
+    return count;
 }
 
 typedef struct {
@@ -534,7 +433,7 @@ int64_t fr_sched_pool_spawn(fr_sched_native_fn1_t fn, int64_t arg) {
     if (!ctx) return -1;
     ctx->fn = fn;
     ctx->arg = arg;
-    fr_sched_pool_submit(sched, sched_native_trampoline1, ctx);
+    if (!sched_pool_submit(sched, sched_native_trampoline1, ctx)) { free(ctx); return -1; }
     return 0;
 }
 
@@ -545,7 +444,7 @@ void fr_sched_pool_spawn_indexed(fr_sched_native_fn2_t fn, int64_t count) {
 
     fr_mutex_t *lock = fr_mutex_create();
     fr_cond_t *done = fr_cond_create();
-    int remaining = (int)count;
+    int remaining = 0;
     if (!lock || !done) {
         fr_mutex_destroy(lock);
         fr_cond_destroy(done);
@@ -561,7 +460,15 @@ void fr_sched_pool_spawn_indexed(fr_sched_native_fn2_t fn, int64_t count) {
         ctx->lock = lock;
         ctx->remaining = &remaining;
         ctx->done = done;
-        fr_sched_pool_submit(sched, sched_native_trampoline2, ctx);
+        fr_mutex_lock(lock);
+        remaining++;
+        if (!sched_pool_submit(sched, sched_native_trampoline2, ctx)) {
+            remaining--;
+            free(ctx);
+            fr_mutex_unlock(lock);
+            break;
+        }
+        fr_mutex_unlock(lock);
     }
 
     fr_mutex_lock(lock);
@@ -572,12 +479,12 @@ void fr_sched_pool_spawn_indexed(fr_sched_native_fn2_t fn, int64_t count) {
 }
 
 void fr_scheduler_add_process(fr_scheduler_t *sched, fr_process_t *proc) {
-    static atomic_int next_worker;
-    proc->sched = sched;
-    proc->worker_id = atomic_fetch_add_explicit(&next_worker, 1, memory_order_relaxed) % sched->worker_count;
     fr_mutex_lock(sched->lock);
+    proc->sched = sched;
+    proc->worker_id = (int)(sched->next_worker++ % (unsigned)sched->worker_count);
     proc->next = sched->processes;
     sched->processes = proc;
+    for (fr_coro_t *c = proc->coros; c; c = c->next) enqueue_coro_locked(sched, c);
     fr_mutex_unlock(sched->lock);
 }
 
@@ -589,20 +496,35 @@ int fr_scheduler_worker_count(fr_scheduler_t *sched) {
     return sched ? sched->worker_count : 0;
 }
 
+static int sched_waiting_io(fr_scheduler_t *sched) {
+    for (fr_process_t *p = sched->processes; p; p = p->next) {
+        for (fr_coro_t *c = p->coros; c; c = c->next) {
+            if (c->status == FR_CORO_WAITING_IO && c->await_fd >= 0 && !c->await_ready)
+                return 1;
+        }
+    }
+    return 0;
+}
+
 void fr_scheduler_run(fr_scheduler_t *sched) {
     if (!sched) return;
     fr_scheduler_start(sched);
-    /* sched->lock protects per-operation state (process list, native_pending,
-     * etc.) and must not be held across this entire polling loop -- doing so
-     * previously starved any concurrent fr_scheduler_add_process/thread.spawn
-     * caller (and anything else taking sched->lock) for the whole program
-     * lifetime, since this loop only returns when the scheduler is done.
-     * sched->done is only ever touched by this thread, so no lock is needed
-     * to read/write it here. */
-    while (!sched->done) {
-        fr_event_loop_poll(sched->event_loop, 1);
-        if (!sched_has_work(sched)) sched->done = 1;
+    fr_mutex_lock(sched->lock);
+    while (sched->running) {
+        if (!sched_any_active(sched) && sched->native_pending == 0) break;
+        if (sched_waiting_io(sched)) {
+            /* Never hold state across a blocking poll: callbacks and workers
+             * need it to publish readiness/completion. Stop latency is bounded. */
+            fr_mutex_unlock(sched->lock);
+            fr_event_loop_poll(sched->event_loop, 10);
+            fr_mutex_lock(sched->lock);
+        } else {
+            /* Running jobs and mailbox waiters do not need an event-loop poll.
+             * Await registration and worker completion wake this predicate. */
+            fr_cond_wait(sched->state_cond, sched->lock);
+        }
     }
+    fr_mutex_unlock(sched->lock);
     fr_scheduler_stop(sched);
 }
 
@@ -653,28 +575,35 @@ void fr_process_set_receive_handler(fr_process_t *proc, fr_coro_fn handler, size
 fr_coro_t *fr_coro_spawn(fr_process_t *proc, fr_coro_fn fn, void *init_state, size_t state_size) {
     fr_coro_t *c = (fr_coro_t *)calloc(1, sizeof(fr_coro_t));
     if (!c) return NULL;
-    c->id = proc->next_coro_id++;
+    if (!fn) { free(c); return NULL; }
     c->fn = fn;
     c->state_size = state_size;
-    c->state = malloc(state_size);
+    c->state = malloc(state_size ? state_size : 1);
     if (!c->state) {
         free(c);
         return NULL;
     }
-    memcpy(c->state, init_state, state_size);
+    if (state_size) memcpy(c->state, init_state, state_size);
     c->status = FR_CORO_RUNNING;
     c->step = 0;
     c->proc = proc;
     c->await_fd = -1;
+    if (proc->sched) fr_mutex_lock(proc->sched->lock);
+    fr_mutex_lock(proc->lock);
+    c->id = proc->next_coro_id++;
     if (!proc->coros) proc->coros = proc->coro_tail = c;
     else { proc->coro_tail->next = c; proc->coro_tail = c; }
     free(init_state);
-    if (proc->sched) enqueue_coro(proc->sched, c);
+    fr_mutex_unlock(proc->lock);
+    if (proc->sched) {
+        enqueue_coro_locked(proc->sched, c);
+        fr_mutex_unlock(proc->sched->lock);
+    }
     return c;
 }
 
 fr_coro_status_t fr_yield(fr_coro_t *coro) {
-    coro->status = FR_CORO_YIELDED;
+    (void)coro;
     return FR_CORO_YIELDED;
 }
 
@@ -701,7 +630,16 @@ void fr_send(fr_process_t *dst, int tag, int64_t value, void *payload, size_t pa
     mailbox_push(&dst->mailbox, msg);
     fr_cond_broadcast(dst->msg_cond);
     fr_mutex_unlock(dst->lock);
-    if (dst->sched) fr_cond_broadcast(dst->sched->idle_cond);
+    if (dst->sched) {
+        fr_mutex_lock(dst->sched->lock);
+        for (fr_coro_t *c = dst->coros; c; c = c->next) {
+            if (!c->executing && c->status == FR_CORO_WAITING_RECV) {
+                c->status = FR_CORO_RUNNING;
+                enqueue_coro_locked(dst->sched, c);
+            }
+        }
+        fr_mutex_unlock(dst->sched->lock);
+    }
 }
 
 int fr_try_recv(fr_process_t *self, fr_msg_t *out) {
@@ -732,18 +670,25 @@ void fr_msg_free_payload(fr_msg_t *msg) {
 
 int64_t fr_await_fd(fr_coro_t *coro, int64_t fd, uint32_t events) {
     if (!coro) return 1;
+    if (!coro->proc || !coro->proc->sched || fd < 0) return -1;
+    fr_scheduler_t *sched = coro->proc->sched;
+    fr_mutex_lock(sched->lock);
     if (coro->await_ready && coro->await_fd == (int)fd) {
         coro->await_ready = 0;
         coro->await_fd = -1;
-        fr_event_loop_del(coro->proc->sched->event_loop, (int)fd);
+        fr_event_loop_del(sched->event_loop, (int)fd);
+        fr_mutex_unlock(sched->lock);
         return 1;
     }
     coro->await_fd = (int)fd;
     coro->await_events = events;
     coro->await_ready = 0;
     coro->status = FR_CORO_WAITING_IO;
-    fr_event_loop_add(coro->proc->sched->event_loop, (int)fd, events | FR_EVENT_ONESHOT, coro);
-    return 0;
+    int ok = fr_event_loop_add(sched->event_loop, (int)fd, events | FR_EVENT_ONESHOT, coro);
+    fr_cond_signal(sched->state_cond);
+    if (ok < 0) { coro->await_fd = -1; coro->status = FR_CORO_ERROR; }
+    fr_mutex_unlock(sched->lock);
+    return ok < 0 ? -1 : 0;
 }
 
 fr_process_t *fr_supervisor_create(const char *name, fr_restart_policy_t policy) {

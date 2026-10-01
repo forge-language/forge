@@ -31,3 +31,11 @@ jobs:
         run: cmake --build build --parallel
       - name: Test
         run: ctest --test-dir build --output-on-failure
+      - name: Verify self-hosted compiler fixed point
+        run: cmake --build build --target forge-selfhost-verify --parallel
+      - name: Verify installed external Forge project
+        run: |
+          cmake --install build --prefix "$RUNNER_TEMP/forge-sdk"
+          cmake -S examples/external-project -B "$RUNNER_TEMP/forge-external" -DCMAKE_PREFIX_PATH="$RUNNER_TEMP/forge-sdk"
+          cmake --build "$RUNNER_TEMP/forge-external" --parallel
+          "$RUNNER_TEMP/forge-external/bin/hello"
