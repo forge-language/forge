@@ -143,6 +143,7 @@ add_executable(forge
     compiler/parser.c
     compiler/ast.c
     compiler/codegen.c
+    compiler/codegen_js.c
     compiler/mod_registry.c
     compiler/module_loader.c
     compiler/symbols.c
@@ -241,7 +242,7 @@ add_custom_command(
         -o "${FORGE_STAGE2_BIN}"
         "-L${CMAKE_BINARY_DIR}/lib"
         -lforge_std -lforge_runtime -lm
-    DEPENDS forge-stage1 forge_std "${FORGE_BOOTSTRAP_SRC}"
+    DEPENDS forge-stage1 "${FORGE_STAGE1_BIN}" forge_std forge_runtime "${FORGE_BOOTSTRAP_SRC}"
     COMMENT "Bootstrap stage2: self-hosted compiler compiles itself"
     VERBATIM
 )
@@ -254,7 +255,7 @@ add_custom_command(
     OUTPUT "${FORGE_SELFHOST_TEST_C}"
     COMMAND "${FORGE_STAGE2_BIN}" "${CMAKE_SOURCE_DIR}/examples/match.fg"
         -o "${FORGE_SELFHOST_TEST_C}"
-    DEPENDS forge-selfhost "${CMAKE_SOURCE_DIR}/examples/match.fg"
+    DEPENDS forge-selfhost "${FORGE_STAGE2_BIN}" "${CMAKE_SOURCE_DIR}/examples/match.fg"
     COMMENT "Self-host test: stage2 compiles match.fg"
     VERBATIM
 )
@@ -265,7 +266,7 @@ add_custom_command(
     OUTPUT "${FORGE_SELFHOST_CONTROL_C}"
     COMMAND "${FORGE_STAGE2_BIN}" "${CMAKE_SOURCE_DIR}/examples/control_flow.fg"
         -o "${FORGE_SELFHOST_CONTROL_C}"
-    DEPENDS forge-selfhost "${CMAKE_SOURCE_DIR}/examples/control_flow.fg"
+    DEPENDS forge-selfhost "${FORGE_STAGE2_BIN}" "${CMAKE_SOURCE_DIR}/examples/control_flow.fg"
     COMMENT "Self-host test: stage2 compiles control_flow.fg"
     VERBATIM
 )
@@ -286,7 +287,7 @@ add_custom_command(
         -lforge_std -lforge_runtime -lm
     COMMAND "${FORGE_STAGE3_BIN}" "${FORGE_BOOTSTRAP_SRC}" -o "${FORGE_STAGE4_C}"
     COMMAND ${CMAKE_COMMAND} -E compare_files "${FORGE_STAGE3_C}" "${FORGE_STAGE4_C}"
-    DEPENDS forge-selfhost forge_std "${FORGE_BOOTSTRAP_SRC}"
+    DEPENDS forge-selfhost "${FORGE_STAGE2_BIN}" forge_std forge_runtime "${FORGE_BOOTSTRAP_SRC}"
     COMMENT "Self-host verify: stage3 recompiles compiler.fg to identical output"
     VERBATIM
 )
@@ -447,3 +448,37 @@ add_custom_command(
     VERBATIM
 )
 add_custom_target(forge-lsp ALL DEPENDS "${FORGE_LSP_BIN}")
+
+include(CTest)
+if(BUILD_TESTING)
+    add_executable(optimizer_test tests/optimizer_test.c compiler/ast.c compiler/optimize.c)
+    target_include_directories(optimizer_test PRIVATE compiler)
+    add_test(NAME optimizer_regressions COMMAND optimizer_test)
+
+    add_executable(arena_test tests/arena_test.c runtime/arena.c)
+    target_include_directories(arena_test PRIVATE include)
+    add_test(NAME arena_regressions COMMAND arena_test)
+
+    add_executable(work_queue_test tests/work_queue_test.c)
+    target_include_directories(work_queue_test PRIVATE runtime)
+    target_link_libraries(work_queue_test PRIVATE forge_runtime)
+    add_test(NAME work_queue_regressions COMMAND work_queue_test)
+    set_tests_properties(work_queue_regressions PROPERTIES TIMEOUT 30)
+
+    find_package(Python3 COMPONENTS Interpreter)
+    if(Python3_Interpreter_FOUND)
+        add_test(NAME compiler_regressions
+            COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/compiler_test.py"
+                --forge "$<TARGET_FILE:forge>" --root "${CMAKE_SOURCE_DIR}"
+                --lib-dir "${CMAKE_BINARY_DIR}/lib" --cc "${CMAKE_C_COMPILER}")
+        set_tests_properties(compiler_regressions PROPERTIES TIMEOUT 120)
+        find_program(FORGE_NODE node)
+        if(FORGE_NODE)
+            add_test(NAME javascript_regressions COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/js_test.py" "$<TARGET_FILE:forge>")
+        endif()
+    endif()
+endif()
+
+add_executable(work_queue_bench EXCLUDE_FROM_ALL benchmark/work_queue_bench.c)
+target_include_directories(work_queue_bench PRIVATE runtime)
+target_link_libraries(work_queue_bench PRIVATE forge_runtime)

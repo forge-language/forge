@@ -501,25 +501,16 @@ static Stmt *parse_stmt(Parser *p) {
         return stmt_block(b);
     }
     if (lexer_peek(p->lx).kind == TOK_IDENT) {
-        Token name = lexer_peek(p->lx);
-        lexer_next(p->lx);
-        if (lexer_peek(p->lx).kind == TOK_EQ || lexer_peek(p->lx).kind == TOK_PLUSEQ ||
-            lexer_peek(p->lx).kind == TOK_MINUSEQ || lexer_peek(p->lx).kind == TOK_STAREQ ||
-            lexer_peek(p->lx).kind == TOK_SLASHEQ || lexer_peek(p->lx).kind == TOK_PERCENTEQ) {
+        Lexer saved = *p->lx;
+        Token name = lexer_next(p->lx);
+        TokenKind next = lexer_peek(p->lx).kind;
+        if (next == TOK_EQ || next == TOK_PLUSEQ || next == TOK_MINUSEQ ||
+            next == TOK_STAREQ || next == TOK_SLASHEQ || next == TOK_PERCENTEQ) {
             Stmt *s = parse_assign(p, token_str(name));
             expect(p, TOK_SEMI);
             return s;
         }
-        /* ident as start of an expression-statement: build the same leading
-         * expression parse_primary would (qualified call/field, direct call,
-         * or bare ident), then rejoin the full expression grammar so any
-         * postfix (.field / [index]) and any binary/logical/pipe operator
-         * is accepted here too, not just a hand-picked subset. */
-        Expr *e = parse_ident_start(p, token_str(name));
-        e = parse_postfix(p, e);
-        e = parse_pipe_from(p, e);
-        expect(p, TOK_SEMI);
-        return stmt_expr(e);
+        *p->lx = saved;
     }
     Expr *e = parse_expr(p);
     expect(p, TOK_SEMI);

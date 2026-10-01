@@ -64,14 +64,17 @@ Expr *expr_binary(BinOp op, Expr *l, Expr *r) {
     e->as.binary.op = op;
     e->as.binary.left = l;
     e->as.binary.right = r;
-    switch (op) {
-    case BIN_EQ: case BIN_NE: case BIN_LT: case BIN_LE:
-    case BIN_GT: case BIN_GE:
+    if (op >= BIN_EQ) {
         e->type = forge_type_bool();
-        break;
-    default:
-        e->type = l->type;
-        break;
+    } else if (l->type.kind == TY_INT && r->type.kind == TY_INT) {
+        e->type = forge_type_int();
+    } else if ((l->type.kind == TY_INT || l->type.kind == TY_FLOAT) &&
+               (r->type.kind == TY_INT || r->type.kind == TY_FLOAT)) {
+        e->type = forge_type_float();
+    } else {
+        /* Identifiers/calls are unresolved until codegen. Do not claim that
+         * an arithmetic result has its left operand's type. */
+        e->type = forge_type_void();
     }
     return e;
 }

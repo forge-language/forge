@@ -194,6 +194,13 @@ static int link_object(const char *obj_path, const char *output_path, const Forg
         snprintf(libdir, n, "-L%s", cfg->lib_dir);
         argv_push_owned(&args, libdir);
     }
+    for (size_t i = 0; i < cfg->extra_lib_dir_count; i++) {
+        size_t n = strlen(cfg->extra_lib_dirs[i]) + 3;
+        char *libdir = (char *)malloc(n);
+        if (!libdir) forge_die("out of memory");
+        snprintf(libdir, n, "-L%s", cfg->extra_lib_dirs[i]);
+        argv_push_owned(&args, libdir);
+    }
     for (size_t i = 0; i < cfg->link_lib_count; i++) {
         size_t n = strlen(cfg->link_libs[i]) + 3;
         char *lib = (char *)malloc(n);
