@@ -9,7 +9,7 @@ import Forge.Mailbox
 /-!
 # Forge formal verification
 
-Root module for the Lean 4 proofs accompanying the [Forge](https://github.com/Helloworld0822/forge)
+Root module for the Lean 4 proofs accompanying the [Forge](https://github.com/forge-language/forge-preview)
 language implementation.
 
 ## Verified components

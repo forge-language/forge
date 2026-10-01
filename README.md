@@ -67,7 +67,7 @@ Verify stage2 compiles itself:
 ## Build
 
 ```bash
-git clone https://github.com/Helloworld0822/forge.git
+git clone https://github.com/forge-language/forge-preview.git
 cd forge
 
 cmake -B build -DCMAKE_BUILD_TYPE=Release
@@ -417,11 +417,11 @@ coroutines, structs and linking archives are rejected in this mode. String
 length/index use UTF-8 bytes; slicing must stay on valid UTF-8 boundaries in a
 browser. The JavaScript backend does not supply ownership or memory safety.
 
-The separate [Forge Platform](https://github.com/Helloworld0822/forge-platform)
+The separate [Forge Platform](https://github.com/forge-language/forge-platform)
 contains the React/TypeScript/Tailwind website, Forge registry backend, Forge
 package manager and SHA-256-checked `curl | bash` installer. Preview releases
 support Linux x86_64 with glibc 2.35+ and a C compiler.
-[Forge Browser](https://github.com/Helloworld0822/forge-browser) provides generic
+[Forge Browser](https://github.com/forge-language/forge-browser) provides generic
 DOM/HTTP primitives for Forge applications.
 
 The [portfolio migration](https://github.com/Helloworld0822/portfolio-platform/pull/1)

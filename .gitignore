@@ -57,3 +57,5 @@ editors/vscode/server/
 # OMO local agent state
 .omo/
 .omc/
+
+/build-opt/

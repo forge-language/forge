@@ -64,6 +64,36 @@ static double bench_native_steal(size_t count) {
     return best / (double)count;
 }
 
+/* Repeated push/pop on a warm queue measures the allocation cost of normal
+ * coroutine re-enqueue, rather than only draining a preallocated backlog. */
+static double bench_cycle(size_t count, int native) {
+    double best = 0.0;
+    char token;
+    for (int repetition = 0; repetition < REPETITIONS; repetition++) {
+        fr_run_queue_t run;
+        fr_native_queue_t nq;
+        fr_run_queue_init(&run);
+        fr_native_queue_init(&nq);
+        if (native) { fr_native_queue_push(&nq, native_task, NULL); fr_native_queue_pop(&nq, NULL); }
+        else { fr_run_queue_push(&run, (fr_coro_t *)&token); fr_run_queue_pop(&run); }
+        struct timespec start = now();
+        for (size_t i = 0; i < count; i++) {
+            if (native) {
+                fr_native_queue_push(&nq, native_task, NULL);
+                if (fr_native_queue_pop(&nq, NULL) != native_task) exit(1);
+            } else {
+                fr_run_queue_push(&run, (fr_coro_t *)&token);
+                if (fr_run_queue_pop(&run) != (fr_coro_t *)&token) exit(1);
+            }
+        }
+        double duration = elapsed_ns(start, now());
+        if (repetition == 0 || duration < best) best = duration;
+        fr_run_queue_destroy(&run);
+        fr_native_queue_destroy(&nq);
+    }
+    return best / (double)count;
+}
+
 int main(int argc, char **argv) {
     size_t largest = 100000;
     if (argc > 2) return 1;
@@ -75,10 +105,12 @@ int main(int argc, char **argv) {
         largest = (size_t)n;
     }
     const size_t sizes[] = {1000, 10000, largest};
-    puts("queue,size,best_ns_per_steal");
+    puts("operation,size,best_ns_per_operation");
     for (size_t i = 0; i < sizeof(sizes) / sizeof(sizes[0]); i++) {
         printf("run,%zu,%.2f\n", sizes[i], bench_run_steal(sizes[i]));
         printf("native,%zu,%.2f\n", sizes[i], bench_native_steal(sizes[i]));
     }
+    printf("run_push_pop,%zu,%.2f\n", largest, bench_cycle(largest, 0));
+    printf("native_push_pop,%zu,%.2f\n", largest, bench_cycle(largest, 1));
     return 0;
 }
