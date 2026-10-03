@@ -87,8 +87,11 @@ static int supported_standard(const char *name_) {
                                     "fr_str_view",
                                     "fr_str_view_len",
                                     "fr_str_view_at",
+                                    "fr_str_view_sub",
+                                    "fr_str_view_matches",
                                     "fr_str_builder",
                                     "fr_str_builder_append",
+                                    "fr_str_builder_append_view",
                                     "fr_str_builder_char",
                                     "fr_str_builder_finish",
 
@@ -401,6 +404,8 @@ void codegen_emit_js(Program *prog, FILE *out) {
       "const handles=new Map();let next=1n;const store=v=>{const h=next++;handles.set(h,v);return h;};\n"
       "const view=h=>handles.get(h),builder=h=>{const b=handles.get(h);return b&&b.kind==='builder'?b:null;};\n"
       "const reserve=(b,n)=>{if(n<=b.data.length)return;let cap=Math.max(64,b.data.length);while(cap<n)cap*=2;const d=new Uint8Array(cap);d.set(b.data.subarray(0,b.len));b.data=d;};\n"
+      "const range=(v,a,n)=>{if(!v||v.kind!=='view'||a<0n||n<0n)return null;const size=BigInt(v.data.length),from=a<size?a:size,left=size-from;return [Number(from),Number(n<left?n:left)];};\n"
+      "const appendBytes=(h,d)=>{const b=builder(h);if(!b)return 0n;reserve(b,b.len+d.length);b.data.set(d,b.len);b.len+=d.length;return h;};\n"
       "return {add:(a,b)=>typeof a==='string'&&typeof "
       "b==='string'?a+b:arithmetic(a,b,'add'),sub:(a,b)=>arithmetic(a,b,'sub'),"
       "mul:(a,b)=>arithmetic(a,b,'mul'),div:(a,b)=>arithmetic(a,b,'div'),mod:("
@@ -417,7 +422,10 @@ void codegen_emit_js(Program *prog, FILE *out) {
       "from_int:String,fr_str_arena_reset:()=>{handles.clear();return 0n;},\n"
       "fr_str_view:s=>store({kind:'view',data:cbytes(s)}),fr_str_view_len:h=>{const v=view(h);return i(v&&v.kind==='view'?v.data.length:0);},\n"
       "fr_str_view_at:(h,n)=>{const v=view(h);return !v||v.kind!=='view'||n<0n||n>=BigInt(v.data.length)?-1n:BigInt(v.data[Number(n)]);},\n"
-      "fr_str_builder:()=>store({kind:'builder',data:new Uint8Array(0),len:0}),fr_str_builder_append:(h,s)=>{const b=builder(h);if(!b)return 0n;const d=cbytes(s);reserve(b,b.len+d.length);b.data.set(d,b.len);b.len+=d.length;return h;},\n"
+      "fr_str_view_sub:(h,a,n)=>{const v=view(h),r=range(v,a,n);return r?decode(v.data.subarray(r[0],r[0]+r[1])):null;},\n"
+      "fr_str_view_matches:(h,a,s)=>{const v=view(h);if(!v||v.kind!=='view'||s==null||a<0n||a>BigInt(v.data.length))return 0n;const d=cbytes(s),from=Number(a);if(d.length>v.data.length-from)return 0n;for(let j=0;j<d.length;j++)if(v.data[from+j]!==d[j])return 0n;return 1n;},\n"
+      "fr_str_builder:()=>store({kind:'builder',data:new Uint8Array(0),len:0}),fr_str_builder_append:(h,s)=>appendBytes(h,cbytes(s)),\n"
+      "fr_str_builder_append_view:(h,vh,a,n)=>{const v=view(vh),r=range(v,a,n);return r?appendBytes(h,v.data.subarray(r[0],r[0]+r[1])):0n;},\n"
       "fr_str_builder_char:(h,c)=>{const b=builder(h);if(!b||c<=0n||c>255n)return 0n;reserve(b,b.len+1);b.data[b.len++]=Number(c);return h;},\n"
       "fr_str_builder_finish:h=>{const b=builder(h);return b?decode(b.data.subarray(0,b.len)):null;},\n"
       "fr_abs_i:x=>x<0n?-x:x,fr_abs_f:Math.abs,fr_min_i:(a,b)=>a<b?a:b,fr_max_"

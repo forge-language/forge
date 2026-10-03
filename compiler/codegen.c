@@ -190,8 +190,9 @@ static int cg_stdlib_returns_string(Codegen *cg, ForgeStr name) {
         "fr_http_req_method", "fr_http_req_path", "fr_http_req_body",
         "fr_json_get_string", "fr_json_stringify_str", "fr_json_stringify_int",
         "fr_udp_peer", "fr_os_getenv", "fr_os_argv",
+        "fr_os_temp_file", "fr_os_executable_path",
         "fr_gpu_backend", "fr_gpu_device_name",
-        "fr_str_append", "fr_str_append_str", "fr_str_from_int", "fr_str_builder_finish", NULL
+        "fr_str_append", "fr_str_append_str", "fr_str_from_int", "fr_str_builder_finish", "fr_str_view_sub", NULL
     };
     for (int i = 0; str_fns[i]; i++) {
         if (strcmp(mapped, str_fns[i]) == 0) return 1;

@@ -25,6 +25,12 @@ void fr_str_arena_reset(void);
 int64_t fr_str_view(const char *s);
 int64_t fr_str_view_len(int64_t view);
 int64_t fr_str_view_at(int64_t view, int64_t index);
+/* Byte ranges clamp at the cached end. Negative start/length and zero handles
+ * fail (NULL for sub, zero for append); starts beyond the end produce an empty
+ * range. matches returns zero for an invalid start or NULL text, and accepts
+ * an empty text at the end. JavaScript sub requires a valid UTF-8 range. */
+char *fr_str_view_sub(int64_t view, int64_t start, int64_t len);
+int fr_str_view_matches(int64_t view, int64_t start, const char *text);
 /* Arena-backed geometric growth; append returns the same handle or zero on
  * failure. char accepts bytes 1..255 (NUL is rejected). finish copies an
  * immutable snapshot, so further appends cannot modify previously returned
@@ -33,6 +39,8 @@ int64_t fr_str_view_at(int64_t view, int64_t index);
  * Builders, snapshots and views are all invalidated by arena reset. */
 int64_t fr_str_builder(void);
 int64_t fr_str_builder_append(int64_t builder, const char *s);
+int64_t fr_str_builder_append_view(int64_t builder, int64_t view,
+                                   int64_t start, int64_t len);
 int64_t fr_str_builder_char(int64_t builder, int64_t ch);
 char *fr_str_builder_finish(int64_t builder);
 
