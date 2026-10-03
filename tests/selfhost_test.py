@@ -213,6 +213,43 @@ native main {
         self.assertEqual(native.returncode, 7)
         self.assertEqual(native.stdout, '1\n2\n')
 
+    def test_match_arm_keeps_statements_after_println(self):
+        self.source.write_text('native main {\n match 1 {\n 1 => { println(1); return 7; }\n _ => { return 2; }\n }\n return 0;\n}\n')
+        result = self.invoke(self.source, '-o', 'match-arm', *self.native_flags())
+        self.assertEqual(result.returncode, 0, result.stderr)
+        native = subprocess.run([str(self.directory / 'match-arm')], capture_output=True,
+                                text=True, timeout=2)
+        self.assertEqual(native.returncode, 7, native.stderr)
+        self.assertEqual(native.stdout, '1\n')
+
+    def test_for_continue_executes_iteration_step(self):
+        self.source.write_text('native main {\n let total: int = 0;\n for (let i: int = 0; i < 4; i = i + 1) {\n  if (i == 1) { continue; }\n  total = total + i;\n }\n println(total);\n return 0;\n}\n')
+        result = self.invoke(self.source, '-o', 'for-continue', *self.native_flags())
+        self.assertEqual(result.returncode, 0, result.stderr)
+        native = subprocess.run([str(self.directory / 'for-continue')], capture_output=True,
+                                text=True, timeout=2)
+        self.assertEqual(native.returncode, 0, native.stderr)
+        self.assertEqual(native.stdout, '5\n')
+
+    def test_keyword_prefixes_remain_identifiers(self):
+        self.source.write_text('native main {\n let returning: int = 0;\n let breaking: int = 0;\n let continuing: int = 0;\n returning = 7; breaking = 8; continuing = 9;\n println(returning); println(breaking); println(continuing);\n return 0;\n}\n')
+        result = self.invoke(self.source, '-o', 'identifiers', *self.native_flags())
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.run_binary(self.directory / 'identifiers', '7\n8\n9\n')
+
+    def test_string_constant_semicolons_and_escaped_quotes(self):
+        self.source.write_text('const text = "a;b\\"c";\nnative main { print_str(text); println(); return 0; }\n')
+        result = self.invoke(self.source, '-o', 'constant', *self.native_flags())
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.run_binary(self.directory / 'constant', 'a;b"c\n')
+
+    def test_string_from_int_handles_signed_boundaries(self):
+        self.source.write_text('import strings;\nnative main {\n println(str_from_int(42));\n println(str_from_int(-9223372036854775807 - 1));\n println(str_from_int(9223372036854775807));\n return 0;\n}\n')
+        result = self.invoke(self.source, '-o', 'conversion', *self.native_flags())
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.run_binary(self.directory / 'conversion',
+                        '42\n-9223372036854775808\n9223372036854775807\n')
+
     def test_native_bounded_string_apis(self):
         self.source.write_text('''import strings;
 native main {

@@ -38,6 +38,11 @@ fn starts_at(src_view: int, i: int, kw: string): int {
     return str_view_matches(src_view, i, kw);
 }
 
+fn keyword_at(src_view: int, i: int, kw: string): int {
+    if (starts_at(src_view, i, kw) == 0) { return 0; }
+    return is_ident(str_view_at(src_view, i + str_len(kw))) == 0;
+}
+
 fn matching_brace(src_view: int, open: int): int {
     let depth: int = 0;
     let i: int = open;
@@ -121,6 +126,7 @@ fn map_ident(name: string): string {
     if (str_eq(name, "str_view")) { return "fr_str_view"; }
     if (str_eq(name, "str_len")) { return "fr_str_len"; }
     if (str_eq(name, "str_concat")) { return "fr_str_concat"; }
+    if (str_eq(name, "str_from_int")) { return "fr_str_from_int"; }
     if (str_eq(name, "str_append")) { return "fr_str_append"; }
     if (str_eq(name, "str_append_str")) { return "fr_str_append_str"; }
     if (str_eq(name, "str_eq")) { return "fr_str_eq"; }
@@ -344,10 +350,7 @@ fn compile_match_arm(line: string): string {
         out = str_builder_append(out, ") {");
     }
     out = str_builder_append(out, nl());
-    let body_view: int = str_view(body);
-    if (starts_at(body_view, 0, "println(") == 1) {
-        out = str_builder_append(out, emit_println_stmt(body));
-    } else if (str_len(body) > 0) {
+    if (str_len(body) > 0) {
         out = str_builder_append(out, compile_block(body, 0, str_len(body)));
     }
     return str_builder_finish(out);
@@ -566,14 +569,13 @@ fn compile_block(src: string, start: int, end: int): string {
             if (str_len(init) > 0) {
                 out = str_builder_append(out, compile_inline_stmt(init));
             }
-            out = str_builder_append(out, "        while (");
+            out = str_builder_append(out, "        for (; ");
             out = str_builder_append(out, compile_expr(cond));
+            out = str_builder_append(out, "; ");
+            out = str_builder_append(out, compile_expr(step));
             out = str_builder_append(out, ") {");
             out = str_builder_append(out, nl());
             out = str_builder_append(out, compile_block(src, b0 + 1, b1));
-            if (str_len(step) > 0) {
-                out = str_builder_append(out, compile_inline_stmt(step));
-            }
             out = str_builder_append(out, "        }");
             out = str_builder_append(out, nl());
             out = str_builder_append(out, "    }");
@@ -602,7 +604,7 @@ fn compile_block(src: string, start: int, end: int): string {
             continue;
         }
 
-        if (starts_at(src_view, i, "return") == 1) {
+        if (keyword_at(src_view, i, "return") == 1) {
             i = i + 6;
             let semi: int = find_stmt_end(src_view, i, end);
             let val: string = str_trim(str_view_sub(src_view, i, semi - i));
@@ -614,7 +616,7 @@ fn compile_block(src: string, start: int, end: int): string {
             continue;
         }
 
-        if (starts_at(src_view, i, "break") == 1) {
+        if (keyword_at(src_view, i, "break") == 1) {
             out = str_builder_append(out, "    break;");
             out = str_builder_append(out, nl());
             while (i < end && str_view_at(src_view, i) != 59) { i = i + 1; }
@@ -622,7 +624,7 @@ fn compile_block(src: string, start: int, end: int): string {
             continue;
         }
 
-        if (starts_at(src_view, i, "continue") == 1) {
+        if (keyword_at(src_view, i, "continue") == 1) {
             out = str_builder_append(out, "    continue;");
             out = str_builder_append(out, nl());
             while (i < end && str_view_at(src_view, i) != 59) { i = i + 1; }
@@ -778,8 +780,7 @@ fn compile_consts(src: string): string {
         if (ch == 34) { in_str = 1; i = i + 1; continue; }
         if ((i == 0 || str_view_at(src_view, i - 1) == 10) && starts_at(src_view, i, "const ") == 1) {
             let j: int = i + 6;
-            let semi: int = j;
-            while (semi < str_view_len(src_view) && str_view_at(src_view, semi) != 59) { semi = semi + 1; }
+            let semi: int = find_stmt_end(src_view, j, str_view_len(src_view));
             let line: string = str_trim(str_view_sub(src_view, j, semi - j));
             let line_view: int = str_view(line);
             let eq: int = 0;
