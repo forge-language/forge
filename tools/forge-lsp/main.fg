@@ -480,7 +480,7 @@ fn stdlib_modules(): string {
 
 fn stdlib_fn_list(mod: string): string {
     if (str_eq(mod, "io")) { return "print print_int print_str eprint eprint_int eprintln flush flush_err read_line read_char read_stdin prompt write_fd read_fd stdin_fd stdout_fd stderr_fd"; }
-    if (str_eq(mod, "strings")) { return "str_len str_concat str_eq str_sub str_contains str_trim str_char_at str_append str_append_str str_from_int str_reset_arena"; }
+    if (str_eq(mod, "strings")) { return "str_len str_concat str_eq str_sub str_contains str_trim str_char_at str_append str_append_str str_from_int str_reset_arena str_view str_view_len str_view_at str_builder str_builder_append str_builder_char str_builder_finish"; }
     if (str_eq(mod, "math")) { return "abs_i abs_f min_i max_i clamp_i pow_i"; }
     if (str_eq(mod, "time")) { return "time_now_ms sleep_ms"; }
     if (str_eq(mod, "fs")) { return "fs_read fs_write fs_append fs_exists fs_remove fs_size fs_is_file fs_is_dir fs_mkdir fs_rename fs_copy fs_list_dir fs_temp_path"; }

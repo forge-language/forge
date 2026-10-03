@@ -317,9 +317,9 @@ static const char *const STDLIB_STRING_FNS[] = {
     "fr_http_req_body", "fr_http_req_method", "fr_http_req_path",
     "fr_io_prompt", "fr_io_read_fd", "fr_io_read_line", "fr_io_read_stdin",
     "fr_json_get_string", "fr_json_stringify_int", "fr_json_stringify_str",
-    "fr_os_argv", "fr_os_getenv",
-    "fr_str_append", "fr_str_append_str", "fr_str_concat", "fr_str_from_int",
-    "fr_str_sub", "fr_str_trim",
+    "fr_os_argv", "fr_os_executable_path", "fr_os_getenv", "fr_os_temp_file",
+    "fr_str_append", "fr_str_append_str", "fr_str_builder_finish", "fr_str_concat", "fr_str_from_int",
+    "fr_str_sub", "fr_str_trim", "fr_str_view_sub",
     "fr_tcp_recv",
     "fr_udp_peer", "fr_udp_recv",
 };
@@ -472,11 +472,21 @@ static void emit_expr(Codegen *cg, Expr *e) {
 static void emit_expr_inner(Codegen *cg, Expr *e) {
     switch (e->kind) {
     case EXPR_INT:
-        fprintf(cg->out, "%lld", (long long)e->as.int_val);
+        if (e->as.int_val == INT64_MIN) {
+            fputs("(-INT64_C(9223372036854775807) - INT64_C(1))", cg->out);
+        } else if (e->as.int_val < 0) {
+            fprintf(cg->out, "(-INT64_C(%lld))", (long long)-e->as.int_val);
+        } else {
+            fprintf(cg->out, "INT64_C(%lld)", (long long)e->as.int_val);
+        }
         break;
-    case EXPR_FLOAT:
-        fprintf(cg->out, "%g", e->as.float_val);
+    case EXPR_FLOAT: {
+        char literal[64];
+        snprintf(literal, sizeof(literal), "%.17g", e->as.float_val);
+        fputs(literal, cg->out);
+        if (!strpbrk(literal, ".eE")) fputs(".0", cg->out);
         break;
+    }
     case EXPR_BOOL:
         fprintf(cg->out, "%s", e->as.bool_val ? "1" : "0");
         break;
@@ -786,11 +796,11 @@ static void emit_coro_body(Codegen *cg, CoroDecl *coro, const char *state_var, i
         if (s->kind == STMT_AWAIT) {
             int resume = ++(*step);
             cg_line(cg, "    fr_coro_set_step(__coro, %d);", resume);
+            cg_line(cg, "case %d:;", resume);
             cg_indent(cg);
             fputs("if (!fr_await_fd(__coro, ", cg->out);
             emit_expr(cg, s->as.await_expr);
-            fputs(", FR_EVENT_READ)) return fr_yield(__coro);\n", cg->out);
-            cg_line(cg, "case %d:", resume);
+            fputs(", FR_EVENT_READ)) return FR_CORO_WAITING_IO;\n", cg->out);
             s = s->next;
             continue;
         }
@@ -966,7 +976,9 @@ static void emit_coro_fn(Codegen *cg, CoroDecl *coro) {
         fprintf(cg->out, "    init->%.*s = %.*s;\n", (int)p->name.len, p->name.data,
                 (int)p->name.len, p->name.data);
     }
+    cg->indent = 1;
     emit_coro_spawn_inits(cg, coro);
+    cg->indent = 0;
     fprintf(cg->out, "    fr_coro_spawn(proc, %.*s_fn, init, sizeof(%.*s_state_t));\n",
             (int)coro->name.len, coro->name.data,
             (int)coro->name.len, coro->name.data);
@@ -1446,6 +1458,18 @@ void codegen_emit(Program *prog, FILE *out, const char *runtime_include) {
         emit_fn_signature(out, fn_name, fn);
         free(fn_name);
         fputs(";\n", out);
+    }
+    fputs("\n", out);
+
+    for (size_t i = 0; i < prog->module_count; i++) {
+        FileModule *mod = &prog->modules[i];
+        for (size_t j = 0; j < mod->fn_count; j++) {
+            char sym[128];
+            forge_mod_mangle(sym, sizeof(sym), mod->name, mod->functions[j].name);
+            fputs("static ", out);
+            emit_fn_signature(out, sym, &mod->functions[j]);
+            fputs(";\n", out);
+        }
     }
     fputs("\n", out);
 

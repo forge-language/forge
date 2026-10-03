@@ -103,10 +103,10 @@ static bool is_prebuilt_lib(const char *lib_dir, ForgeStr name) {
 static bool resolve_module_path(ModuleResolver *r, ForgeStr name, ForgeStr rel_path,
                               char *out, size_t cap) {
     char candidate[PATH_MAX];
-    const char *bases[32];
+    const char *bases[257];
     size_t base_count = 0;
     bases[base_count++] = r->entry_dir;
-    for (size_t i = 0; i < r->cfg->include_dir_count && base_count < 32; i++)
+    for (size_t i = 0; i < r->cfg->include_dir_count && base_count < 257; i++)
         bases[base_count++] = r->cfg->include_dirs[i];
 
     if (rel_path.len > 0) {
@@ -154,29 +154,44 @@ static FileModule *find_module(Program *prog, ForgeStr name) {
     return NULL;
 }
 
+static void *extend_decls(void *data, size_t count, size_t extra, size_t size) {
+    if (!extra) return data;
+    if (extra > SIZE_MAX - count || count + extra > SIZE_MAX / size)
+        forge_die("too many module declarations");
+    void *result = realloc(data, (count + extra) * size);
+    if (!result) forge_die("out of memory");
+    return result;
+}
+
 static void merge_program_decls(Program *dst, Program *src) {
-    for (size_t i = 0; i < src->const_count; i++) {
-        dst->const_count++;
-        dst->consts = (ConstDecl *)realloc(dst->consts, dst->const_count * sizeof(ConstDecl));
-        dst->consts[dst->const_count - 1] = src->consts[i];
+    if (src->const_count) {
+        dst->consts = extend_decls(dst->consts, dst->const_count,
+                                  src->const_count, sizeof(ConstDecl));
+        memcpy(dst->consts + dst->const_count, src->consts,
+               src->const_count * sizeof(ConstDecl));
+        dst->const_count += src->const_count;
     }
     src->const_count = 0;
     free(src->consts);
     src->consts = NULL;
 
-    for (size_t i = 0; i < src->struct_count; i++) {
-        dst->struct_count++;
-        dst->structs = (StructDecl *)realloc(dst->structs, dst->struct_count * sizeof(StructDecl));
-        dst->structs[dst->struct_count - 1] = src->structs[i];
+    if (src->struct_count) {
+        dst->structs = extend_decls(dst->structs, dst->struct_count,
+                                   src->struct_count, sizeof(StructDecl));
+        memcpy(dst->structs + dst->struct_count, src->structs,
+               src->struct_count * sizeof(StructDecl));
+        dst->struct_count += src->struct_count;
     }
     src->struct_count = 0;
     free(src->structs);
     src->structs = NULL;
 
-    for (size_t i = 0; i < src->enum_count; i++) {
-        dst->enum_count++;
-        dst->enums = (EnumDecl *)realloc(dst->enums, dst->enum_count * sizeof(EnumDecl));
-        dst->enums[dst->enum_count - 1] = src->enums[i];
+    if (src->enum_count) {
+        dst->enums = extend_decls(dst->enums, dst->enum_count,
+                                src->enum_count, sizeof(EnumDecl));
+        memcpy(dst->enums + dst->enum_count, src->enums,
+               src->enum_count * sizeof(EnumDecl));
+        dst->enum_count += src->enum_count;
     }
     src->enum_count = 0;
     free(src->enums);
@@ -230,11 +245,19 @@ static void load_parsed_module(ModuleResolver *r, Program *prog, ForgeStr name,
          * AST it feeds. */
     }
 
+    size_t extern_count = 0;
+    for (size_t i = 0; i < mod->fn_count; i++)
+        extern_count += mod->functions[i].is_extern != 0;
+    prog->functions = extend_decls(prog->functions, prog->fn_count,
+                                   extern_count, sizeof(FnDecl));
+    fm->functions = extend_decls(fm->functions, fm->fn_count,
+                                mod->fn_count - extern_count, sizeof(FnDecl));
     for (size_t i = 0; i < mod->fn_count; i++) {
-        if (mod->functions[i].is_extern) continue;
-        fm->fn_count++;
-        fm->functions = (FnDecl *)realloc(fm->functions, fm->fn_count * sizeof(FnDecl));
-        fm->functions[fm->fn_count - 1] = mod->functions[i];
+        if (mod->functions[i].is_extern) {
+            prog->functions[prog->fn_count++] = mod->functions[i];
+            continue;
+        }
+        fm->functions[fm->fn_count++] = mod->functions[i];
     }
     mod->fn_count = 0;
     free(mod->functions);

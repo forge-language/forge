@@ -56,3 +56,12 @@ lsp/out/
 editors/vscode/node_modules/
 editors/vscode/out/
 editors/vscode/server/
+
+# OMO local agent state
+.omo/
+.omc/
+.serena/
+
+/build-opt/
+
+/build-integration/

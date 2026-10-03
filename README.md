@@ -7,11 +7,11 @@
 
 A **Hybrid Lightweight Process + Coroutine** language — an AOT-compiled language that combines Elixir/Erlang-style lightweight processes with coroutines.
 
-Forge source (`.fg`) is compiled directly to native binaries. The compiler streams generated code to `clang` in memory — no `.c` files are written unless you pass `--emit-c`.
+Forge source (`.fg`) is compiled to native binaries through a C backend. The driver writes a temporary C file, invokes the selected C compiler, and removes intermediates by default. Use `--emit-c` for persistent C output or `--keep-temp` to retain intermediates.
 
 ## Features
 
-- **Direct native compilation** — `forge app.fg -o app` produces an executable in one step
+- **Direct native compilation** — `forge app.fg` produces the native executable `app` in the current directory; `-o` selects another output
 - **Light Process** — unit for state ownership, isolation, and fault recovery (`process`)
 - **Coroutine** — lightweight execution flows inside a process (`coroutine`, `spawn`, `yield`)
 - **AOT compilation** — `.fg` → native binary (C emitted only with `--emit-c`)
@@ -26,9 +26,9 @@ Forge source (`.fg`) is compiled directly to native binaries. The compiler strea
 - **Pattern matching** — `match expr { pat => stmt, _ => default }` on integers
 - **Comptime constants** — `const NAME = expr` folded at compile time
 - **Arena allocator** — bump allocation for HTTP request bodies (per-request reset)
-- **Preemptive scheduling** — 2000-reduction budget per coroutine (BEAM-style)
+- **Cooperative scheduling** — a budget of 2000 coroutine resumptions; long-running coroutine bodies must yield explicitly
 - **Ownership** — `own let` for heap strings, `move(x)` and `send proc, tag, move(msg)` for move semantics
-- **Supervisor** — Elixir-style fault-recovery policies
+- **Supervisor declarations** — restart-policy registration; automatic fault recovery is not implemented
 
 ## Requirements
 
@@ -56,7 +56,17 @@ Pipeline:
 | 1 | `build/bin/forge-stage1` | `compiler.fg` → `forge-stage2.c` |
 | 2 | `build/bin/forge-stage2` | self + `examples/match.fg` |
 
-`forge-selfhost-verify` builds stage3 from stage2 output and checks that recompiling `compiler.fg` yields identical C (fixed point).
+`forge-selfhost` is built by default. `forge-selfhost-verify` builds stage3 from stage2 output and checks that recompiling `compiler.fg` yields identical C (fixed point).
+
+Stage2 also drives native compilation without a shell:
+
+```bash
+./build/bin/forge-stage2 examples/control_flow.fg --forge-root "$PWD"
+./control_flow
+./build/bin/forge-stage2 bootstrap/compiler.fg --emit-c -o /tmp/stage3.c
+```
+
+The FG compiler supports an explicit subset: integer/string/void functions, initialized typed bindings, integer matching, loops, and the `strings`, `fs`, `os`, and `io` builtins. It accepts `native main` and a sequential `process main`. It rejects unsupported modules, coroutines, floats, booleans, arrays, and malformed delimiters. It does not yet replace the C compiler's full module, type, or ownership handling. For string variables and custom functions returning strings, use `print_str(value); println();` in this subset.
 
 Verify stage2 compiles itself:
 
@@ -67,12 +77,37 @@ Verify stage2 compiles itself:
 ## Build
 
 ```bash
-git clone https://github.com/Helloworld0822/forge.git
+git clone https://github.com/forge-language/forge-preview.git
 cd forge
 
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build
+ctest --test-dir build --output-on-failure
 ```
+
+Install both compilers and their headers/static libraries:
+
+```bash
+cmake --install build --prefix "$HOME/.local"
+export PATH="$HOME/.local/bin:$PATH"
+forge examples/hello.fg
+./hello
+forge-fg examples/control_flow.fg
+```
+
+Installed compilers locate `include/` and `lib/` from their executable path. Native compilation requires a C compiler. `--forge-root`, `--lib-dir`, and `--cc` select explicit locations; `FORGE_ROOT` and `CC` supply defaults. C emission remains available with `--emit-c` or a `.c` output filename.
+
+### Docker
+
+```bash
+docker build -t forge-language:local .
+docker run --rm forge-language:local --version
+docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" forge-language:local examples/hello.fg
+docker run --rm -v "$PWD:/work" --entrypoint /work/hello forge-language:local
+docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" --entrypoint forge-fg forge-language:local examples/control_flow.fg
+```
+
+The image includes the native compiler, FG compiler, C toolchain, headers and libraries. Its build verifies self-hosting to a fixed point. OpenCL is disabled in this portable image.
 
 ### Windows (MSYS2 / MinGW)
 
@@ -186,6 +221,18 @@ cmake --build build --target bench_server
 Ensure ports **19080**–**19083** are free before running (`fuser -k 19080/tcp 19081/tcp 19082/tcp 19083/tcp` if a prior run left servers behind).
 
 Results are written to `benchmark/results.txt` (gitignored).
+
+## Current limitations
+
+Forge is an experimental language. `--check` parses, loads modules, and runs the optimizer; it does not perform complete type or ownership checking. Ownership diagnostics currently run during code generation. Scheduler synchronization, coroutine control flow, and fault recovery need further work before production use.
+
+The Lean proofs cover an abstract expression model, not the entire C compiler or runtime. In particular, the model uses unbounded integers and does not cover C signed overflow, floating-point behavior, or effects.
+
+The HTTP results describe a cached-response C runtime path with minimal request handling. They do not establish that Forge is generally faster than other languages or full HTTP frameworks.
+
+A source-based review, verified fixes, and reproducible regression commands are recorded in [the September 2026 review](docs/language-review-2026-09-30.md).
+
+The native CLI, installation, FG subset and Docker workflow are documented in [the compiler guide](docs/compiler-and-selfhosting.md). New measurements and the controlled portfolio/Rust comparison are in [the October continuation report](docs/continuation-2026-10-03.md).
 
 ## Runtime: M:N Scheduler + Event Loop
 
@@ -449,3 +496,24 @@ Issues and pull requests are welcome. Please read **[CONTRIBUTING.md](CONTRIBUTI
 ## Design Docs
 
 For the execution model and design goals, see [docs/first.md](docs/first.md).
+
+## Browser output and distribution
+
+`forge main.fg --emit-js -o main.js` emits JavaScript for functions, source modules,
+enums, control flow and native main. Integers use BigInt and 64-bit arithmetic.
+Extern functions resolve through `globalThis.ForgeNative`. Native processes,
+coroutines, structs and linking archives are rejected in this mode. String
+length/index use UTF-8 bytes; slicing must stay on valid UTF-8 boundaries in a
+browser. The JavaScript backend does not supply ownership or memory safety.
+
+The separate [Forge Platform](https://github.com/forge-language/forge-platform)
+contains the React/TypeScript/Tailwind website, Forge registry backend, Forge
+package manager and SHA-256-checked `curl | bash` installer. Preview releases
+support Linux x86_64 with glibc 2.35+ and a C compiler.
+[Forge Browser](https://github.com/forge-language/forge-browser) provides generic
+DOM/HTTP primitives for Forge applications.
+
+The [portfolio migration](https://github.com/Helloworld0822/portfolio-platform/pull/1)
+uses Forge server and browser application code with independent PostgreSQL, web
+and browser modules. Its performance report compares complete implementations
+on one host; it is not a universal Forge-versus-Rust benchmark.

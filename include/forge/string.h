@@ -3,6 +3,10 @@
 
 #include <stdint.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 int64_t fr_str_len(const char *s);
 char *fr_str_concat(const char *a, const char *b);
 int fr_str_eq(const char *a, const char *b);
@@ -14,5 +18,35 @@ char *fr_str_append(const char *s, int64_t ch);
 char *fr_str_append_str(const char *s, const char *t);
 char *fr_str_from_int(int64_t n);
 void fr_str_arena_reset(void);
+/* Opaque handles in the current coroutine arena, otherwise the thread arena:
+ * valid only until fr_str_arena_reset(). Views
+ * borrow immutable NUL-terminated bytes; the source must outlive the view.
+ * Zero is a failed/empty handle. These are trusted runtime handles, not IDs
+ * that can be reconstructed from arbitrary integers. */
+int64_t fr_str_view(const char *s);
+int64_t fr_str_view_len(int64_t view);
+int64_t fr_str_view_at(int64_t view, int64_t index);
+/* Byte ranges clamp at the cached end. Negative start/length and zero handles
+ * fail (NULL for sub, zero for append); starts beyond the end produce an empty
+ * range. matches returns zero for an invalid start or NULL text, and accepts
+ * an empty text at the end. JavaScript sub requires a valid UTF-8 range. */
+char *fr_str_view_sub(int64_t view, int64_t start, int64_t len);
+int fr_str_view_matches(int64_t view, int64_t start, const char *text);
+/* Arena-backed geometric growth; append returns the same handle or zero on
+ * failure. char accepts bytes 1..255 (NUL is rejected). finish copies an
+ * immutable snapshot, so further appends cannot modify previously returned
+ * strings. Native strings may contain arbitrary nonzero bytes. JavaScript
+ * finish requires complete, valid UTF-8 and throws for malformed byte sequences.
+ * Builders, snapshots and views are all invalidated by arena reset. */
+int64_t fr_str_builder(void);
+int64_t fr_str_builder_append(int64_t builder, const char *s);
+int64_t fr_str_builder_append_view(int64_t builder, int64_t view,
+                                   int64_t start, int64_t len);
+int64_t fr_str_builder_char(int64_t builder, int64_t ch);
+char *fr_str_builder_finish(int64_t builder);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif
