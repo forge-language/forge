@@ -1,0 +1,17 @@
+.git
+.codegraph
+.serena
+.omo
+.omc
+.vscode
+.env
+.env.*
+build
+build-opt
+**/node_modules
+**/target
+**/__pycache__
+**/*.pyc
+**/.venv
+benchmark/results.txt
+benchmark/scheduler_results.txt

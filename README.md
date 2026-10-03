@@ -11,7 +11,7 @@ Forge source (`.fg`) is compiled to native binaries through a C backend. The dri
 
 ## Features
 
-- **Direct native compilation** — `forge app.fg -o app` produces an executable in one step
+- **Direct native compilation** — `forge app.fg` produces the native executable `app` in the current directory; `-o` selects another output
 - **Light Process** — unit for state ownership, isolation, and fault recovery (`process`)
 - **Coroutine** — lightweight execution flows inside a process (`coroutine`, `spawn`, `yield`)
 - **AOT compilation** — `.fg` → native binary (C emitted only with `--emit-c`)
@@ -56,7 +56,17 @@ Pipeline:
 | 1 | `build/bin/forge-stage1` | `compiler.fg` → `forge-stage2.c` |
 | 2 | `build/bin/forge-stage2` | self + `examples/match.fg` |
 
-`forge-selfhost-verify` builds stage3 from stage2 output and checks that recompiling `compiler.fg` yields identical C (fixed point).
+`forge-selfhost` is built by default. `forge-selfhost-verify` builds stage3 from stage2 output and checks that recompiling `compiler.fg` yields identical C (fixed point).
+
+Stage2 also drives native compilation without a shell:
+
+```bash
+./build/bin/forge-stage2 examples/control_flow.fg --forge-root "$PWD"
+./control_flow
+./build/bin/forge-stage2 bootstrap/compiler.fg --emit-c -o /tmp/stage3.c
+```
+
+The FG compiler supports an explicit subset: integer/string/void functions, initialized typed bindings, integer matching, loops, and the `strings`, `fs`, `os`, and `io` builtins. It accepts `native main` and a sequential `process main`. It rejects unsupported modules, coroutines, floats, booleans, arrays, and malformed delimiters. It does not yet replace the C compiler's full module, type, or ownership handling. For string variables and custom functions returning strings, use `print_str(value); println();` in this subset.
 
 Verify stage2 compiles itself:
 
@@ -74,6 +84,30 @@ cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build
 ctest --test-dir build --output-on-failure
 ```
+
+Install both compilers and their headers/static libraries:
+
+```bash
+cmake --install build --prefix "$HOME/.local"
+export PATH="$HOME/.local/bin:$PATH"
+forge examples/hello.fg
+./hello
+forge-fg examples/control_flow.fg
+```
+
+Installed compilers locate `include/` and `lib/` from their executable path. Native compilation requires a C compiler. `--forge-root`, `--lib-dir`, and `--cc` select explicit locations; `FORGE_ROOT` and `CC` supply defaults. C emission remains available with `--emit-c` or a `.c` output filename.
+
+### Docker
+
+```bash
+docker build -t forge-language:local .
+docker run --rm forge-language:local --version
+docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" forge-language:local examples/hello.fg
+docker run --rm -v "$PWD:/work" --entrypoint /work/hello forge-language:local
+docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/work" --entrypoint forge-fg forge-language:local examples/control_flow.fg
+```
+
+The image includes the native compiler, FG compiler, C toolchain, headers and libraries. Its build verifies self-hosting to a fixed point. OpenCL is disabled in this portable image.
 
 ### Windows (MSYS2 / MinGW)
 
@@ -197,6 +231,8 @@ The Lean proofs cover an abstract expression model, not the entire C compiler or
 The HTTP results describe a cached-response C runtime path with minimal request handling. They do not establish that Forge is generally faster than other languages or full HTTP frameworks.
 
 A source-based review, verified fixes, and reproducible regression commands are recorded in [the September 2026 review](docs/language-review-2026-09-30.md).
+
+The native CLI, installation, FG subset and Docker workflow are documented in [the compiler guide](docs/compiler-and-selfhosting.md). New measurements and the controlled portfolio/Rust comparison are in [the October continuation report](docs/continuation-2026-10-03.md).
 
 ## Runtime: M:N Scheduler + Event Loop
 
