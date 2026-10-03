@@ -8,6 +8,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#if defined(__APPLE__)
+#include <mach-o/dyld.h>
+#endif
 
 #if !defined(FORGE_OS_WINDOWS)
 #include <sys/wait.h>
@@ -90,7 +93,9 @@ static int exec_argv(Argv *a) {
         _exit(127);
     }
     int status = 0;
-    if (waitpid(pid, &status, 0) < 0) {
+    pid_t waited;
+    do { waited = waitpid(pid, &status, 0); } while (waited < 0 && errno == EINTR);
+    if (waited < 0) {
         fprintf(stderr, "forge: waitpid failed: %s\n", strerror(errno));
         return 1;
     }
@@ -114,7 +119,7 @@ static int compile_c_source(Program *prog, const char *obj_path, const ForgeDriv
         return 1;
     }
     emit(prog, out, "forge_runtime.h");
-    fclose(out);
+    if (fclose(out) != 0) { remove(cpath); return 1; }
 
     Argv args;
     argv_init(&args);
@@ -177,9 +182,18 @@ static int link_object(const char *obj_path, const char *output_path, const Forg
         snprintf(lib, n, "-l%s", cfg->link_libs[i]);
         argv_push(&args, lib);
     }
-    argv_push(&args, "-lforge_std");
     argv_push(&args, "-lforge_runtime");
+    argv_push(&args, "-lforge_std");
+    /* threading in forge_std calls back into runtime; repeat the archive pair
+     * for linkers that resolve static archives in one left-to-right pass. */
+    argv_push(&args, "-lforge_runtime");
+    argv_push(&args, "-lforge_std");
     argv_add_link_extras(&args, cfg);
+#if defined(FORGE_OS_WINDOWS)
+    argv_push(&args, "-lws2_32");
+#else
+    argv_push(&args, "-pthread");
+#endif
     argv_push(&args, "-lm");
     int rc = exec_argv(&args);
     argv_free(&args);
@@ -229,49 +243,75 @@ void forge_driver_config_init(ForgeDriverConfig *cfg) {
     cfg->opt_level = 3;
 }
 
+static int join_path(char *out, size_t cap, const char *root, const char *suffix) {
+    size_t a = strlen(root), b = strlen(suffix);
+    if (a >= cap || b >= cap - a) return 0;
+    memcpy(out, root, a);
+    memcpy(out + a, suffix, b + 1);
+    return 1;
+}
+
+static int executable_path(const char *argv0, char *out, size_t cap) {
+#if defined(FORGE_OS_WINDOWS)
+    DWORD n = GetModuleFileNameA(NULL, out, (DWORD)cap);
+    if (!n || n >= cap) return 0;
+    fr_path_normalize(out);
+    return 1;
+#elif defined(__linux__)
+    ssize_t n = readlink("/proc/self/exe", out, cap - 1);
+    if (n > 0 && (size_t)n < cap - 1) { out[n] = '\0'; return 1; }
+#elif defined(__APPLE__)
+    uint32_t size = (uint32_t)cap;
+    char unresolved[PATH_MAX];
+    if (_NSGetExecutablePath(unresolved, &size) == 0 && realpath(unresolved, out)) return 1;
+#endif
+#if defined(FORGE_OS_WINDOWS)
+    (void)argv0;
+    return 0;
+#else
+    return argv0 && realpath(argv0, out) != NULL;
+#endif
+}
+
 void forge_driver_detect_paths(ForgeDriverConfig *cfg, const char *argv0) {
     static char rootbuf[PATH_MAX];
     static char libbuf[PATH_MAX];
     static char incbuf[PATH_MAX];
 
-    const char *root = getenv("FORGE_ROOT");
-    if (root && root[0]) {
-        cfg->forge_root = root;
-    } else if (argv0 && argv0[0]) {
-#if defined(FORGE_OS_WINDOWS)
+    if (!cfg->forge_root) {
+        const char *root = getenv("FORGE_ROOT");
+        if (root && root[0]) cfg->forge_root = root;
+    }
+    if (!cfg->forge_root) {
         char resolved[PATH_MAX];
-        DWORD n = GetModuleFileNameA(NULL, resolved, (DWORD)sizeof(resolved));
-        if (n > 0 && n < sizeof(resolved)) {
-            char *slash = strstr(resolved, "\\build\\bin\\");
-            if (!slash) slash = strstr(resolved, "/build/bin/");
-            if (slash) {
+        if (executable_path(argv0, resolved, sizeof(resolved))) {
+            char *slash = strrchr(resolved, '/');
+            if (slash) *slash = '\0';
+            for (int parent = 0; parent < 2; parent++) {
+                slash = strrchr(resolved, '/');
+                if (!slash) break;
                 *slash = '\0';
-                snprintf(rootbuf, sizeof(rootbuf), "%s", resolved);
-                fr_path_normalize(rootbuf);
-                cfg->forge_root = rootbuf;
+                char header[PATH_MAX];
+                if (join_path(header, sizeof(header), resolved, "/include/forge_runtime.h") &&
+                    fr_path_exists(header)) {
+                    memcpy(rootbuf, resolved, strlen(resolved) + 1);
+                    cfg->forge_root = rootbuf;
+                    break;
+                }
             }
         }
-#else
-        char resolved[PATH_MAX];
-        if (realpath(argv0, resolved)) {
-            char *slash = strstr(resolved, "/build/bin/");
-            if (slash) {
-                *slash = '\0';
-                snprintf(rootbuf, sizeof(rootbuf), "%s", resolved);
-                cfg->forge_root = rootbuf;
-            }
-        }
-#endif
     }
     if (!cfg->forge_root) cfg->forge_root = ".";
 
     if (!cfg->lib_dir) {
-        snprintf(libbuf, sizeof(libbuf), "%s/build/lib", cfg->forge_root);
-        if (fr_path_exists(libbuf)) cfg->lib_dir = libbuf;
+        if (join_path(libbuf, sizeof(libbuf), cfg->forge_root, "/build/lib") &&
+            fr_path_exists(libbuf)) cfg->lib_dir = libbuf;
+        else if (join_path(libbuf, sizeof(libbuf), cfg->forge_root, "/lib") &&
+                 fr_path_exists(libbuf)) cfg->lib_dir = libbuf;
     }
     if (!cfg->include_dir) {
-        snprintf(incbuf, sizeof(incbuf), "%s/include", cfg->forge_root);
-        if (fr_path_exists(incbuf)) cfg->include_dir = incbuf;
+        if (join_path(incbuf, sizeof(incbuf), cfg->forge_root, "/include") &&
+            fr_path_exists(incbuf)) cfg->include_dir = incbuf;
     }
 }
 
@@ -292,8 +332,7 @@ int forge_driver_compile_program(Program *prog, const char *output_path, const F
             }
         }
         codegen_emit(prog, out, "forge_runtime.h");
-        if (output_path) fclose(out);
-        return 0;
+        return output_path ? (fclose(out) != 0) : (fflush(out) != 0);
     }
 
     if (!output_path) {
@@ -327,13 +366,15 @@ int forge_driver_compile_library(Program *prog, const char *output_a, const char
         FILE *out_c = fopen(output_a, "w");
         FILE *out_h = fopen(output_h, "w");
         if (!out_c || !out_h) {
+            if (out_c) fclose(out_c);
+            if (out_h) fclose(out_h);
             fprintf(stderr, "forge: cannot write library output\n");
             return 1;
         }
         codegen_emit_library(prog, out_c, out_h, "forge_runtime.h");
-        fclose(out_c);
-        fclose(out_h);
-        return 0;
+        int c_error = fclose(out_c) != 0;
+        int h_error = fclose(out_h) != 0;
+        return c_error || h_error;
     }
 
     if (!output_a || !output_h) {
@@ -344,7 +385,7 @@ int forge_driver_compile_library(Program *prog, const char *output_a, const char
     FILE *out_h = fopen(output_h, "w");
     if (!out_h) return 1;
     codegen_emit_library(prog, NULL, out_h, "forge_runtime.h");
-    fclose(out_h);
+    if (fclose(out_h) != 0) return 1;
 
     char obj_path[PATH_MAX];
     if (fr_make_temp_path(obj_path, sizeof(obj_path), "forge-lib", ".o") != 0) return 1;
