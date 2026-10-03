@@ -36,33 +36,29 @@ char *fr_fs_read(const char *path) {
     char *buf = (char *)malloc((size_t)sz + 1);
     if (!buf) { fclose(f); return NULL; }
     size_t n = fread(buf, 1, (size_t)sz, f);
+    int failed = ferror(f);
     buf[n] = '\0';
-    fclose(f);
+    if (fclose(f) != 0 || failed) { free(buf); return NULL; }
     return buf;
 }
 
-int fr_fs_write(const char *path, const char *content) {
+static int write_file(const char *path, const char *content, const char *mode) {
     if (!path) return 0;
-    FILE *f = fopen(path, "wb");
+    FILE *f = fopen(path, mode);
     if (!f) return 0;
     if (content) {
         size_t n = strlen(content);
         if (fwrite(content, 1, n, f) != n) { fclose(f); return 0; }
     }
-    fclose(f);
-    return 1;
+    return fclose(f) == 0;
+}
+
+int fr_fs_write(const char *path, const char *content) {
+    return write_file(path, content, "wb");
 }
 
 int fr_fs_append(const char *path, const char *content) {
-    if (!path) return 0;
-    FILE *f = fopen(path, "ab");
-    if (!f) return 0;
-    if (content) {
-        size_t n = strlen(content);
-        if (fwrite(content, 1, n, f) != n) { fclose(f); return 0; }
-    }
-    fclose(f);
-    return 1;
+    return write_file(path, content, "ab");
 }
 
 int fr_fs_exists(const char *path) {

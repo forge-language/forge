@@ -43,6 +43,67 @@ class CompilerRegressionTests(unittest.TestCase):
     def test_string_views_and_builder_snapshots(self):
         self.run_program('import strings;native main{let v: int=str_view("한글");println(str_view_len(v));println(str_view_at(v,0));println(str_view_at(v,9));let b: int=str_builder();str_builder_append(b,"one");let first: string=str_builder_finish(b);str_builder_char(b,65);println(first);println(str_builder_finish(b));println(str_builder_char(b,0));return 0;}', '6\n237\n-1\none\noneA\n0\n')
 
+    def test_native_os_path_calls_print_strings_and_clean_temp_files(self):
+        binary = self.compile_program('''import os; import fs;
+native main {
+    println(os_executable_path());
+    let executable: string = os_executable_path();
+    println(executable);
+    println(os_temp_file());
+    let temporary: string = os_temp_file();
+    println(temporary);
+    println(fs_exists(temporary));
+    println(fs_remove(temporary));
+    println(fs_exists(temporary));
+    return 0;
+}''')
+        result = subprocess.run([str(binary)], text=True, capture_output=True, timeout=10)
+        lines = result.stdout.splitlines()
+        if len(lines) >= 3:
+            # The direct temporary-file call hands its path to the caller.
+            direct_temp = Path(lines[2])
+            for path_text in lines[2:4]:
+                path = Path(path_text)
+                if path.is_absolute() and path.name.startswith(('forge-', 'frg')):
+                    self.addCleanup(path.unlink, missing_ok=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(lines), 7, result.stdout)
+        self.assertEqual(lines[:2], [str(binary.resolve()), str(binary.resolve())])
+        self.assertTrue(direct_temp.is_file(), result.stdout)
+        self.assertEqual(direct_temp.stat().st_size, 0)
+        self.assertNotEqual(lines[2], lines[3])
+        self.assertFalse(Path(lines[3]).exists())
+        self.assertEqual(lines[4:], ['1', '1', '0'])
+
+    def test_string_view_ranges_and_matches(self):
+        self.run_program('''import strings;
+native main {
+    let v: int = str_view("한글😀");
+    println(str_view_sub(v, 3, 3));
+    println(str_view_sub(v, 6, 9223372036854775807));
+    println(str_view_sub(v, 9223372036854775807, 1));
+    println(str_view_matches(v, 3, "글"));
+    println(str_view_matches(v, 6, "😀!"));
+    println(str_view_matches(v, 10, ""));
+    println(str_view_matches(v, 11, ""));
+    println(str_view_matches(v, -1, ""));
+    let b: int = str_builder();
+    str_builder_append_view(b, v, 3, 3);
+    let snapshot: string = str_builder_finish(b);
+    let saved: int = str_view(snapshot);
+    str_builder_append_view(b, v, 6, 1);
+    str_builder_append_view(b, v, 7, 9223372036854775807);
+    println(str_builder_append_view(b, v, -1, 1));
+    println(str_builder_append_view(b, v, 0, -1));
+    println(str_builder_append_view(b, 0, 0, 1));
+    println(str_builder_finish(b));
+    let i: int = 0;
+    while (i < 1000) { str_builder_append_view(b, saved, 0, 3); i = i + 1; }
+    println(str_len(str_builder_finish(b)));
+    println(snapshot);
+    return 0;
+}''', '글\n😀\n\n1\n0\n1\n0\n0\n0\n0\n0\n글😀\n3007\n글\n')
+
     def test_imported_extern_and_forward_module_calls(self):
         (Path(self.temp.name) / 'bridge.fg').write_text('extern fn fr_os_getenv(name: string): string;\nfn later(): string { return earlier(); }\nfn earlier(): string { return fr_os_getenv("FORGE_MODULE_TEST"); }\nfn number(): int { return 42; }\n')
         binary = self.compile_program('import bridge;\nnative main { println(bridge.later()); println(bridge.number()); bridge.number(); return 0; }')
