@@ -37,8 +37,11 @@ static const ForgeStdFn STRING_FNS[] = {
     {"str_view", "fr_str_view"},
     {"str_view_len", "fr_str_view_len"},
     {"str_view_at", "fr_str_view_at"},
+    {"str_view_sub", "fr_str_view_sub"},
+    {"str_view_matches", "fr_str_view_matches"},
     {"str_builder", "fr_str_builder"},
     {"str_builder_append", "fr_str_builder_append"},
+    {"str_builder_append_view", "fr_str_builder_append_view"},
     {"str_builder_char", "fr_str_builder_char"},
     {"str_builder_finish", "fr_str_builder_finish"},
 
@@ -79,6 +82,13 @@ static const ForgeStdFn OS_FNS[] = {
     {"os_getenv", "fr_os_getenv"},
     {"os_argc", "fr_os_argc"},
     {"os_argv", "fr_os_argv"},
+    {"os_command", "fr_os_command"},
+    {"os_command_arg", "fr_os_command_arg"},
+    {"os_command_run", "fr_os_command_run"},
+    {"os_command_free", "fr_os_command_free"},
+    {"os_temp_file", "fr_os_temp_file"},
+    {"os_executable_path", "fr_os_executable_path"},
+    {"os_same_file", "fr_os_same_file"},
 };
 
 static const ForgeStdFn TCP_FNS[] = {
@@ -198,7 +208,7 @@ static const ForgeModule MODULES[] = {
     { .name = { "math", 4 }, .header = "forge/math.h", .fns = MATH_FNS, .fn_count = 6 },
     { .name = { "time", 4 }, .header = "forge/time.h", .fns = TIME_FNS, .fn_count = 2 },
     { .name = { "fs", 2 }, .header = "forge/fs.h", .fns = FS_FNS, .fn_count = 13 },
-    { .name = { "os", 2 }, .header = "forge/os.h", .fns = OS_FNS, .fn_count = 4 },
+    { .name = { "os", 2 }, .header = "forge/os.h", .fns = OS_FNS, .fn_count = 11 },
     { .name = { "tcp", 3 }, .header = "forge/tcp.h", .fns = TCP_FNS, .fn_count = 7 },
     { .name = { "udp", 3 }, .header = "forge/udp.h", .fns = UDP_FNS, .fn_count = 5 },
     { .name = { "http", 4 }, .header = "forge/http.h", .fns = HTTP_FNS, .fn_count = 24 },

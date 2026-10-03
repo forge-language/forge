@@ -15,7 +15,10 @@ if(NOT TARGET Forge::forge_std)
     add_library(Forge::forge_std STATIC IMPORTED)
     set_target_properties(Forge::forge_std PROPERTIES
         IMPORTED_LOCATION "${FORGE_LIB_DIR}/${CMAKE_STATIC_LIBRARY_PREFIX}forge_std${CMAKE_STATIC_LIBRARY_SUFFIX}"
-        INTERFACE_INCLUDE_DIRECTORIES "${FORGE_INCLUDE_DIR}")
+        INTERFACE_INCLUDE_DIRECTORIES "${FORGE_INCLUDE_DIR}"
+        # stdlib fs/thread helpers call runtime platform/scheduler functions.
+        # Declare the static cycle so CMake repeats both archives for consumers.
+        INTERFACE_LINK_LIBRARIES Forge::forge_runtime)
     if(NOT WIN32)
         set_property(TARGET Forge::forge_std APPEND PROPERTY INTERFACE_LINK_LIBRARIES pthread)
     endif()

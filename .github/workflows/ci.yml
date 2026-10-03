@@ -39,3 +39,5 @@ jobs:
           cmake -S examples/external-project -B "$RUNNER_TEMP/forge-external" -DCMAKE_PREFIX_PATH="$RUNNER_TEMP/forge-sdk"
           cmake --build "$RUNNER_TEMP/forge-external" --parallel
           "$RUNNER_TEMP/forge-external/bin/hello"
+          "$RUNNER_TEMP/forge-external/sdk_runtime"
+          "$RUNNER_TEMP/forge-external/sdk_std"

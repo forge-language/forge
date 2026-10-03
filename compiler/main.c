@@ -1,6 +1,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#endif
 #include "common.h"
 #include "lexer.h"
 #include "parser.h"
@@ -33,7 +38,7 @@ static char *read_file(const char *path, size_t *out_len) {
 static void usage(const char *prog) {
     fprintf(stderr, "Forge %s - AOT native compiler\n", FORGE_VERSION);
     fprintf(stderr, "Usage:\n");
-    fprintf(stderr, "  %s <input.fg> -o <binary>          Compile directly to native executable\n", prog);
+    fprintf(stderr, "  %s <input.fg> [-o <binary>]       Compile native output (default: input basename)\n", prog);
     fprintf(stderr, "  %s <input.fg> -o <output.c> --emit-c   Emit C source only\n", prog);
     fprintf(stderr, "  %s --lib <input.fg> -o <lib.a> --header <lib.h>\n", prog);
     fprintf(stderr, "Options:\n");
@@ -57,6 +62,50 @@ static const char *option_value(int argc, char **argv, int *index) {
     return argv[++*index];
 }
 
+static char *default_output(const char *input) {
+    const char *name = strrchr(input, '/');
+    name = name ? name + 1 : input;
+#ifdef _WIN32
+    const char *backslash = strrchr(name, '\\');
+    if (backslash) name = backslash + 1;
+#endif
+    size_t len = strlen(name);
+    if (len > 3 && strcmp(name + len - 3, ".fg") == 0) len -= 3;
+    if (!len) forge_die("cannot infer output filename; use -o");
+    char *path = malloc(len + 5);
+    if (!path) forge_die("out of memory");
+    memcpy(path, name, len);
+    path[len] = '\0';
+#ifdef _WIN32
+    memcpy(path + len, ".exe", 5);
+#endif
+    return path;
+}
+
+static bool same_file(const char *input, const char *output) {
+    if (!output) return false;
+    if (strcmp(input, output) == 0) return true;
+#ifdef _WIN32
+    DWORD shared = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
+    HANDLE left = CreateFileA(input, FILE_READ_ATTRIBUTES, shared, NULL,
+                              OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    HANDLE right = CreateFileA(output, FILE_READ_ATTRIBUTES, shared, NULL,
+                               OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    BY_HANDLE_FILE_INFORMATION a, b;
+    bool same = left != INVALID_HANDLE_VALUE && right != INVALID_HANDLE_VALUE &&
+        GetFileInformationByHandle(left, &a) && GetFileInformationByHandle(right, &b) &&
+        a.dwVolumeSerialNumber == b.dwVolumeSerialNumber &&
+        a.nFileIndexHigh == b.nFileIndexHigh && a.nFileIndexLow == b.nFileIndexLow;
+    if (left != INVALID_HANDLE_VALUE) CloseHandle(left);
+    if (right != INVALID_HANDLE_VALUE) CloseHandle(right);
+    return same;
+#else
+    struct stat a, b;
+    return stat(input, &a) == 0 && stat(output, &b) == 0 &&
+        a.st_dev == b.st_dev && a.st_ino == b.st_ino;
+#endif
+}
+
 int main(int argc, char **argv) {
     if (argc < 2) {
         usage(argv[0]);
@@ -67,6 +116,7 @@ int main(int argc, char **argv) {
     bool lib_mode = false;
     bool check_only = false;
     bool symbols_json = false;
+    bool explicit_lib_dir = false;
     const char *input = NULL;
     const char *output = NULL;
     const char *header = NULL;
@@ -102,9 +152,12 @@ int main(int argc, char **argv) {
             cfg.emit_c_only = true;
         } else if (strcmp(argv[i], "--forge-root") == 0) {
             cfg.forge_root = option_value(argc, argv, &i);
+            cfg.include_dir = NULL;
+            if (!explicit_lib_dir) cfg.lib_dir = NULL;
             forge_driver_detect_paths(&cfg, argv[0]);
         } else if (strcmp(argv[i], "--lib-dir") == 0) {
             cfg.lib_dir = option_value(argc, argv, &i);
+            explicit_lib_dir = true;
         } else if (strcmp(argv[i], "--cc") == 0) {
             cfg.cc = option_value(argc, argv, &i);
         } else if (strcmp(argv[i], "--check") == 0) {
@@ -179,6 +232,13 @@ int main(int argc, char **argv) {
     }
 
     int rc = 0;
+    char *inferred_output = NULL;
+    if (!output && !lib_mode && !emit_js && !cfg.emit_c_only) {
+        inferred_output = default_output(input);
+        output = inferred_output;
+    }
+    if (same_file(input, output) || same_file(input, header))
+        forge_die("output would overwrite input; use a different filename");
     if (emit_js) {
         if (lib_mode || cfg.emit_c_only || !output || link_lib_count) forge_die("--emit-js requires -o and cannot be combined with native library options");
         FILE *out_js = fopen(output, "wb");
@@ -198,5 +258,6 @@ int main(int argc, char **argv) {
 
     program_free(&prog);
     free(src);
+    free(inferred_output);
     return rc;
 }

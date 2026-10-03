@@ -30,6 +30,12 @@ set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 
 set(FORGE_CC_ARGS --cc "${CMAKE_C_COMPILER}")
+set(FORGE_BOOTSTRAP_LINK -lforge_runtime -lforge_std -lforge_runtime -lforge_std -lm)
+if(NOT WIN32)
+    list(APPEND FORGE_BOOTSTRAP_LINK -pthread)
+else()
+    list(APPEND FORGE_BOOTSTRAP_LINK -lws2_32)
+endif()
 
 option(FORGE_ENABLE_GPU "Enable OpenCL GPU stdlib (gpu module)" ON)
 option(FORGE_ENABLE_IO_URING "Enable io_uring HTTP serve mode (Linux)" ON)
@@ -241,13 +247,13 @@ add_custom_command(
         "${FORGE_STAGE2_C}"
         -o "${FORGE_STAGE2_BIN}"
         "-L${CMAKE_BINARY_DIR}/lib"
-        -lforge_std -lforge_runtime -lm
+        ${FORGE_BOOTSTRAP_LINK}
     DEPENDS forge-stage1 "${FORGE_STAGE1_BIN}" forge_std forge_runtime "${FORGE_BOOTSTRAP_SRC}"
     COMMENT "Bootstrap stage2: self-hosted compiler compiles itself"
     VERBATIM
 )
 
-add_custom_target(forge-selfhost DEPENDS "${FORGE_STAGE2_BIN}")
+add_custom_target(forge-selfhost ALL DEPENDS "${FORGE_STAGE2_BIN}")
 
 # Self-hosted compiler compiles match.fg to C (bootstrap verification)
 set(FORGE_SELFHOST_TEST_C "${CMAKE_BINARY_DIR}/generated/selfhost_match.c")
@@ -284,7 +290,7 @@ add_custom_command(
         "${FORGE_STAGE3_C}"
         -o "${FORGE_STAGE3_BIN}"
         "-L${CMAKE_BINARY_DIR}/lib"
-        -lforge_std -lforge_runtime -lm
+        ${FORGE_BOOTSTRAP_LINK}
     COMMAND "${FORGE_STAGE3_BIN}" "${FORGE_BOOTSTRAP_SRC}" -o "${FORGE_STAGE4_C}"
     COMMAND ${CMAKE_COMMAND} -E compare_files "${FORGE_STAGE3_C}" "${FORGE_STAGE4_C}"
     DEPENDS forge-selfhost "${FORGE_STAGE2_BIN}" forge_std forge_runtime "${FORGE_BOOTSTRAP_SRC}"
@@ -469,6 +475,16 @@ if(BUILD_TESTING)
     target_link_libraries(string_test PRIVATE forge_runtime)
     add_test(NAME string_regressions COMMAND string_test)
 
+    add_executable(os_test tests/os_test.c)
+    target_link_libraries(os_test PRIVATE forge_std)
+    add_test(NAME os_regressions COMMAND os_test)
+    set_tests_properties(os_regressions PROPERTIES TIMEOUT 30)
+
+    add_executable(fs_test tests/fs_test.c)
+    # Organization fs_temp_path delegates to the runtime platform helper.
+    target_link_libraries(fs_test PRIVATE forge_std forge_runtime)
+    add_test(NAME filesystem_regressions COMMAND fs_test)
+
     if(UNIX)
         add_executable(scheduler_test tests/scheduler_test.c)
         target_link_libraries(scheduler_test PRIVATE forge_runtime)
@@ -479,7 +495,7 @@ if(BUILD_TESTING)
         set_tests_properties(scheduler_regressions PROPERTIES TIMEOUT 30)
     endif()
 
-    foreach(test_target optimizer_test arena_test work_queue_test string_test)
+    foreach(test_target optimizer_test arena_test work_queue_test string_test os_test)
         if(MSVC)
             target_compile_options(${test_target} PRIVATE /UNDEBUG)
         else()
@@ -505,6 +521,15 @@ if(BUILD_TESTING)
                     --lsp "${FORGE_LSP_BIN}")
             set_tests_properties(organization_integration_regressions PROPERTIES TIMEOUT 120)
         endif()
+        add_test(NAME driver_regressions
+            COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/driver_test.py"
+                --forge "$<TARGET_FILE:forge>" --root "${CMAKE_SOURCE_DIR}"
+                --lib-dir "${CMAKE_BINARY_DIR}/lib" --cc "${CMAKE_C_COMPILER}")
+        add_test(NAME selfhost_regressions
+            COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/selfhost_test.py"
+                --forge "${FORGE_STAGE2_BIN}" --root "${CMAKE_SOURCE_DIR}"
+                --lib-dir "${CMAKE_BINARY_DIR}/lib" --cc "${CMAKE_C_COMPILER}")
+        set_tests_properties(driver_regressions selfhost_regressions PROPERTIES TIMEOUT 120)
         find_program(FORGE_NODE node)
         if(FORGE_NODE)
             add_test(NAME javascript_regressions COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/js_test.py" "$<TARGET_FILE:forge>")
@@ -523,3 +548,7 @@ if(UNIX)
     add_executable(scheduler_bench EXCLUDE_FROM_ALL benchmark/scheduler_bench.c)
     target_link_libraries(scheduler_bench PRIVATE forge_runtime)
 endif()
+
+install(PROGRAMS "${FORGE_STAGE2_BIN}" DESTINATION ${CMAKE_INSTALL_BINDIR} RENAME forge-fg OPTIONAL)
+install(FILES bootstrap/compiler.fg DESTINATION ${CMAKE_INSTALL_DATADIR}/forge/bootstrap)
+install(FILES LICENSE DESTINATION ${CMAKE_INSTALL_DATADIR}/forge)

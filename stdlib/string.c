@@ -35,6 +35,34 @@ int64_t fr_str_view_at(int64_t handle, int64_t index) {
     return (unsigned char)view->data[index];
 }
 
+static int view_range(const str_view_t *view, int64_t start, int64_t len,
+                      size_t *offset, size_t *count) {
+    if (!view || start < 0 || len < 0) return 0;
+    *offset = (uint64_t)start < view->len ? (size_t)start : view->len;
+    size_t remaining = view->len - *offset;
+    *count = (uint64_t)len < remaining ? (size_t)len : remaining;
+    return 1;
+}
+
+char *fr_str_view_sub(int64_t handle, int64_t start, int64_t len) {
+    const str_view_t *view = (const str_view_t *)(intptr_t)handle;
+    size_t offset, count;
+    if (!view_range(view, start, len, &offset, &count)) return NULL;
+    char *out = str_alloc(count + 1);
+    if (!out) return NULL;
+    if (count) memcpy(out, view->data + offset, count);
+    out[count] = '\0';
+    return out;
+}
+
+int fr_str_view_matches(int64_t handle, int64_t start, const char *text) {
+    const str_view_t *view = (const str_view_t *)(intptr_t)handle;
+    if (!view || !text || start < 0 || (uint64_t)start > view->len) return 0;
+    size_t len = strlen(text);
+    if (len > view->len - (size_t)start) return 0;
+    return !len || memcmp(view->data + (size_t)start, text, len) == 0;
+}
+
 int64_t fr_str_builder(void) {
     str_builder_t *builder = fr_arena_alloc(fr_arena_tls(), sizeof(*builder), 0);
     if (!builder) return 0;
@@ -43,7 +71,7 @@ int64_t fr_str_builder(void) {
 }
 
 static int builder_reserve(str_builder_t *builder, size_t extra) {
-    if (!builder || extra > SIZE_MAX - builder->len - 1) return 0;
+    if (!builder || builder->len == SIZE_MAX || extra > SIZE_MAX - builder->len - 1) return 0;
     size_t needed = builder->len + extra + 1;
     if (needed <= builder->cap) return 1;
     size_t cap = builder->cap ? builder->cap : 64;
@@ -60,24 +88,33 @@ static int builder_reserve(str_builder_t *builder, size_t extra) {
     return 1;
 }
 
-int64_t fr_str_builder_append(int64_t handle, const char *s) {
+static int64_t builder_append_bytes(int64_t handle, const char *data, size_t len) {
     str_builder_t *builder = (str_builder_t *)(intptr_t)handle;
-    size_t len = s ? strlen(s) : 0;
     if (!builder_reserve(builder, len)) return 0;
-    if (len) memmove(builder->data + builder->len, s, len);
+    if (len) memmove(builder->data + builder->len, data, len);
     builder->len += len;
     builder->data[builder->len] = '\0';
     return handle;
 }
 
+int64_t fr_str_builder_append(int64_t handle, const char *s) {
+    return builder_append_bytes(handle, s, s ? strlen(s) : 0);
+}
+
+int64_t fr_str_builder_append_view(int64_t handle, int64_t view_handle,
+                                   int64_t start, int64_t len) {
+    const str_view_t *view = (const str_view_t *)(intptr_t)view_handle;
+    size_t offset, count;
+    if (!view_range(view, start, len, &offset, &count)) return 0;
+    return builder_append_bytes(handle, count ? view->data + offset : NULL, count);
+}
+
 int64_t fr_str_builder_char(int64_t handle, int64_t ch) {
-    str_builder_t *builder = (str_builder_t *)(intptr_t)handle;
     /* These APIs build NUL-terminated byte strings. Never introduce a hidden
      * suffix by appending NUL, or silently narrow an out-of-range byte. */
-    if (ch <= 0 || ch > 255 || !builder_reserve(builder, 1)) return 0;
-    builder->data[builder->len++] = (char)ch;
-    builder->data[builder->len] = '\0';
-    return handle;
+    if (ch <= 0 || ch > 255) return 0;
+    char byte = (char)ch;
+    return builder_append_bytes(handle, &byte, 1);
 }
 
 char *fr_str_builder_finish(int64_t handle) {
@@ -112,17 +149,13 @@ int fr_str_eq(const char *a, const char *b) {
 
 char *fr_str_sub(const char *s, int64_t start, int64_t len) {
     if (!s || start < 0 || len < 0) return NULL;
-    size_t slen = strlen(s);
-    if ((size_t)start >= slen) {
-        char *empty = str_alloc(1);
-        if (empty) empty[0] = '\0';
-        return empty;
-    }
-    if ((uint64_t)len > slen - (size_t)start) len = (int64_t)(slen - (size_t)start);
-    char *out = str_alloc((size_t)len + 1);
+    const str_view_t view = {s, strlen(s)};
+    size_t offset, count;
+    if (!view_range(&view, start, len, &offset, &count)) return NULL;
+    char *out = str_alloc(count + 1);
     if (!out) return NULL;
-    memcpy(out, s + start, (size_t)len);
-    out[len] = '\0';
+    if (count) memcpy(out, s + offset, count);
+    out[count] = '\0';
     return out;
 }
 

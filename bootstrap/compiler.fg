@@ -5,6 +5,7 @@
 import strings;
 import fs;
 import os;
+import io;
 
 fn q(): string { return str_append("", 34); }
 fn nl(): string { return str_append("", 10); }
@@ -17,8 +18,7 @@ fn is_ident(ch: int): int {
     return 0;
 }
 
-fn skip_ws(src: string, i: int): int {
-    let src_view: int = str_view(src);
+fn skip_ws(src_view: int, i: int): int {
     while (i < str_view_len(src_view)) {
         let ch: int = str_view_at(src_view, i);
         if (ch == 32 || ch == 9 || ch == 10 || ch == 13) {
@@ -34,22 +34,29 @@ fn skip_ws(src: string, i: int): int {
     return i;
 }
 
-fn starts_at(src: string, i: int, kw: string): int {
-    let k: int = str_len(kw);
-    if (i + k > str_len(src)) { return 0; }
-    return str_eq(str_sub(src, i, k), kw);
+fn starts_at(src_view: int, i: int, kw: string): int {
+    return str_view_matches(src_view, i, kw);
 }
 
-fn matching_brace(src: string, open: int): int {
-    let src_view: int = str_view(src);
+fn keyword_at(src_view: int, i: int, kw: string): int {
+    if (starts_at(src_view, i, kw) == 0) { return 0; }
+    return is_ident(str_view_at(src_view, i + str_len(kw))) == 0;
+}
+
+fn matching_brace(src_view: int, open: int): int {
     let depth: int = 0;
     let i: int = open;
     let in_str: int = 0;
     while (i < str_view_len(src_view)) {
         let ch: int = str_view_at(src_view, i);
         if (in_str == 1) {
+            if (ch == 92) { i = i + 2; continue; }
             if (ch == 34) { in_str = 0; }
             i = i + 1;
+            continue;
+        }
+        if (ch == 47 && str_view_at(src_view, i + 1) == 47) {
+            while (i < str_view_len(src_view) && str_view_at(src_view, i) != 10) { i = i + 1; }
             continue;
         }
         if (ch == 34) { in_str = 1; i = i + 1; continue; }
@@ -63,16 +70,20 @@ fn matching_brace(src: string, open: int): int {
     return -1;
 }
 
-fn matching_paren(src: string, open: int): int {
-    let src_view: int = str_view(src);
+fn matching_paren(src_view: int, open: int): int {
     let depth: int = 0;
     let i: int = open;
     let in_str: int = 0;
     while (i < str_view_len(src_view)) {
         let ch: int = str_view_at(src_view, i);
         if (in_str == 1) {
+            if (ch == 92) { i = i + 2; continue; }
             if (ch == 34) { in_str = 0; }
             i = i + 1;
+            continue;
+        }
+        if (ch == 47 && str_view_at(src_view, i + 1) == 47) {
+            while (i < str_view_len(src_view) && str_view_at(src_view, i) != 10) { i = i + 1; }
             continue;
         }
         if (ch == 34) { in_str = 1; i = i + 1; continue; }
@@ -95,6 +106,17 @@ fn forge_ctype(ty: string): string {
 }
 
 fn map_ident(name: string): string {
+    if (str_eq(name, "os_same_file")) { return "fr_os_same_file"; }
+    if (str_eq(name, "os_executable_path")) { return "fr_os_executable_path"; }
+    if (str_eq(name, "os_temp_file")) { return "fr_os_temp_file"; }
+    if (str_eq(name, "os_command_free")) { return "fr_os_command_free"; }
+    if (str_eq(name, "os_command_run")) { return "fr_os_command_run"; }
+    if (str_eq(name, "os_command_arg")) { return "fr_os_command_arg"; }
+    if (str_eq(name, "os_command")) { return "fr_os_command"; }
+    if (str_eq(name, "os_getenv")) { return "fr_os_getenv"; }
+    if (str_eq(name, "str_view_sub")) { return "fr_str_view_sub"; }
+    if (str_eq(name, "str_view_matches")) { return "fr_str_view_matches"; }
+    if (str_eq(name, "str_builder_append_view")) { return "fr_str_builder_append_view"; }
     if (str_eq(name, "str_builder_finish")) { return "fr_str_builder_finish"; }
     if (str_eq(name, "str_builder_char")) { return "fr_str_builder_char"; }
     if (str_eq(name, "str_builder_append")) { return "fr_str_builder_append"; }
@@ -104,6 +126,7 @@ fn map_ident(name: string): string {
     if (str_eq(name, "str_view")) { return "fr_str_view"; }
     if (str_eq(name, "str_len")) { return "fr_str_len"; }
     if (str_eq(name, "str_concat")) { return "fr_str_concat"; }
+    if (str_eq(name, "str_from_int")) { return "fr_str_from_int"; }
     if (str_eq(name, "str_append")) { return "fr_str_append"; }
     if (str_eq(name, "str_append_str")) { return "fr_str_append_str"; }
     if (str_eq(name, "str_eq")) { return "fr_str_eq"; }
@@ -158,17 +181,18 @@ fn compile_expr(expr: string): string {
         if (ch == 34) {
             let j: int = i + 1;
             while (j < n) {
+                if (str_view_at(expr_view, j) == 92) { j = j + 2; continue; }
                 if (str_view_at(expr_view, j) == 34) { break; }
                 j = j + 1;
             }
-            out = str_builder_append(out, str_sub(expr, i, j - i + 1));
+            out = str_builder_append_view(out, expr_view, i, j - i + 1);
             i = j + 1;
             continue;
         }
         if (is_ident(ch) == 1) {
             let j: int = i;
             while (j < n && is_ident(str_view_at(expr_view, j)) == 1) { j = j + 1; }
-            let id: string = str_sub(expr, i, j - i);
+            let id: string = str_view_sub(expr_view, i, j - i);
             out = str_builder_append(out, map_ident(id));
             i = j;
             continue;
@@ -235,15 +259,24 @@ fn println_arg_is_string(arg: string): int {
     let arg_view: int = str_view(arg);
     if (str_view_len(arg_view) == 0) { return 0; }
     if (str_view_at(arg_view, 0) == 34) { return 1; }
-    if (starts_at(arg, 0, "fs_read(") == 1) { return 1; }
-    if (starts_at(arg, 0, "fs_list_dir(") == 1) { return 1; }
-    if (starts_at(arg, 0, "read_line(") == 1) { return 1; }
-    if (starts_at(arg, 0, "read_stdin(") == 1) { return 1; }
-    if (starts_at(arg, 0, "prompt(") == 1) { return 1; }
-    if (starts_at(arg, 0, "read_fd(") == 1) { return 1; }
-    if (starts_at(arg, 0, "str_concat(") == 1) { return 1; }
-    if (starts_at(arg, 0, "str_") == 1) { return 1; }
-    if (starts_at(arg, 0, "os_argv(") == 1) { return 1; }
+    if (starts_at(arg_view, 0, "fs_read(") == 1) { return 1; }
+    if (starts_at(arg_view, 0, "fs_list_dir(") == 1) { return 1; }
+    if (starts_at(arg_view, 0, "read_line(") == 1) { return 1; }
+    if (starts_at(arg_view, 0, "read_stdin(") == 1) { return 1; }
+    if (starts_at(arg_view, 0, "prompt(") == 1) { return 1; }
+    if (starts_at(arg_view, 0, "read_fd(") == 1) { return 1; }
+    if (starts_at(arg_view, 0, "str_concat(") == 1) { return 1; }
+    if (starts_at(arg_view, 0, "str_sub(") == 1) { return 1; }
+    if (starts_at(arg_view, 0, "str_trim(") == 1) { return 1; }
+    if (starts_at(arg_view, 0, "str_append(") == 1) { return 1; }
+    if (starts_at(arg_view, 0, "str_append_str(") == 1) { return 1; }
+    if (starts_at(arg_view, 0, "str_from_int(") == 1) { return 1; }
+    if (starts_at(arg_view, 0, "str_view_sub(") == 1) { return 1; }
+    if (starts_at(arg_view, 0, "str_builder_finish(") == 1) { return 1; }
+    if (starts_at(arg_view, 0, "os_getenv(") == 1) { return 1; }
+    if (starts_at(arg_view, 0, "os_temp_file(") == 1) { return 1; }
+    if (starts_at(arg_view, 0, "os_executable_path(") == 1) { return 1; }
+    if (starts_at(arg_view, 0, "os_argv(") == 1) { return 1; }
     return 0;
 }
 
@@ -260,7 +293,7 @@ fn emit_println_stmt(line: string): string {
         if (str_view_at(line_view, end) == 41) { break; }
         end = end - 1;
     }
-    let arg: string = str_trim(str_sub(line, start, end - start));
+    let arg: string = str_trim(str_view_sub(line_view, start, end - start));
     if (str_len(arg) == 0) {
         let empty_out: string = "    fr_println();";
         empty_out = str_append_str(empty_out, nl());
@@ -299,11 +332,12 @@ fn compile_match_arm(line: string): string {
         i = i + 1;
     }
     if (arrow < 0) { return ""; }
-    let pat: string = str_trim(str_sub(line, 0, arrow));
-    let rest: string = str_trim(str_sub(line, arrow + 2, str_view_len(line_view) - arrow - 2));
+    let pat: string = str_trim(str_view_sub(line_view, 0, arrow));
+    let rest: string = str_trim(str_view_sub(line_view, arrow + 2, str_view_len(line_view) - arrow - 2));
     let body: string = rest;
     if (str_len(rest) > 0 && str_char_at(rest, 0) == 123) {
-        let b1: int = matching_brace(rest, 0);
+        let rest_view: int = str_view(rest);
+        let b1: int = matching_brace(rest_view, 0);
         if (b1 > 0) {
             body = str_trim(str_sub(rest, 1, b1 - 1));
         }
@@ -316,24 +350,26 @@ fn compile_match_arm(line: string): string {
         out = str_builder_append(out, ") {");
     }
     out = str_builder_append(out, nl());
-    if (starts_at(body, 0, "println(") == 1) {
-        out = str_builder_append(out, emit_println_stmt(body));
-    } else if (str_len(body) > 0) {
+    if (str_len(body) > 0) {
         out = str_builder_append(out, compile_block(body, 0, str_len(body)));
     }
     return str_builder_finish(out);
 }
 
-fn find_stmt_end(src: string, start: int, end: int): int {
-    let src_view: int = str_view(src);
+fn find_stmt_end(src_view: int, start: int, end: int): int {
     let semi: int = start;
     let depth: int = 0;
     let in_str: int = 0;
     while (semi < end) {
         let ch: int = str_view_at(src_view, semi);
         if (in_str == 1) {
+            if (ch == 92) { semi = semi + 2; continue; }
             if (ch == 34) { in_str = 0; }
             semi = semi + 1;
+            continue;
+        }
+        if (ch == 47 && str_view_at(src_view, semi + 1) == 47) {
+            while (semi < str_view_len(src_view) && str_view_at(src_view, semi) != 10) { semi = semi + 1; }
             continue;
         }
         if (ch == 34) { in_str = 1; semi = semi + 1; continue; }
@@ -345,16 +381,20 @@ fn find_stmt_end(src: string, start: int, end: int): int {
     return end;
 }
 
-fn find_semi_at(src: string, start: int, end: int): int {
-    let src_view: int = str_view(src);
+fn find_semi_at(src_view: int, start: int, end: int): int {
     let semi: int = start;
     let depth: int = 0;
     let in_str: int = 0;
     while (semi < end) {
         let ch: int = str_view_at(src_view, semi);
         if (in_str == 1) {
+            if (ch == 92) { semi = semi + 2; continue; }
             if (ch == 34) { in_str = 0; }
             semi = semi + 1;
+            continue;
+        }
+        if (ch == 47 && str_view_at(src_view, semi + 1) == 47) {
+            while (semi < str_view_len(src_view) && str_view_at(src_view, semi) != 10) { semi = semi + 1; }
             continue;
         }
         if (ch == 34) { in_str = 1; semi = semi + 1; continue; }
@@ -371,7 +411,8 @@ fn compile_inline_stmt(stmt: string): string {
     out = str_builder_append(out, "");
     stmt = str_trim(stmt);
     if (str_len(stmt) == 0) { return ""; }
-    if (starts_at(stmt, 0, "let ") == 1) {
+    let stmt_view: int = str_view(stmt);
+    if (starts_at(stmt_view, 0, "let ") == 1) {
         let body: string = str_trim(str_sub(stmt, 4, str_len(stmt) - 4));
         let eq: int = 0;
         let j: int = 0;
@@ -404,27 +445,10 @@ fn compile_inline_stmt(stmt: string): string {
         }
         return str_builder_finish(out);
     }
-    let eq: int = 0;
-    let j: int = 0;
-    while (j < str_len(stmt)) {
-        if (str_char_at(stmt, j) == 61) { eq = j; break; }
-        j = j + 1;
-    }
-    if (eq > 0 && is_ident(str_char_at(stmt, 0)) == 1) {
-        let lhs: string = str_trim(str_sub(stmt, 0, eq));
-        let rhs: string = str_trim(str_sub(stmt, eq + 1, str_len(stmt) - eq - 1));
-        out = str_builder_append(out, "        ");
-        out = str_builder_append(out, lhs);
-        out = str_builder_append(out, " = ");
-        out = str_builder_append(out, compile_expr(rhs));
-        out = str_builder_append(out, ";");
-        out = str_builder_append(out, nl());
-    } else {
-        out = str_builder_append(out, "        ");
-        out = str_builder_append(out, compile_expr(stmt));
-        out = str_builder_append(out, ";");
-        out = str_builder_append(out, nl());
-    }
+    out = str_builder_append(out, "        ");
+    out = str_builder_append(out, compile_expr(stmt));
+    out = str_builder_append(out, ";");
+    out = str_builder_append(out, nl());
     return str_builder_finish(out);
 }
 
@@ -434,13 +458,13 @@ fn compile_block(src: string, start: int, end: int): string {
     out = str_builder_append(out, "");
     let i: int = start;
     while (i < end) {
-        i = skip_ws(src, i);
+        i = skip_ws(src_view, i);
         if (i >= end) { break; }
 
-        if (starts_at(src, i, "let ") == 1) {
+        if (starts_at(src_view, i, "let ") == 1) {
             i = i + 4;
-            let semi: int = find_stmt_end(src, i, end);
-            let stmt: string = str_trim(str_sub(src, i, semi - i));
+            let semi: int = find_stmt_end(src_view, i, end);
+            let stmt: string = str_trim(str_view_sub(src_view, i, semi - i));
             let eq: int = 0;
             let j: int = 0;
             while (j < str_len(stmt)) {
@@ -474,15 +498,15 @@ fn compile_block(src: string, start: int, end: int): string {
             continue;
         }
 
-        if (starts_at(src, i, "if ") == 1) {
+        if (starts_at(src_view, i, "if ") == 1) {
             i = i + 3;
             let p0: int = i;
             while (p0 < end && str_view_at(src_view, p0) != 40) { p0 = p0 + 1; }
-            let p1: int = matching_paren(src, p0);
-            let cond: string = str_trim(str_sub(src, p0 + 1, p1 - p0 - 1));
+            let p1: int = matching_paren(src_view, p0);
+            let cond: string = str_trim(str_view_sub(src_view, p0 + 1, p1 - p0 - 1));
             let b0: int = p1 + 1;
             while (b0 < end && str_view_at(src_view, b0) != 123) { b0 = b0 + 1; }
-            let b1: int = matching_brace(src, b0);
+            let b1: int = matching_brace(src_view, b0);
             out = str_builder_append(out, "    if (");
             out = str_builder_append(out, compile_expr(cond));
             out = str_builder_append(out, ") {");
@@ -491,19 +515,19 @@ fn compile_block(src: string, start: int, end: int): string {
             out = str_builder_append(out, "    }");
             out = str_builder_append(out, nl());
             i = b1 + 1;
-            i = skip_ws(src, i);
-            while (starts_at(src, i, "else") == 1) {
+            i = skip_ws(src_view, i);
+            while (starts_at(src_view, i, "else") == 1) {
                 i = i + 4;
-                i = skip_ws(src, i);
-                if (starts_at(src, i, "if ") == 1) {
+                i = skip_ws(src_view, i);
+                if (starts_at(src_view, i, "if ") == 1) {
                     i = i + 3;
                     let ep0: int = i;
                     while (ep0 < end && str_view_at(src_view, ep0) != 40) { ep0 = ep0 + 1; }
-                    let ep1: int = matching_paren(src, ep0);
-                    let econd: string = str_trim(str_sub(src, ep0 + 1, ep1 - ep0 - 1));
+                    let ep1: int = matching_paren(src_view, ep0);
+                    let econd: string = str_trim(str_view_sub(src_view, ep0 + 1, ep1 - ep0 - 1));
                     let eb0: int = ep1 + 1;
                     while (eb0 < end && str_view_at(src_view, eb0) != 123) { eb0 = eb0 + 1; }
-                    let eb1: int = matching_brace(src, eb0);
+                    let eb1: int = matching_brace(src_view, eb0);
                     out = str_builder_append(out, "    else if (");
                     out = str_builder_append(out, compile_expr(econd));
                     out = str_builder_append(out, ") {");
@@ -512,10 +536,10 @@ fn compile_block(src: string, start: int, end: int): string {
                     out = str_builder_append(out, "    }");
                     out = str_builder_append(out, nl());
                     i = eb1 + 1;
-                    i = skip_ws(src, i);
+                    i = skip_ws(src_view, i);
                 } else {
                     while (i < end && str_view_at(src_view, i) != 123) { i = i + 1; }
-                    let e1: int = matching_brace(src, i);
+                    let e1: int = matching_brace(src_view, i);
                     out = str_builder_append(out, "    else {");
                     out = str_builder_append(out, nl());
                     out = str_builder_append(out, compile_block(src, i + 1, e1));
@@ -528,31 +552,30 @@ fn compile_block(src: string, start: int, end: int): string {
             continue;
         }
 
-        if (starts_at(src, i, "for (") == 1) {
+        if (starts_at(src_view, i, "for (") == 1) {
             i = i + 4;
             let p0: int = i;
-            let p1: int = matching_paren(src, p0);
-            let semi1: int = find_semi_at(src, p0 + 1, p1);
-            let semi2: int = find_semi_at(src, semi1 + 1, p1);
-            let init: string = str_trim(str_sub(src, p0 + 1, semi1 - p0 - 1));
-            let cond: string = str_trim(str_sub(src, semi1 + 1, semi2 - semi1 - 1));
-            let step: string = str_trim(str_sub(src, semi2 + 1, p1 - semi2 - 1));
+            let p1: int = matching_paren(src_view, p0);
+            let semi1: int = find_semi_at(src_view, p0 + 1, p1);
+            let semi2: int = find_semi_at(src_view, semi1 + 1, p1);
+            let init: string = str_trim(str_view_sub(src_view, p0 + 1, semi1 - p0 - 1));
+            let cond: string = str_trim(str_view_sub(src_view, semi1 + 1, semi2 - semi1 - 1));
+            let step: string = str_trim(str_view_sub(src_view, semi2 + 1, p1 - semi2 - 1));
             let b0: int = p1 + 1;
             while (b0 < end && str_view_at(src_view, b0) != 123) { b0 = b0 + 1; }
-            let b1: int = matching_brace(src, b0);
+            let b1: int = matching_brace(src_view, b0);
             out = str_builder_append(out, "    {");
             out = str_builder_append(out, nl());
             if (str_len(init) > 0) {
                 out = str_builder_append(out, compile_inline_stmt(init));
             }
-            out = str_builder_append(out, "        while (");
+            out = str_builder_append(out, "        for (; ");
             out = str_builder_append(out, compile_expr(cond));
+            out = str_builder_append(out, "; ");
+            out = str_builder_append(out, compile_expr(step));
             out = str_builder_append(out, ") {");
             out = str_builder_append(out, nl());
             out = str_builder_append(out, compile_block(src, b0 + 1, b1));
-            if (str_len(step) > 0) {
-                out = str_builder_append(out, compile_inline_stmt(step));
-            }
             out = str_builder_append(out, "        }");
             out = str_builder_append(out, nl());
             out = str_builder_append(out, "    }");
@@ -561,15 +584,15 @@ fn compile_block(src: string, start: int, end: int): string {
             continue;
         }
 
-        if (starts_at(src, i, "while ") == 1) {
+        if (starts_at(src_view, i, "while ") == 1) {
             i = i + 6;
             let p0: int = i;
             while (p0 < end && str_view_at(src_view, p0) != 40) { p0 = p0 + 1; }
-            let p1: int = matching_paren(src, p0);
-            let cond: string = str_trim(str_sub(src, p0 + 1, p1 - p0 - 1));
+            let p1: int = matching_paren(src_view, p0);
+            let cond: string = str_trim(str_view_sub(src_view, p0 + 1, p1 - p0 - 1));
             let b0: int = p1 + 1;
             while (b0 < end && str_view_at(src_view, b0) != 123) { b0 = b0 + 1; }
-            let b1: int = matching_brace(src, b0);
+            let b1: int = matching_brace(src_view, b0);
             out = str_builder_append(out, "    while (");
             out = str_builder_append(out, compile_expr(cond));
             out = str_builder_append(out, ") {");
@@ -581,10 +604,10 @@ fn compile_block(src: string, start: int, end: int): string {
             continue;
         }
 
-        if (starts_at(src, i, "return") == 1) {
+        if (keyword_at(src_view, i, "return") == 1) {
             i = i + 6;
-            let semi: int = find_stmt_end(src, i, end);
-            let val: string = str_trim(str_sub(src, i, semi - i));
+            let semi: int = find_stmt_end(src_view, i, end);
+            let val: string = str_trim(str_view_sub(src_view, i, semi - i));
             out = str_builder_append(out, "    return ");
             out = str_builder_append(out, compile_expr(val));
             out = str_builder_append(out, ";");
@@ -593,7 +616,7 @@ fn compile_block(src: string, start: int, end: int): string {
             continue;
         }
 
-        if (starts_at(src, i, "break") == 1) {
+        if (keyword_at(src_view, i, "break") == 1) {
             out = str_builder_append(out, "    break;");
             out = str_builder_append(out, nl());
             while (i < end && str_view_at(src_view, i) != 59) { i = i + 1; }
@@ -601,7 +624,7 @@ fn compile_block(src: string, start: int, end: int): string {
             continue;
         }
 
-        if (starts_at(src, i, "continue") == 1) {
+        if (keyword_at(src_view, i, "continue") == 1) {
             out = str_builder_append(out, "    continue;");
             out = str_builder_append(out, nl());
             while (i < end && str_view_at(src_view, i) != 59) { i = i + 1; }
@@ -609,13 +632,13 @@ fn compile_block(src: string, start: int, end: int): string {
             continue;
         }
 
-        if (starts_at(src, i, "match ") == 1) {
+        if (starts_at(src_view, i, "match ") == 1) {
             i = i + 6;
             let scr_end: int = i;
             while (scr_end < end && str_view_at(src_view, scr_end) != 123) { scr_end = scr_end + 1; }
-            let scr: string = str_trim(str_sub(src, i, scr_end - i));
+            let scr: string = str_trim(str_view_sub(src_view, i, scr_end - i));
             let b0: int = scr_end;
-            let b1: int = matching_brace(src, b0);
+            let b1: int = matching_brace(src_view, b0);
             out = str_builder_append(out, "    { int64_t __match_val = ");
             out = str_builder_append(out, compile_expr(scr));
             out = str_builder_append(out, ";");
@@ -624,11 +647,11 @@ fn compile_block(src: string, start: int, end: int): string {
             out = str_builder_append(out, nl());
             let mi: int = b0 + 1;
             while (mi < b1) {
-                mi = skip_ws(src, mi);
+                mi = skip_ws(src_view, mi);
                 if (mi >= b1) { break; }
                 let line_end: int = mi;
                 while (line_end < b1 && str_view_at(src_view, line_end) != 10) { line_end = line_end + 1; }
-                let mline: string = str_trim(str_sub(src, mi, line_end - mi));
+                let mline: string = str_trim(str_view_sub(src_view, mi, line_end - mi));
                 if (str_contains(mline, "=>")) {
                     out = str_builder_append(out, compile_match_arm(mline));
                 }
@@ -642,39 +665,21 @@ fn compile_block(src: string, start: int, end: int): string {
             continue;
         }
 
-        let line_end: int = i;
-        while (line_end < end && str_view_at(src_view, line_end) != 10) { line_end = line_end + 1; }
-        let line: string = str_trim(str_sub(src, i, line_end - i));
-        if (starts_at(line, 0, "println(") == 1) {
+        if (starts_at(src_view, i, "println(") == 1) {
+            let semi: int = find_stmt_end(src_view, i, end);
+            let line: string = str_trim(str_view_sub(src_view, i, semi - i));
             out = str_builder_append(out, emit_println_stmt(line));
-            i = line_end + 1;
+            i = semi + 1;
             continue;
         }
 
-        let semi: int = find_stmt_end(src, i, end);
-        let stmt: string = str_trim(str_sub(src, i, semi - i));
+        let semi: int = find_stmt_end(src_view, i, end);
+        let stmt: string = str_trim(str_view_sub(src_view, i, semi - i));
         if (str_len(stmt) > 0) {
-            let eq: int = 0;
-            let j: int = 0;
-            while (j < str_len(stmt)) {
-                if (str_char_at(stmt, j) == 61) { eq = j; break; }
-                j = j + 1;
-            }
-            if (eq > 0 && is_ident(str_char_at(stmt, 0)) == 1) {
-                let lhs: string = str_trim(str_sub(stmt, 0, eq));
-                let rhs: string = str_trim(str_sub(stmt, eq + 1, str_len(stmt) - eq - 1));
-                out = str_builder_append(out, "    ");
-                out = str_builder_append(out, lhs);
-                out = str_builder_append(out, " = ");
-                out = str_builder_append(out, compile_expr(rhs));
-                out = str_builder_append(out, ";");
-                out = str_builder_append(out, nl());
-            } else {
-                out = str_builder_append(out, "    ");
-                out = str_builder_append(out, compile_expr(stmt));
-                out = str_builder_append(out, ";");
-                out = str_builder_append(out, nl());
-            }
+            out = str_builder_append(out, "    ");
+            out = str_builder_append(out, compile_expr(stmt));
+            out = str_builder_append(out, ";");
+            out = str_builder_append(out, nl());
         }
         i = semi + 1;
     }
@@ -688,11 +693,11 @@ fn compile_params(params: string): string {
     let i: int = 0;
     let first: int = 1;
     while (i < str_view_len(params_view)) {
-        i = skip_ws(params, i);
+        i = skip_ws(params_view, i);
         if (i >= str_view_len(params_view)) { break; }
         let j: int = i;
         while (j < str_view_len(params_view) && str_view_at(params_view, j) != 44) { j = j + 1; }
-        let part: string = str_trim(str_sub(params, i, j - i));
+        let part: string = str_trim(str_view_sub(params_view, i, j - i));
         let colon: int = 0;
         let k: int = 0;
         while (k < str_len(part)) {
@@ -763,16 +768,21 @@ fn compile_consts(src: string): string {
     while (i < str_view_len(src_view)) {
         let ch: int = str_view_at(src_view, i);
         if (in_str == 1) {
+            if (ch == 92) { i = i + 2; continue; }
             if (ch == 34) { in_str = 0; }
             i = i + 1;
             continue;
         }
+        if (ch == 47 && str_view_at(src_view, i + 1) == 47) {
+            while (i < str_view_len(src_view) && str_view_at(src_view, i) != 10) { i = i + 1; }
+            continue;
+        }
         if (ch == 34) { in_str = 1; i = i + 1; continue; }
-        if ((i == 0 || str_view_at(src_view, i - 1) == 10) && starts_at(src, i, "const ") == 1) {
+        if ((i == 0 || str_view_at(src_view, i - 1) == 10) && starts_at(src_view, i, "const ") == 1) {
             let j: int = i + 6;
-            let semi: int = j;
-            while (semi < str_view_len(src_view) && str_view_at(src_view, semi) != 59) { semi = semi + 1; }
-            let line: string = str_trim(str_sub(src, j, semi - j));
+            let semi: int = find_stmt_end(src_view, j, str_view_len(src_view));
+            let line: string = str_trim(str_view_sub(src_view, j, semi - j));
+            let line_view: int = str_view(line);
             let eq: int = 0;
             let k: int = 0;
             while (k < str_len(line)) {
@@ -780,8 +790,8 @@ fn compile_consts(src: string): string {
                 k = k + 1;
             }
             if (eq > 0) {
-                let name: string = str_trim(str_sub(line, 0, eq));
-                let val: string = str_trim(str_sub(line, eq + 1, str_len(line) - eq - 1));
+                let name: string = str_trim(str_view_sub(line_view, 0, eq));
+                let val: string = str_trim(str_view_sub(line_view, eq + 1, str_len(line) - eq - 1));
                 out = str_builder_append(out, "#define ");
                 out = str_builder_append(out, name);
                 out = str_builder_append(out, " ");
@@ -804,20 +814,25 @@ fn find_block_after_keyword(src: string, keyword: string): string {
     while (i < str_view_len(src_view) - klen) {
         let ch: int = str_view_at(src_view, i);
         if (in_str == 1) {
+            if (ch == 92) { i = i + 2; continue; }
             if (ch == 34) { in_str = 0; }
             i = i + 1;
             continue;
         }
+        if (ch == 47 && str_view_at(src_view, i + 1) == 47) {
+            while (i < str_view_len(src_view) && str_view_at(src_view, i) != 10) { i = i + 1; }
+            continue;
+        }
         if (ch == 34) { in_str = 1; i = i + 1; continue; }
-        if (str_eq(str_sub(src, i, klen), keyword)) {
+        if (str_view_matches(src_view, i, keyword)) {
             let next: int = str_view_at(src_view, i + klen);
             if (next == 32 || next == 123) {
                 let j: int = i + klen;
                 while (j < str_view_len(src_view)) {
                     if (str_view_at(src_view, j) == 123) {
-                        let end: int = matching_brace(src, j);
+                        let end: int = matching_brace(src_view, j);
                         if (end > 0) {
-                            return str_sub(src, j + 1, end - j - 1);
+                            return str_view_sub(src_view, j + 1, end - j - 1);
                         }
                     }
                     j = j + 1;
@@ -836,58 +851,68 @@ fn compile_functions_to(src: string, path: string): int {
     while (i < str_view_len(src_view)) {
         let ch: int = str_view_at(src_view, i);
         if (in_str == 1) {
+            if (ch == 92) { i = i + 2; continue; }
             if (ch == 34) { in_str = 0; }
             i = i + 1;
             continue;
         }
+        if (ch == 47 && str_view_at(src_view, i + 1) == 47) {
+            while (i < str_view_len(src_view) && str_view_at(src_view, i) != 10) { i = i + 1; }
+            continue;
+        }
         if (ch == 34) { in_str = 1; i = i + 1; continue; }
-        if ((i == 0 || str_view_at(src_view, i - 1) == 10) && starts_at(src, i, "fn ") == 1) {
+        if ((i == 0 || str_view_at(src_view, i - 1) == 10) && starts_at(src_view, i, "fn ") == 1) {
             i = i + 3;
             let name_start: int = i;
             while (i < str_view_len(src_view) && str_view_at(src_view, i) != 40) { i = i + 1; }
-            let name: string = str_trim(str_sub(src, name_start, i - name_start));
-            let p1: int = matching_paren(src, i);
-            let params: string = str_sub(src, i + 1, p1 - i - 1);
+            let name: string = str_trim(str_view_sub(src_view, name_start, i - name_start));
+            let p1: int = matching_paren(src_view, i);
+            let params: string = str_view_sub(src_view, i + 1, p1 - i - 1);
             let colon: int = p1 + 1;
             while (colon < str_view_len(src_view) && str_view_at(src_view, colon) != 58) { colon = colon + 1; }
             let ret_start: int = colon + 1;
             let b0: int = ret_start;
             while (b0 < str_view_len(src_view) && str_view_at(src_view, b0) != 123) { b0 = b0 + 1; }
-            let ret: string = str_trim(str_sub(src, ret_start, b0 - ret_start));
-            let b1: int = matching_brace(src, b0);
-            fs_append(path, compile_fn_decl(name, params, ret));
+            let ret: string = str_trim(str_view_sub(src_view, ret_start, b0 - ret_start));
+            let b1: int = matching_brace(src_view, b0);
+            if (fs_append(path, compile_fn_decl(name, params, ret)) == 0) { return 0; }
             i = b1 + 1;
             continue;
         }
         i = i + 1;
     }
-    fs_append(path, nl());
+    if (fs_append(path, nl()) == 0) { return 0; }
     i = 0;
     in_str = 0;
     while (i < str_view_len(src_view)) {
         let ch: int = str_view_at(src_view, i);
         if (in_str == 1) {
+            if (ch == 92) { i = i + 2; continue; }
             if (ch == 34) { in_str = 0; }
             i = i + 1;
             continue;
         }
+        if (ch == 47 && str_view_at(src_view, i + 1) == 47) {
+            while (i < str_view_len(src_view) && str_view_at(src_view, i) != 10) { i = i + 1; }
+            continue;
+        }
         if (ch == 34) { in_str = 1; i = i + 1; continue; }
-        if ((i == 0 || str_view_at(src_view, i - 1) == 10) && starts_at(src, i, "fn ") == 1) {
+        if ((i == 0 || str_view_at(src_view, i - 1) == 10) && starts_at(src_view, i, "fn ") == 1) {
             i = i + 3;
             let name_start: int = i;
             while (i < str_view_len(src_view) && str_view_at(src_view, i) != 40) { i = i + 1; }
-            let name: string = str_trim(str_sub(src, name_start, i - name_start));
-            let p1: int = matching_paren(src, i);
-            let params: string = str_sub(src, i + 1, p1 - i - 1);
+            let name: string = str_trim(str_view_sub(src_view, name_start, i - name_start));
+            let p1: int = matching_paren(src_view, i);
+            let params: string = str_view_sub(src_view, i + 1, p1 - i - 1);
             let colon: int = p1 + 1;
             while (colon < str_view_len(src_view) && str_view_at(src_view, colon) != 58) { colon = colon + 1; }
             let ret_start: int = colon + 1;
             let b0: int = ret_start;
             while (b0 < str_view_len(src_view) && str_view_at(src_view, b0) != 123) { b0 = b0 + 1; }
-            let ret: string = str_trim(str_sub(src, ret_start, b0 - ret_start));
-            let b1: int = matching_brace(src, b0);
-            let body: string = str_sub(src, b0 + 1, b1 - b0 - 1);
-            fs_append(path, compile_fn_def(name, params, ret, body));
+            let ret: string = str_trim(str_view_sub(src_view, ret_start, b0 - ret_start));
+            let b1: int = matching_brace(src_view, b0);
+            let body: string = str_view_sub(src_view, b0 + 1, b1 - b0 - 1);
+            if (fs_append(path, compile_fn_def(name, params, ret, body)) == 0) { return 0; }
             i = b1 + 1;
             continue;
         }
@@ -897,10 +922,9 @@ fn compile_functions_to(src: string, path: string): int {
 }
 
 fn compile_source_to(path: string, src: string): int {
-    str_reset_arena();
-    fs_write(path, emit_header(src));
-    fs_append(path, compile_consts(src));
-    compile_functions_to(src, path);
+    if (fs_write(path, emit_header(src)) == 0) { return 0; }
+    if (fs_append(path, compile_consts(src)) == 0) { return 0; }
+    if (compile_functions_to(src, path) == 0) { return 0; }
     let native_body: string = find_block_after_keyword(src, "native main");
     let process_body: string = find_block_after_keyword(src, "process main");
 
@@ -917,13 +941,13 @@ fn compile_source_to(path: string, src: string): int {
         tail = str_builder_append(tail, nl());
         tail = str_builder_append(tail, "}");
         tail = str_builder_append(tail, nl());
-        fs_append(path, str_builder_finish(tail));
+        if (fs_append(path, str_builder_finish(tail)) == 0) { return 0; }
         return 1;
     }
 
     if (str_len(process_body) == 0) {
-        fs_append(path, "int main(void) { return 0; }");
-        fs_append(path, nl());
+        if (fs_append(path, "int main(void) { return 0; }") == 0) { return 0; }
+        if (fs_append(path, nl()) == 0) { return 0; }
         return 1;
     }
 
@@ -962,18 +986,309 @@ fn compile_source_to(path: string, src: string): int {
     tail = str_builder_append(tail, nl());
     tail = str_builder_append(tail, "}");
     tail = str_builder_append(tail, nl());
-    fs_append(path, str_builder_finish(tail));
+    if (fs_append(path, str_builder_finish(tail)) == 0) { return 0; }
     return 1;
 }
 
-native main {
-    if (os_argc() < 4) {
-        println("Usage: compiler <input.fg> -o <output.c>");
-        os_exit(1);
+// The self-hosted compiler deliberately accepts a documented language subset.
+// Validate structure before the bounded transpiler scans for declarations.
+fn source_error(message: string): int {
+    eprintln(str_concat("forge-fg: ", message));
+    return 0;
+}
+
+fn validate_bytes(src_view: int): int {
+    let i: int = 0;
+    let braces: int = 0;
+    let parens: int = 0;
+    let size: int = str_view_len(src_view);
+    while (i < size) {
+        let ch: int = str_view_at(src_view, i);
+        if (ch == 47 && str_view_at(src_view, i + 1) == 47) {
+            i = skip_ws(src_view, i);
+            continue;
+        }
+        if (ch == 34) {
+            i = i + 1;
+            let closed: int = 0;
+            while (i < size) {
+                ch = str_view_at(src_view, i);
+                if (ch == 92) { i = i + 2; continue; }
+                if (ch == 34) { closed = 1; i = i + 1; break; }
+                if (ch == 10 || ch == 13) { return source_error("multiline strings are outside the self-hosted subset"); }
+                i = i + 1;
+            }
+            if (closed == 0) { return source_error("unterminated string literal"); }
+            continue;
+        }
+        if (ch == 123) { braces = braces + 1; }
+        if (ch == 125) { braces = braces - 1; }
+        if (ch == 40) { parens = parens + 1; }
+        if (ch == 41) { parens = parens - 1; }
+        if (braces < 0 || parens < 0) { return source_error("unmatched closing delimiter"); }
+        if (ch == 91 || ch == 93 || ch == 46) { return source_error("arrays, floats and qualified calls are outside the self-hosted subset"); }
+        if (ch == 47 && str_view_at(src_view, i + 1) == 42) { return source_error("block comments are outside the self-hosted subset"); }
+        if (ch == 58) {
+            let type_start: int = skip_ws(src_view, i + 1);
+            let type_end: int = type_start;
+            while (type_end < size && is_ident(str_view_at(src_view, type_end)) == 1) { type_end = type_end + 1; }
+            let ty: string = str_view_sub(src_view, type_start, type_end - type_start);
+            if (str_eq(ty, "int") == 0 && str_eq(ty, "string") == 0 && str_eq(ty, "void") == 0) { return source_error("unsupported type; self-hosted types are int, string and void"); }
+        }
+        if (is_ident(ch) == 1 && (ch < 48 || ch > 57)) {
+            let j: int = i + 1;
+            while (j < size && is_ident(str_view_at(src_view, j)) == 1) { j = j + 1; }
+            let token: string = str_view_sub(src_view, i, j - i);
+            if (str_eq(token, "let")) {
+                let semi: int = find_stmt_end(src_view, j, size);
+                if (semi >= size) { return source_error("missing binding semicolon"); }
+                let binding: string = str_view_sub(src_view, j, semi - j);
+                if (str_contains(binding, ":") == 0 || str_contains(binding, "=") == 0) { return source_error("self-hosted bindings require an explicit type and initializer"); }
+            }
+            if (str_eq(token, "coroutine") || str_eq(token, "spawn") || str_eq(token, "yield") || str_eq(token, "await") || str_eq(token, "extern") || str_eq(token, "struct") || str_eq(token, "enum") || str_eq(token, "float") || str_eq(token, "bool") || str_eq(token, "true") || str_eq(token, "false")) {
+                return source_error(str_concat("unsupported self-hosted token: ", token));
+            }
+            i = j;
+            continue;
+        }
+        i = i + 1;
     }
-    let input: string = os_argv(1);
-    let output: string = os_argv(3);
+    if (braces != 0 || parens != 0) { return source_error("unmatched opening delimiter"); }
+    return 1;
+}
+
+fn validate_source(src: string): int {
+    let view: int = str_view(src);
+    if (validate_bytes(view) == 0) { return 0; }
+    let size: int = str_view_len(view);
+    let i: int = 0;
+    let mains: int = 0;
+    while (i < size) {
+        i = skip_ws(view, i);
+        if (i >= size) { break; }
+        if (starts_at(view, i, "import ") == 1) {
+            let semi: int = find_stmt_end(view, i, size);
+            if (semi >= size) { return source_error("missing import semicolon"); }
+            let module: string = str_trim(str_view_sub(view, i + 7, semi - i - 7));
+            if (str_eq(module, "strings") == 0 && str_eq(module, "fs") == 0 && str_eq(module, "os") == 0 && str_eq(module, "io") == 0) {
+                return source_error(str_concat("unsupported self-hosted import: ", module));
+            }
+            i = semi + 1;
+            continue;
+        }
+        if (starts_at(view, i, "const ") == 1) {
+            if (i > 0 && str_view_at(view, i - 1) != 10) { return source_error("const declarations must start at the beginning of a line"); }
+            let semi: int = find_stmt_end(view, i, size);
+            if (semi >= size) { return source_error("missing const semicolon"); }
+            i = semi + 1;
+            continue;
+        }
+        if (starts_at(view, i, "fn ") == 1) {
+            if (i > 0 && str_view_at(view, i - 1) != 10) { return source_error("fn declarations must start at the beginning of a line"); }
+            let p0: int = i + 3;
+            while (p0 < size && str_view_at(view, p0) != 40 && str_view_at(view, p0) != 123) { p0 = p0 + 1; }
+            if (p0 >= size || str_view_at(view, p0) != 40) { return source_error("missing function parameter list"); }
+            let p1: int = matching_paren(view, p0);
+            if (p1 < 0) { return source_error("unmatched function parameter list"); }
+            let colon: int = skip_ws(view, p1 + 1);
+            if (str_view_at(view, colon) != 58) { return source_error("function return type is required"); }
+            let b0: int = colon + 1;
+            while (b0 < size && str_view_at(view, b0) != 123) { b0 = b0 + 1; }
+            let ty: string = str_trim(str_view_sub(view, colon + 1, b0 - colon - 1));
+            if (str_eq(ty, "int") == 0 && str_eq(ty, "string") == 0 && str_eq(ty, "void") == 0) { return source_error("unsupported function return type"); }
+            if (b0 >= size) { return source_error("missing function body"); }
+            let b1: int = matching_brace(view, b0);
+            if (b1 < 0) { return source_error("unmatched function body"); }
+            i = b1 + 1;
+            continue;
+        }
+        let body_start: int = -1;
+        if (starts_at(view, i, "native main") == 1) { body_start = skip_ws(view, i + 11); }
+        if (starts_at(view, i, "process main") == 1) { body_start = skip_ws(view, i + 12); }
+        if (body_start >= 0) {
+            if (str_view_at(view, body_start) != 123) { return source_error("main requires a block"); }
+            let end: int = matching_brace(view, body_start);
+            if (end < 0) { return source_error("unmatched main body"); }
+            mains = mains + 1;
+            if (mains > 1) { return source_error("multiple main blocks"); }
+            i = end + 1;
+            continue;
+        }
+        return source_error("unsupported top-level declaration");
+    }
+    if (mains == 0) { return source_error("a native main or process main block is required"); }
+    return 1;
+}
+
+fn path_join(base: string, name: string): string {
+    if (str_len(base) == 0) { return name; }
+    let view: int = str_view(base);
+    if (str_view_at(view, str_view_len(view) - 1) == 47) { return str_concat(base, name); }
+    return str_concat(str_concat(base, "/"), name);
+}
+
+fn path_dirname(path: string): string {
+    let view: int = str_view(path);
+    let i: int = str_view_len(view) - 1;
+    while (i >= 0) {
+        if (str_view_at(view, i) == 47 || str_view_at(view, i) == 92) {
+            if (i == 0) { return "/"; }
+            return str_view_sub(view, 0, i);
+        }
+        i = i - 1;
+    }
+    return ".";
+}
+
+fn output_stem(path: string): string {
+    let view: int = str_view(path);
+    let start: int = 0;
+    let dot: int = -1;
+    let i: int = 0;
+    let size: int = str_view_len(view);
+    while (i < size) {
+        let ch: int = str_view_at(view, i);
+        if (ch == 47 || ch == 92) { start = i + 1; dot = -1; }
+        if (ch == 46) { dot = i; }
+        i = i + 1;
+    }
+    if (dot <= start) { dot = size; }
+    return str_view_sub(view, start, dot - start);
+}
+
+fn has_c_suffix(path: string): int {
+    let view: int = str_view(path);
+    let size: int = str_view_len(view);
+    if (size < 2) { return 0; }
+    return str_view_matches(view, size - 2, ".c");
+}
+
+fn root_from_executable(): string {
+    let bin: string = path_dirname(os_executable_path());
+    let prefix: string = path_dirname(bin);
+    if (fs_is_file(path_join(prefix, "include/forge_runtime.h")) == 1) { return prefix; }
+    let source: string = path_dirname(prefix);
+    if (fs_is_file(path_join(source, "include/forge_runtime.h")) == 1) { return source; }
+    return "";
+}
+
+fn cli_error(message: string): int {
+    eprintln(str_concat("forge-fg: ", message));
+    return 1;
+}
+
+fn cli_value(index: int): string {
+    if (index >= os_argc()) { return ""; }
+    let value: string = os_argv(index);
+    if (str_len(value) == 0 || str_char_at(value, 0) == 45) { return ""; }
+    return value;
+}
+
+fn build_native(cpath: string, output: string, cc: string, root: string, libs: string): int {
+    let command: int = os_command(cc);
+    if (command == 0) { return cli_error("cannot allocate compiler command"); }
+    let ok: int = os_command_arg(command, "-std=c11");
+    ok = ok && os_command_arg(command, "-O3");
+    ok = ok && os_command_arg(command, "-I");
+    ok = ok && os_command_arg(command, path_join(root, "include"));
+    ok = ok && os_command_arg(command, "-x");
+    ok = ok && os_command_arg(command, "c");
+    ok = ok && os_command_arg(command, cpath);
+    ok = ok && os_command_arg(command, "-x");
+    ok = ok && os_command_arg(command, "none");
+    ok = ok && os_command_arg(command, "-o");
+    ok = ok && os_command_arg(command, output);
+    ok = ok && os_command_arg(command, "-L");
+    ok = ok && os_command_arg(command, libs);
+    ok = ok && os_command_arg(command, "-lforge_runtime");
+    ok = ok && os_command_arg(command, "-lforge_std");
+    // Organization fs_temp_path calls back into the runtime platform archive.
+    ok = ok && os_command_arg(command, "-lforge_runtime");
+    ok = ok && os_command_arg(command, "-lforge_std");
+    ok = ok && os_command_arg(command, "-pthread");
+    ok = ok && os_command_arg(command, "-lm");
+    if (ok == 0) { os_command_free(command); return cli_error("cannot append compiler argument"); }
+    let status: int = os_command_run(command);
+    os_command_free(command);
+    if (status != 0) {
+        eprintln("forge-fg: native compiler failed");
+        if (status < 0) { return 1; }
+    }
+    return status;
+}
+
+native main {
+    str_reset_arena();
+    let input: string = "";
+    let output: string = "";
+    let cc: string = "";
+    let root: string = "";
+    let libs: string = "";
+    let emit_c: int = 0;
+    let keep: int = 0;
+    let i: int = 1;
+    while (i < os_argc()) {
+        let arg: string = os_argv(i);
+        if (str_eq(arg, "--help") || str_eq(arg, "-h")) {
+            println("Usage: forge-fg <input.fg> [-o output] [--emit-c] [--cc executable]");
+            println("                [--forge-root path] [--lib-dir path] [--keep-temp]");
+            println("Default output: native executable named after the input basename.");
+            println("Legacy -o output.c emits C. Supported imports: strings, fs, os, io.");
+            println("Self-hosted subset: line-start fn/const, int/string/void, main and basic control flow.");
+            println("Print arbitrary string values with print_str(value); println();.");
+            return 0;
+        }
+        if (str_eq(arg, "--version")) { println("forge-fg 0.3.0"); return 0; }
+        if (str_eq(arg, "--emit-c")) { emit_c = 1; i = i + 1; continue; }
+        if (str_eq(arg, "--keep-temp")) { keep = 1; i = i + 1; continue; }
+        if (str_eq(arg, "-o") || str_eq(arg, "--cc") || str_eq(arg, "--forge-root") || str_eq(arg, "--lib-dir")) {
+            let value: string = cli_value(i + 1);
+            if (str_len(value) == 0) { return cli_error(str_concat("missing value for ", arg)); }
+            if (str_eq(arg, "-o")) { output = value; }
+            if (str_eq(arg, "--cc")) { cc = value; }
+            if (str_eq(arg, "--forge-root")) { root = value; }
+            if (str_eq(arg, "--lib-dir")) { libs = value; }
+            i = i + 2;
+            continue;
+        }
+        if (str_char_at(arg, 0) == 45) { return cli_error(str_concat("unknown option: ", arg)); }
+        if (str_len(input) > 0) { return cli_error("multiple input files"); }
+        input = arg;
+        i = i + 1;
+    }
+    if (str_len(input) == 0) { return cli_error("missing input; use --help for usage"); }
+    if (fs_is_file(input) == 0) { return cli_error(str_concat("input file does not exist: ", input)); }
     let src: string = fs_read(input);
-    compile_source_to(output, src);
-    println("compiled");
+    if (str_len(src) == 0) { return cli_error("input is empty or cannot be read"); }
+    if (validate_source(src) == 0) { return 1; }
+    if (has_c_suffix(output) == 1) { emit_c = 1; }
+    if (str_len(output) == 0) {
+        output = output_stem(input);
+        if (emit_c == 1) { output = str_concat(output, ".c"); }
+    }
+    if (str_len(output) == 0 || str_eq(input, output) || os_same_file(input, output) == 1) { return cli_error("output must differ from the input source"); }
+    if (emit_c == 1) {
+        if (compile_source_to(output, src) == 0) { return cli_error(str_concat("cannot write C output: ", output)); }
+        return 0;
+    }
+    if (str_len(root) == 0) { root = os_getenv("FORGE_ROOT"); }
+    if (str_len(root) == 0) { root = root_from_executable(); }
+    if (str_len(root) == 0 || fs_is_file(path_join(root, "include/forge_runtime.h")) == 0) { return cli_error("cannot locate Forge headers; pass --forge-root"); }
+    if (str_len(libs) == 0) {
+        libs = path_join(root, "build/lib");
+        if (fs_is_file(path_join(libs, "libforge_std.a")) == 0) { libs = path_join(root, "lib"); }
+    }
+    if (fs_is_file(path_join(libs, "libforge_std.a")) == 0 || fs_is_file(path_join(libs, "libforge_runtime.a")) == 0) { return cli_error("cannot locate Forge libraries; pass --lib-dir"); }
+    if (str_len(cc) == 0) { cc = os_getenv("CC"); }
+    if (str_len(cc) == 0) { cc = "cc"; }
+    let temp: string = os_temp_file();
+    if (str_len(temp) == 0) { return cli_error("cannot create temporary C file"); }
+    if (compile_source_to(temp, src) == 0) {
+        if (keep == 0) { fs_remove(temp); }
+        return cli_error("cannot write temporary C file");
+    }
+    let status: int = build_native(temp, output, cc, root, libs);
+    if (keep == 0) { fs_remove(temp); }
+    if (keep == 1) { eprintln(str_concat("forge-fg: temporary C: ", temp)); }
+    return status;
 }

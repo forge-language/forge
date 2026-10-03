@@ -132,6 +132,9 @@ static void test_stop_waiting(void) {
     pause_ms(10);
     fr_scheduler_stop(sched);
     CHECK(atomic_load(&completed) == 0);
+    CHECK(write(fds[1], "x", 1) == 1);
+    fr_scheduler_run(sched);
+    CHECK(atomic_load(&completed) == 1);
     fr_scheduler_destroy(sched);
     close(fds[0]); close(fds[1]);
     for (int i = 0; i < 20; i++) {
@@ -208,6 +211,76 @@ static void test_external_stop(void) {
     close(fds[0]); close(fds[1]);
 }
 
+typedef struct {
+    fr_process_t *proc;
+    atomic_int *completed;
+    int spawn_child;
+    int fail;
+} task_state_t;
+
+static fr_coro_status_t counted_task(fr_coro_t *coro, void *arg) {
+    task_state_t *s = arg;
+    if (s->spawn_child) {
+        task_state_t *child = malloc(sizeof(*child));
+        CHECK(child);
+        *child = (task_state_t){s->proc, s->completed, 0, 0};
+        CHECK(fr_coro_spawn(s->proc, counted_task, child, sizeof(*child)));
+        s->spawn_child = 0;
+        return fr_yield(coro);
+    }
+    atomic_fetch_add(s->completed, 1);
+    return s->fail ? FR_CORO_ERROR : FR_CORO_DONE;
+}
+
+static void spawn_counted(fr_process_t *proc, atomic_int *completed, int child, int fail) {
+    task_state_t *state = malloc(sizeof(*state));
+    CHECK(state);
+    *state = (task_state_t){proc, completed, child, fail};
+    CHECK(fr_coro_spawn(proc, counted_task, state, sizeof(*state)));
+}
+
+static void test_attach_spawn_and_restart(void) {
+    atomic_int completed = 0;
+    fr_scheduler_t *sched = fr_scheduler_create(4);
+    fr_process_t *proc = fr_process_create("counted");
+    CHECK(sched && proc);
+    for (int i = 0; i < 4000; i++) spawn_counted(proc, &completed, i % 2, i % 3 == 0);
+    fr_scheduler_add_process(sched, proc);
+    fr_scheduler_run(sched);
+    CHECK(atomic_load(&completed) == 6000);
+    fr_scheduler_run(sched);
+    CHECK(atomic_load(&completed) == 6000);
+    spawn_counted(proc, &completed, 1, 0);
+    fr_scheduler_run(sched);
+    CHECK(atomic_load(&completed) == 6002);
+    fr_scheduler_destroy(sched);
+}
+
+static fr_coro_status_t failed_await(fr_coro_t *coro, void *arg) {
+    int fd = *(int *)arg;
+    CHECK(fr_await_fd(coro, fd, FR_EVENT_READ) == -1);
+    pause_ms(2);
+    return FR_CORO_ERROR;
+}
+
+static void test_await_registration_failure(void) {
+    int fds[2];
+    CHECK(pipe(fds) == 0);
+    fr_scheduler_t *sched = fr_scheduler_create(2);
+    fr_process_t *proc = fr_process_create("failed-await");
+    CHECK(sched && proc);
+    fr_scheduler_add_process(sched, proc);
+    close(fds[0]);
+    int *state = malloc(sizeof(*state));
+    CHECK(state);
+    *state = fds[0];
+    CHECK(fr_coro_spawn(proc, failed_await, state, sizeof(*state)));
+    fr_scheduler_run(sched);
+    fr_scheduler_run(sched);
+    fr_scheduler_destroy(sched);
+    close(fds[1]);
+}
+
 int main(void) {
     test_await(0);
     test_await(1);
@@ -216,6 +289,10 @@ int main(void) {
     test_stop_waiting();
     test_receive_wakeup();
     test_external_stop();
+    test_attach_spawn_and_restart();
+#if defined(__linux__) || defined(__APPLE__)
+    test_await_registration_failure();
+#endif
     puts("scheduler tests passed");
     return 0;
 }

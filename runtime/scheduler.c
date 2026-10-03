@@ -33,6 +33,8 @@ struct fr_coro {
     int step;
     int on_queue;
     int executing;
+    int counted_active;
+    int counted_io;
     fr_process_t *proc;
     int await_fd;
     uint32_t await_events;
@@ -67,6 +69,8 @@ struct fr_scheduler {
     atomic_int workers_started;
     int stopping;
     size_t runnable;
+    size_t active_coros;
+    size_t waiting_io;
     unsigned next_queue;
     unsigned next_worker;
     int native_pending;
@@ -132,6 +136,25 @@ static int mailbox_pop(fr_mailbox_t *mb, fr_msg_t *out) {
     return 1;
 }
 
+/* All contribution changes happen under sched->lock, including await while
+ * executing and readiness published before the invocation returns. */
+static void refresh_coro_counts_locked(fr_scheduler_t *sched, fr_coro_t *coro) {
+    int active = coro->executing ||
+        (coro->status != FR_CORO_DONE && coro->status != FR_CORO_ERROR);
+    int io = coro->status == FR_CORO_WAITING_IO &&
+        coro->await_fd >= 0 && !coro->await_ready;
+    if (active != coro->counted_active) {
+        if (active) sched->active_coros++;
+        else sched->active_coros--;
+        coro->counted_active = active;
+    }
+    if (io != coro->counted_io) {
+        if (io) sched->waiting_io++;
+        else sched->waiting_io--;
+        coro->counted_io = io;
+    }
+}
+
 /* Scheduler state and queue publication share this mutex. A running coroutine
  * stays exclusively owned by its worker until the worker commits its result. */
 static void enqueue_coro_locked(fr_scheduler_t *sched, fr_coro_t *coro) {
@@ -140,6 +163,7 @@ static void enqueue_coro_locked(fr_scheduler_t *sched, fr_coro_t *coro) {
     int wid = coro->proc->worker_id % sched->worker_count;
     if (!fr_run_queue_try_push(&sched->worker_queues[wid], coro)) {
         coro->status = FR_CORO_ERROR;
+        refresh_coro_counts_locked(sched, coro);
         return;
     }
     coro->on_queue = 1;
@@ -161,21 +185,12 @@ static void event_resume_cb(fr_event_loop_t *loop, int fd, uint32_t events, void
             coro->status = FR_CORO_RUNNING;
             enqueue_coro_locked(sched, coro);
         }
+        refresh_coro_counts_locked(sched, coro);
     }
     fr_mutex_unlock(sched->lock);
 }
 
 #define FR_REDUCTION_BUDGET 2000
-
-static int sched_any_active(fr_scheduler_t *sched) {
-    for (fr_process_t *p = sched->processes; p; p = p->next) {
-        for (fr_coro_t *c = p->coros; c; c = c->next) {
-            if (c->executing || (c->status != FR_CORO_DONE && c->status != FR_CORO_ERROR))
-                return 1;
-        }
-    }
-    return 0;
-}
 
 static void scan_enqueue_runnable(fr_scheduler_t *sched) {
     for (fr_process_t *p = sched->processes; p; p = p->next) {
@@ -237,6 +252,7 @@ static void *worker_main(void *arg) {
                 fr_mutex_unlock(coro->proc->lock);
             }
             coro->status = status;
+            refresh_coro_counts_locked(sched, coro);
             enqueue_coro_locked(sched, coro);
             fr_cond_signal(sched->state_cond);
             fr_mutex_unlock(sched->lock);
@@ -484,7 +500,10 @@ void fr_scheduler_add_process(fr_scheduler_t *sched, fr_process_t *proc) {
     proc->worker_id = (int)(sched->next_worker++ % (unsigned)sched->worker_count);
     proc->next = sched->processes;
     sched->processes = proc;
-    for (fr_coro_t *c = proc->coros; c; c = c->next) enqueue_coro_locked(sched, c);
+    for (fr_coro_t *c = proc->coros; c; c = c->next) {
+        refresh_coro_counts_locked(sched, c);
+        enqueue_coro_locked(sched, c);
+    }
     fr_mutex_unlock(sched->lock);
 }
 
@@ -496,23 +515,13 @@ int fr_scheduler_worker_count(fr_scheduler_t *sched) {
     return sched ? sched->worker_count : 0;
 }
 
-static int sched_waiting_io(fr_scheduler_t *sched) {
-    for (fr_process_t *p = sched->processes; p; p = p->next) {
-        for (fr_coro_t *c = p->coros; c; c = c->next) {
-            if (c->status == FR_CORO_WAITING_IO && c->await_fd >= 0 && !c->await_ready)
-                return 1;
-        }
-    }
-    return 0;
-}
-
 void fr_scheduler_run(fr_scheduler_t *sched) {
     if (!sched) return;
     fr_scheduler_start(sched);
     fr_mutex_lock(sched->lock);
     while (sched->running) {
-        if (!sched_any_active(sched) && sched->native_pending == 0) break;
-        if (sched_waiting_io(sched)) {
+        if (sched->active_coros == 0 && sched->native_pending == 0) break;
+        if (sched->waiting_io > 0) {
             /* Never hold state across a blocking poll: callbacks and workers
              * need it to publish readiness/completion. Stop latency is bounded. */
             fr_mutex_unlock(sched->lock);
@@ -596,6 +605,7 @@ fr_coro_t *fr_coro_spawn(fr_process_t *proc, fr_coro_fn fn, void *init_state, si
     free(init_state);
     fr_mutex_unlock(proc->lock);
     if (proc->sched) {
+        refresh_coro_counts_locked(proc->sched, c);
         enqueue_coro_locked(proc->sched, c);
         fr_mutex_unlock(proc->sched->lock);
     }
@@ -687,6 +697,7 @@ int64_t fr_await_fd(fr_coro_t *coro, int64_t fd, uint32_t events) {
     int ok = fr_event_loop_add(sched->event_loop, (int)fd, events | FR_EVENT_ONESHOT, coro);
     fr_cond_signal(sched->state_cond);
     if (ok < 0) { coro->await_fd = -1; coro->status = FR_CORO_ERROR; }
+    refresh_coro_counts_locked(sched, coro);
     fr_mutex_unlock(sched->lock);
     return ok < 0 ? -1 : 0;
 }
