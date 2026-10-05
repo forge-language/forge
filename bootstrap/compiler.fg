@@ -106,67 +106,84 @@ fn forge_ctype(ty: string): string {
 }
 
 fn map_ident(name: string): string {
-    if (str_eq(name, "os_same_file")) { return "fr_os_same_file"; }
-    if (str_eq(name, "os_executable_path")) { return "fr_os_executable_path"; }
-    if (str_eq(name, "os_temp_file")) { return "fr_os_temp_file"; }
-    if (str_eq(name, "os_command_free")) { return "fr_os_command_free"; }
-    if (str_eq(name, "os_command_run")) { return "fr_os_command_run"; }
-    if (str_eq(name, "os_command_arg")) { return "fr_os_command_arg"; }
-    if (str_eq(name, "os_command")) { return "fr_os_command"; }
-    if (str_eq(name, "os_getenv")) { return "fr_os_getenv"; }
-    if (str_eq(name, "str_view_sub")) { return "fr_str_view_sub"; }
-    if (str_eq(name, "str_view_matches")) { return "fr_str_view_matches"; }
-    if (str_eq(name, "str_builder_append_view")) { return "fr_str_builder_append_view"; }
-    if (str_eq(name, "str_builder_finish")) { return "fr_str_builder_finish"; }
-    if (str_eq(name, "str_builder_char")) { return "fr_str_builder_char"; }
-    if (str_eq(name, "str_builder_append")) { return "fr_str_builder_append"; }
-    if (str_eq(name, "str_builder")) { return "fr_str_builder"; }
-    if (str_eq(name, "str_view_at")) { return "fr_str_view_at"; }
-    if (str_eq(name, "str_view_len")) { return "fr_str_view_len"; }
-    if (str_eq(name, "str_view")) { return "fr_str_view"; }
-    if (str_eq(name, "str_len")) { return "fr_str_len"; }
-    if (str_eq(name, "str_concat")) { return "fr_str_concat"; }
-    if (str_eq(name, "str_from_int")) { return "fr_str_from_int"; }
-    if (str_eq(name, "str_append")) { return "fr_str_append"; }
-    if (str_eq(name, "str_append_str")) { return "fr_str_append_str"; }
-    if (str_eq(name, "str_eq")) { return "fr_str_eq"; }
-    if (str_eq(name, "str_sub")) { return "fr_str_sub"; }
-    if (str_eq(name, "str_trim")) { return "fr_str_trim"; }
-    if (str_eq(name, "str_contains")) { return "fr_str_contains"; }
-    if (str_eq(name, "str_char_at")) { return "fr_str_char_at"; }
-    if (str_eq(name, "str_reset_arena")) { return "fr_str_arena_reset"; }
-    if (str_eq(name, "fs_read")) { return "fr_fs_read"; }
-    if (str_eq(name, "fs_write")) { return "fr_fs_write"; }
-    if (str_eq(name, "fs_append")) { return "fr_fs_append"; }
-    if (str_eq(name, "fs_exists")) { return "fr_fs_exists"; }
-    if (str_eq(name, "fs_remove")) { return "fr_fs_remove"; }
-    if (str_eq(name, "fs_size")) { return "fr_fs_size"; }
-    if (str_eq(name, "fs_is_file")) { return "fr_fs_is_file"; }
-    if (str_eq(name, "fs_is_dir")) { return "fr_fs_is_dir"; }
-    if (str_eq(name, "fs_mkdir")) { return "fr_fs_mkdir"; }
-    if (str_eq(name, "fs_rename")) { return "fr_fs_rename"; }
-    if (str_eq(name, "fs_copy")) { return "fr_fs_copy"; }
-    if (str_eq(name, "fs_list_dir")) { return "fr_fs_list_dir"; }
-    if (str_eq(name, "print")) { return "fr_print"; }
-    if (str_eq(name, "print_int")) { return "fr_print_int"; }
-    if (str_eq(name, "print_str")) { return "fr_print_str"; }
-    if (str_eq(name, "eprint")) { return "fr_eprint"; }
-    if (str_eq(name, "eprint_int")) { return "fr_io_eprint_int"; }
-    if (str_eq(name, "eprintln")) { return "fr_eprintln"; }
-    if (str_eq(name, "flush")) { return "fr_io_flush"; }
-    if (str_eq(name, "flush_err")) { return "fr_io_flush_err"; }
-    if (str_eq(name, "read_line")) { return "fr_io_read_line"; }
-    if (str_eq(name, "read_char")) { return "fr_io_read_char"; }
-    if (str_eq(name, "read_stdin")) { return "fr_io_read_stdin"; }
-    if (str_eq(name, "prompt")) { return "fr_io_prompt"; }
-    if (str_eq(name, "write_fd")) { return "fr_io_write_fd"; }
-    if (str_eq(name, "read_fd")) { return "fr_io_read_fd"; }
-    if (str_eq(name, "stdin_fd")) { return "fr_io_stdin_fd"; }
-    if (str_eq(name, "stdout_fd")) { return "fr_io_stdout_fd"; }
-    if (str_eq(name, "stderr_fd")) { return "fr_io_stderr_fd"; }
-    if (str_eq(name, "os_argc")) { return "fr_os_argc"; }
-    if (str_eq(name, "os_argv")) { return "fr_os_argv"; }
-    if (str_eq(name, "os_exit")) { return "fr_os_exit"; }
+    if (str_len(name) < 5) { return name; }
+    let first: int = str_char_at(name, 0);
+    let second: int = str_char_at(name, 1);
+    if (first == 111 && (second == 115)) {
+        if (str_eq(name, "os_same_file")) { return "fr_os_same_file"; }
+        if (str_eq(name, "os_executable_path")) { return "fr_os_executable_path"; }
+        if (str_eq(name, "os_temp_file")) { return "fr_os_temp_file"; }
+        if (str_eq(name, "os_command_free")) { return "fr_os_command_free"; }
+        if (str_eq(name, "os_command_run")) { return "fr_os_command_run"; }
+        if (str_eq(name, "os_command_arg")) { return "fr_os_command_arg"; }
+        if (str_eq(name, "os_command")) { return "fr_os_command"; }
+        if (str_eq(name, "os_getenv")) { return "fr_os_getenv"; }
+        if (str_eq(name, "os_argc")) { return "fr_os_argc"; }
+        if (str_eq(name, "os_argv")) { return "fr_os_argv"; }
+        if (str_eq(name, "os_exit")) { return "fr_os_exit"; }
+    }
+    if (first == 115 && (second == 116)) {
+        if (str_eq(name, "str_view_sub")) { return "fr_str_view_sub"; }
+        if (str_eq(name, "str_view_matches")) { return "fr_str_view_matches"; }
+        if (str_eq(name, "str_builder_append_view")) { return "fr_str_builder_append_view"; }
+        if (str_eq(name, "str_builder_finish")) { return "fr_str_builder_finish"; }
+        if (str_eq(name, "str_builder_char")) { return "fr_str_builder_char"; }
+        if (str_eq(name, "str_builder_append")) { return "fr_str_builder_append"; }
+        if (str_eq(name, "str_builder")) { return "fr_str_builder"; }
+        if (str_eq(name, "str_view_at")) { return "fr_str_view_at"; }
+        if (str_eq(name, "str_view_len")) { return "fr_str_view_len"; }
+        if (str_eq(name, "str_view")) { return "fr_str_view"; }
+        if (str_eq(name, "str_len")) { return "fr_str_len"; }
+        if (str_eq(name, "str_concat")) { return "fr_str_concat"; }
+        if (str_eq(name, "str_from_int")) { return "fr_str_from_int"; }
+        if (str_eq(name, "str_append")) { return "fr_str_append"; }
+        if (str_eq(name, "str_append_str")) { return "fr_str_append_str"; }
+        if (str_eq(name, "str_eq")) { return "fr_str_eq"; }
+        if (str_eq(name, "str_sub")) { return "fr_str_sub"; }
+        if (str_eq(name, "str_trim")) { return "fr_str_trim"; }
+        if (str_eq(name, "str_contains")) { return "fr_str_contains"; }
+        if (str_eq(name, "str_char_at")) { return "fr_str_char_at"; }
+        if (str_eq(name, "str_reset_arena")) { return "fr_str_arena_reset"; }
+        if (str_eq(name, "stdin_fd")) { return "fr_io_stdin_fd"; }
+        if (str_eq(name, "stdout_fd")) { return "fr_io_stdout_fd"; }
+        if (str_eq(name, "stderr_fd")) { return "fr_io_stderr_fd"; }
+    }
+    if (first == 102 && (second == 108 || second == 115)) {
+        if (str_eq(name, "fs_read")) { return "fr_fs_read"; }
+        if (str_eq(name, "fs_write")) { return "fr_fs_write"; }
+        if (str_eq(name, "fs_append")) { return "fr_fs_append"; }
+        if (str_eq(name, "fs_exists")) { return "fr_fs_exists"; }
+        if (str_eq(name, "fs_remove")) { return "fr_fs_remove"; }
+        if (str_eq(name, "fs_size")) { return "fr_fs_size"; }
+        if (str_eq(name, "fs_is_file")) { return "fr_fs_is_file"; }
+        if (str_eq(name, "fs_is_dir")) { return "fr_fs_is_dir"; }
+        if (str_eq(name, "fs_mkdir")) { return "fr_fs_mkdir"; }
+        if (str_eq(name, "fs_rename")) { return "fr_fs_rename"; }
+        if (str_eq(name, "fs_copy")) { return "fr_fs_copy"; }
+        if (str_eq(name, "fs_list_dir")) { return "fr_fs_list_dir"; }
+        if (str_eq(name, "flush")) { return "fr_io_flush"; }
+        if (str_eq(name, "flush_err")) { return "fr_io_flush_err"; }
+    }
+    if (first == 112 && (second == 114)) {
+        if (str_eq(name, "print")) { return "fr_print"; }
+        if (str_eq(name, "print_int")) { return "fr_print_int"; }
+        if (str_eq(name, "print_str")) { return "fr_print_str"; }
+        if (str_eq(name, "prompt")) { return "fr_io_prompt"; }
+    }
+    if (first == 101 && (second == 112)) {
+        if (str_eq(name, "eprint")) { return "fr_eprint"; }
+        if (str_eq(name, "eprint_int")) { return "fr_io_eprint_int"; }
+        if (str_eq(name, "eprintln")) { return "fr_eprintln"; }
+    }
+    if (first == 114 && (second == 101)) {
+        if (str_eq(name, "read_line")) { return "fr_io_read_line"; }
+        if (str_eq(name, "read_char")) { return "fr_io_read_char"; }
+        if (str_eq(name, "read_stdin")) { return "fr_io_read_stdin"; }
+        if (str_eq(name, "read_fd")) { return "fr_io_read_fd"; }
+    }
+    if (first == 119 && (second == 114)) {
+        if (str_eq(name, "write_fd")) { return "fr_io_write_fd"; }
+    }
     return name;
 }
 
