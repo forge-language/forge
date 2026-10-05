@@ -237,6 +237,21 @@ native main {
         self.assertEqual(result.returncode, 0, result.stderr)
         self.run_binary(self.directory / 'identifiers', '7\n8\n9\n')
 
+    def test_builtin_prefixes_preserve_user_functions_and_short_names(self):
+        names = ['os_total', 'str_total', 'fs_total', 'print_total',
+                 'eprint_total', 'read_total', 'write_total', 'flush_total',
+                 'stdin_total', 'stdout_total', 'stderr_total', 'q', 'os']
+        declarations = '\n'.join(
+            f'fn {name}(): int {{ return {index + 1}; }}'
+            for index, name in enumerate(names))
+        calls = '\n'.join(f'    println({name}());' for name in names)
+        self.source.write_text(declarations + '\nnative main {\n' + calls +
+                               '\n    return 0;\n}\n')
+        result = self.invoke(self.source, '-o', 'prefixes', *self.native_flags())
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.run_binary(self.directory / 'prefixes',
+                        ''.join(f'{index + 1}\n' for index in range(len(names))))
+
     def test_string_constant_semicolons_and_escaped_quotes(self):
         self.source.write_text('const text = "a;b\\"c";\nnative main { print_str(text); println(); return 0; }\n')
         result = self.invoke(self.source, '-o', 'constant', *self.native_flags())

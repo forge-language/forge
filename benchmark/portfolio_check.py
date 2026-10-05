@@ -79,12 +79,14 @@ try:
            '-e', 'POSTGRES_PASSWORD=forge-test-password', '-e', 'POSTGRES_DB=forge_test', 'postgres:16-alpine')
     created.append(db)
     docker('start', db)
+    # The initialization server accepts Unix sockets before API TCP is available.
     for _ in range(60):
-        if subprocess.run(['docker', 'exec', db, 'pg_isready', '-U', 'forge'], capture_output=True).returncode == 0:
+        if subprocess.run(['docker', 'exec', db, 'pg_isready', '-h', db, '-p', '5432',
+                           '-U', 'forge', '-d', 'forge_test'], capture_output=True).returncode == 0:
             break
         time.sleep(.2)
     else:
-        raise RuntimeError('DB did not start')
+        raise RuntimeError('DB TCP did not start: ' + docker('logs', db))
     api_name = prefix + '-api'
     api(api_name, image, 'forge_test', 1)
     if 'threads=connection' not in docker('logs', api_name):
