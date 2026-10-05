@@ -24,6 +24,8 @@ stage2/설치된 `forge-fg`도 기본적으로 실행 파일을 만듭니다. `-
 
 FG 컴파일러는 `int`, `string`, `void` 함수와 초기화된 타입 명시 변수, 정수 `match`, 반복문, 조건문, `strings/fs/os/io` 내장 함수, `native main`과 순차 실행 `process main`을 지원합니다. 전체 C 컴파일러와 기능이 같지는 않습니다. 코루틴, 임의 모듈, 부동소수점, 불리언, 배열과 완전한 타입/소유권 검사는 후속 작업입니다. 문자열 변수나 사용자 문자열 반환 함수를 출력할 때는 `print_str(value); println();`를 사용합니다. 고정점은 지원 부분집합의 셀프 호스팅을 확인하며 전체 언어의 의미적 정확성을 증명하지 않습니다.
 
+2026-10-05의 [셀프 호스팅 성능 보고서](selfhosting-performance-2026-10-05.md)에 stage0·stage2의 C 변환 비용, 식별자 변환 최적화, 생성 프로그램과 Rust의 실행 비교 및 고정점 검증 근거를 정리했습니다.
+
 ## 새 문자열 및 OS 내장 함수
 
 `str_view_sub(view, start, length)`는 캐시한 바이트 길이로 부분 문자열을 만듭니다. `str_view_matches(view, start, text)`는 임시 부분 문자열을 만들지 않고 접두 바이트를 비교합니다. `str_builder_append_view(builder, view, start, length)`는 뷰의 범위를 빌더에 직접 복사합니다. 음수 범위는 실패하고 양수 길이는 남은 범위로 제한됩니다. 뷰는 불변 문자열을 빌리며 arena reset 뒤에는 사용할 수 없습니다. 빌더가 만든 문자열은 독립된 스냅샷입니다. JS 구현도 UTF-8 바이트 기준으로 동작합니다.

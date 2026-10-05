@@ -5,6 +5,7 @@ import asyncio
 import hashlib
 import importlib.util
 import json
+import math
 import os
 from pathlib import Path
 import resource
@@ -22,13 +23,21 @@ parser.add_argument('--repeats', type=int, default=3)
 parser.add_argument('--seconds', type=float, default=4)
 parser.add_argument('--improvement', action='store_true')
 parser.add_argument('--client-processes', type=int, default=1, choices=[1, 2, 4])
-parser.add_argument('--posts-only', action='store_true')
+parser.add_argument('--rate', type=float, help='Total paced requests per second across load processes')
+parser.add_argument('--concurrency', type=int, nargs='+', help='Select concurrency cases (1, 16, or 64)')
+case_filter = parser.add_mutually_exclusive_group()
+case_filter.add_argument('--posts-only', action='store_true')
+case_filter.add_argument('--health-only', action='store_true')
 parser.add_argument('--variants', nargs='+')
 parser.add_argument('--runtime-image')
 parser.add_argument('--live', action='store_true', help=argparse.SUPPRESS)
 args = parser.parse_args()
 if not 3 <= args.repeats <= 10 or not 1 <= args.seconds <= 30:
     parser.error('repeats must be 3..10 and seconds 1..30')
+if args.rate is not None and (not math.isfinite(args.rate) or args.rate <= 0 or args.client_processes == 1):
+    parser.error('rate must be finite and positive; use client-processes greater than 1')
+if args.concurrency and not set(args.concurrency) <= {1, 16, 64}:
+    parser.error('concurrency must select cases 1, 16, or 64')
 prepared = json.loads(args.prepared.read_text())
 snapshot = Path(prepared['snapshot_directory']) / 'after'
 output = args.output.resolve()
@@ -52,6 +61,9 @@ if not args.live:
     for name in binaries:
         if not (profile_dir / name).is_file():
             parser.error('Missing diagnostic executable: ' + name)
+    if args.variants and 'plain_baseline_connection' in args.variants:
+        if not (profile_dir / 'portfolio-baseline').is_file():
+            parser.error('Missing diagnostic executable: portfolio-baseline')
     original = snapshot / 'backend-forge/benchmark/run_throughput.sh'
     script = original.read_text()
     root_assignment = 'ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)'
@@ -65,16 +77,23 @@ if not args.live:
     script = script.replace(root_assignment, 'ROOT=' + shlex.quote(str(snapshot)))
     script = script.replace('forge-throughput-', 'forge-diagnosis-')
     script = script.replace('20261001-throughput', '20261003-diagnosis')
+    script = script.replace('docker run -d --name', 'docker run -d --no-healthcheck --name')
     for before, after in [('18211', '18311'), ('18212', '18312'), ('18214', '18314')]:
         script = script.replace(before, after)
     invocation = [sys.executable, str(Path(__file__).resolve()), '--live',
                   '--prepared', str(args.prepared.resolve()), '--profile-dir', str(profile_dir),
                   '--output', str(output), '--repeats', str(args.repeats), '--seconds', str(args.seconds)]
     invocation += ['--client-processes', str(args.client_processes)]
+    if args.rate is not None:
+        invocation += ['--rate', str(args.rate)]
+    if args.concurrency:
+        invocation += ['--concurrency', *map(str, args.concurrency)]
     if args.improvement:
         invocation.append('--improvement')
     if args.posts_only:
         invocation.append('--posts-only')
+    if args.health_only:
+        invocation.append('--health-only')
     if args.variants:
         invocation += ['--variants', *args.variants]
     if args.runtime_image:
@@ -127,7 +146,7 @@ async def start_profile(config):
     if profile_created:
         docker('rm', '-f', profile_name)
         profile_created = False
-    command = ['create', '--name', profile_name, '--label', 'forge.throughput=20261003-diagnosis',
+    command = ['create', '--no-healthcheck', '--name', profile_name, '--label', 'forge.throughput=20261003-diagnosis',
                '--network', 'forge-diagnosis-20261001', '--cpus', '2', '--memory', '512m',
                '-p', '127.0.0.1:18316:8080', '-v', str(profile_dir) + ':/diagnostic:ro',
                '--entrypoint', '/diagnostic/' + config['binary']]
@@ -208,6 +227,9 @@ async def main():
         if args.variants and 'profile_fixed_pool_poll' in args.variants:
             configs.append({'name': 'profile_fixed_pool_poll', 'binary': 'portfolio-fixed-profile',
                             'workers': 8, 'pool': 5, 'threads': 'pool', 'poll': 'poll'})
+        if args.variants and 'plain_baseline_connection' in args.variants:
+            configs.append({'name': 'plain_baseline_connection', 'binary': 'portfolio-baseline',
+                            'workers': 8, 'pool': 5, 'threads': 'connection'})
     if args.variants:
         selected = set(args.variants)
         if not selected <= {config['name'] for config in configs}:
@@ -220,11 +242,17 @@ async def main():
         cases.append(('/api/posts', 64))
     if args.posts_only:
         cases = [case for case in cases if case[0] == '/api/posts']
+    if args.health_only:
+        cases = [case for case in cases if case[0] == '/api/health']
+    if args.concurrency:
+        cases = [case for case in cases if case[1] in args.concurrency]
+    if not cases:
+        raise RuntimeError('No cases match the selected endpoint and concurrency')
     db_group = base.cgroup('forge-diagnosis-db')
     async def load(name, path, clients, seconds):
         if args.client_processes > 1:
             from portfolio_load import trial
-            return await trial(base, name, path, clients, seconds, args.client_processes, db_group)
+            return await trial(base, name, path, clients, seconds, args.client_processes, db_group, args.rate)
         return await base.trial(name, path, clients, seconds)
     for repeat in range(args.repeats):
         shift = repeat % len(configs)
@@ -259,6 +287,10 @@ async def main():
                                client_before.ru_utime - client_before.ru_stime) / elapsed * 100,
                            db_cpu_core_percent=(db_after['usage_usec'] - db_before['usage_usec']) / elapsed / 10000,
                            server_cpu_delta={k: server_after[k] - server_before[k] for k in server_before})
+                    row.update(server_cpu_usec=server_after['usage_usec'] - server_before['usage_usec'],
+                               db_cpu_usec=db_after['usage_usec'] - db_before['usage_usec'])
+                    row.update(server_cpu_usec_per_request=row['server_cpu_usec'] / row['requests'],
+                               db_cpu_usec_per_request=row['db_cpu_usec'] / row['requests'])
                 if before_metrics:
                     after_metrics = await get_json(metric_url)
                     if any(value.get('worker_requests', [0])[-1]
@@ -269,7 +301,12 @@ async def main():
                                  if isinstance(after_metrics[key][k], list)
                                  else after_metrics[key][k] - before_metrics[key][k])
                              for k in after_metrics[key]}
-                    if delta['requests'] == 0 or delta['queries'] != delta['requests']:
+                    if delta['requests'] == 0:
+                        raise RuntimeError('No measured public requests')
+                    if key == 'health':
+                        if not 0 < delta['queries'] <= delta['requests']:
+                            raise RuntimeError('Expected DB queries for measured health requests')
+                    elif delta['queries'] != delta['requests']:
                         raise RuntimeError('Expected one measured SQL query per public request')
                     row['profile'] = delta
                 observations.append(row)
@@ -285,13 +322,15 @@ async def main():
         'binary_sha256': binary_hashes,
         'candidate_web_source_sha256': hashlib.sha256(candidate_source.read_bytes()).hexdigest() if candidate_source.exists() else None,
         'client_processes': args.client_processes,
+        'target_rps': args.rate, 'image_healthchecks_disabled': True,
         'runtime_image': runtime_image, 'runtime_image_id': runtime_image_id,
         'load_source_sha256': hashlib.sha256((Path(__file__).parent / 'portfolio_load.py').read_bytes()).hexdigest(),
         'threads': thread_counts, 'results': observations,
-        'scope': 'Shared host; same data and ban policy. Instrumented handler intervals include pool wait '
+        'scope': 'Shared host; identical fixtures. Rust checks cached bans; Forge checks PostgreSQL. '
+                 'Health may batch multiple IP checks into one SQL query. Instrumented handler intervals include pool wait '
                  'and synchronous libpq calls; exclude MHD queueing and response transmission. '
                  'Compiler/packaging/instrumentation controls included. Client and DB CPU sampled; '
-                 'one aiohttp process can constrain throughput.'}, indent=2) + '\n')
+                 'the aiohttp load generator can constrain throughput.'}, indent=2) + '\n')
 
 
 try:
