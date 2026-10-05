@@ -18,20 +18,32 @@ def cpu_state(group):
 
 
 async def worker(url, concurrency):
-    latencies, errors = [], 0
+    latencies, schedule_lateness, errors = [], [], 0
     async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(limit=concurrency),
             timeout=aiohttp.ClientTimeout(total=10), auto_decompress=False) as session:
         print('ready', flush=True)
         schedule = json.loads(sys.stdin.readline())
         start, seconds = schedule['start'], schedule['seconds']
+        rate = schedule.get('rate')
+        offset = schedule.get('offset', 0)
         await asyncio.sleep(max(0, start - time.monotonic()))
         actual_start = time.monotonic()
         before = resource.getrusage(resource.RUSAGE_SELF)
 
-        async def request_loop():
+        async def request_loop(index):
             nonlocal errors
-            while time.monotonic() < start + seconds:
+            sequence = 0
+            while True:
+                if rate is not None:
+                    scheduled = start + offset + (sequence * concurrency + index) / rate
+                    if scheduled >= start + seconds:
+                        break
+                    await asyncio.sleep(max(0, scheduled - time.monotonic()))
+                if time.monotonic() >= start + seconds:
+                    break
                 tick = time.monotonic()
+                if rate is not None:
+                    schedule_lateness.append(max(0, tick - scheduled) * 1000)
                 try:
                     async with session.get(url, headers={'Accept-Encoding': 'identity'}) as response:
                         body = await response.read()
@@ -40,17 +52,22 @@ async def worker(url, concurrency):
                 except (aiohttp.ClientError, asyncio.TimeoutError):
                     errors += 1
                 latencies.append((time.monotonic() - tick) * 1000)
+                sequence += 1
 
-        await asyncio.gather(*(request_loop() for _ in range(concurrency)))
+        await asyncio.gather(*(request_loop(i) for i in range(concurrency)))
+        if rate is not None:
+            await asyncio.sleep(max(0, start + seconds - time.monotonic()))
         finished = time.monotonic()
         after = resource.getrusage(resource.RUSAGE_SELF)
         result = {'latencies': latencies, 'errors': errors, 'finished': finished,
                   'start_lateness_ms': max(0, actual_start - start) * 1000,
                   'client_cpu_seconds': after.ru_utime + after.ru_stime - before.ru_utime - before.ru_stime}
+        if rate is not None:
+            result['schedule_lateness_ms'] = schedule_lateness
     print(json.dumps(result), flush=True)
 
 
-async def trial(base, name, path, concurrency, seconds, processes, db_group):
+async def trial(base, name, path, concurrency, seconds, processes, db_group, rate=None):
     url, container = base.SERVERS[name]
     group = base.cgroup(container)
     pid = base.docker('inspect', '-f', '{{.State.Pid}}', container)
@@ -69,8 +86,12 @@ async def trial(base, name, path, concurrency, seconds, processes, db_group):
         observed_start = time.monotonic()
         before, db_before = cpu_state(group), cpu_state(db_group)
         start = time.monotonic() + .1
-        schedule = (json.dumps({'start': start, 'seconds': seconds}) + '\n').encode()
-        for child in children:
+        for i, child in enumerate(children):
+            clients = concurrency // processes + (i < concurrency % processes)
+            schedule_values = {'start': start, 'seconds': seconds}
+            if rate is not None:
+                schedule_values.update(rate=rate * clients / concurrency, offset=i / rate)
+            schedule = (json.dumps(schedule_values) + '\n').encode()
             child.stdin.write(schedule)
             await child.stdin.drain()
             child.stdin.close()
@@ -100,7 +121,9 @@ async def trial(base, name, path, concurrency, seconds, processes, db_group):
             return latencies[max(0, min(len(latencies) - 1, int(len(latencies) * p) - 1))]
 
         cpu_times = [value['client_cpu_seconds'] for value in values]
-        return {'language': name, 'endpoint': path, 'concurrency': concurrency,
+        server_cpu_usec = after['usage_usec'] - before['usage_usec']
+        db_cpu_usec = db_after['usage_usec'] - db_before['usage_usec']
+        result = {'language': name, 'endpoint': path, 'concurrency': concurrency,
                 'seconds': round(elapsed, 3), 'requests': len(latencies),
                 'errors': sum(value['errors'] for value in values),
                 'rps': round(len(latencies) / elapsed, 2),
@@ -115,7 +138,18 @@ async def trial(base, name, path, concurrency, seconds, processes, db_group):
                 'client_process_cpu_core_percent': [value / elapsed * 100 for value in cpu_times],
                 'client_processes': processes, 'peak_threads': max(thread_counts, default=0),
                 'memory_mib': max(memory, default=0) / 1024 ** 2,
+                'server_cpu_usec': server_cpu_usec, 'db_cpu_usec': db_cpu_usec,
+                'server_cpu_usec_per_request': server_cpu_usec / len(latencies),
+                'db_cpu_usec_per_request': db_cpu_usec / len(latencies),
                 'server_cpu_delta': {k: after[k] - before[k] for k in before}}
+        if rate is not None:
+            lateness = sorted(value for row in values for value in row['schedule_lateness_ms'])
+            result.update(target_rps=rate, requested_seconds=seconds,
+                offered_requests=rate * seconds,
+                schedule_lateness_mean_ms=sum(lateness) / len(lateness),
+                schedule_lateness_p95_ms=lateness[max(0, int(len(lateness) * .95) - 1)],
+                schedule_lateness_max_ms=max(lateness))
+        return result
     finally:
         if observer is not None:
             observer.cancel()
