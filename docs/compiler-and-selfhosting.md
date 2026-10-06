@@ -16,6 +16,10 @@ cmake --install build --prefix /tmp/forge-install
 
 설치 디렉터리에는 `bin/forge`, `bin/forge-fg`, `include/`, `lib/`, FG 컴파일러 원본이 포함됩니다. 설치 위치를 실행 파일에서 찾으므로 다른 디렉터리에서도 사용할 수 있습니다. 빌드 트리가 기본 `build/`가 아니라면 `--lib-dir`로 라이브러리 디렉터리를 지정합니다. `CC`는 단일 실행 파일 경로입니다. `CC="cc -O2"`처럼 인수를 포함하지 마세요.
 
+## GCC 없는 네이티브 빌드
+
+현재 네이티브 경로와 필요한 IR·코드 생성·링커·런타임·부트스트랩 단계를 [GCC-independent toolchain 설계](native-toolchain-design.md)에 기록했습니다. 현재 stage2 고정점은 C 출력의 일치성을 확인할 뿐 GCC/Clang 없는 실행 파일 생성을 뜻하지 않습니다.
+
 ## 셀프 호스팅 검증 범위
 
 C로 작성한 stage0가 `bootstrap/compiler.fg`를 stage1으로 컴파일합니다. stage1이 같은 FG 원본을 C로 변환하고 C 도구 체인이 stage2 실행 파일을 만듭니다. stage2가 만든 stage3 컴파일러의 출력과 stage2 출력이 바이트 단위로 같은지 `forge-selfhost-verify`가 확인합니다. FG 컴파일러의 파싱, 코드 생성, 옵션 처리, 파일 처리, 네이티브 빌드 호출은 FG로 구현되어 있습니다. 최종 기계어 생성과 런타임은 C 도구 체인과 C 라이브러리를 사용합니다.
