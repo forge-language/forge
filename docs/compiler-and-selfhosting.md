@@ -18,7 +18,7 @@ cmake --install build --prefix /tmp/forge-install
 
 ## GCC 없는 네이티브 빌드
 
-현재 네이티브 경로와 필요한 IR·코드 생성·링커·런타임·부트스트랩 단계를 [GCC-independent toolchain 설계](native-toolchain-design.md)에 기록했습니다. `forge source.fg --emit-ir`는 일반 함수의 현재 지원 부분집합을 target-independent basic block IR로 내보냅니다. 모듈 전역 선언, 구조체, enum, process, native block은 아직 지원하지 않으며, 선언이 없는 호출의 반환 형식은 ?로 표시합니다. 이 IR은 조사 가능한 중간 단계이며 네이티브 코드 생성이나 링크를 수행하지 않습니다. 현재 stage2 고정점은 C 출력의 일치성을 확인할 뿐 GCC/Clang 없는 실행 파일 생성을 뜻하지 않습니다.
+현재 네이티브 경로와 필요한 IR·코드 생성·링커·런타임·부트스트랩 단계를 [GCC-independent toolchain 설계](native-toolchain-design.md)에 기록했습니다. `forge source.fg --emit-ir`는 일반 함수의 현재 지원 부분집합을 target-independent basic block IR로 내보냅니다. 리터럴 전역 상수와 구조체/enum 선언 정보는 보존하지만, process/coroutine/native block과 aggregate 생성·배치는 아직 지원하지 않습니다. 선언이 없는 호출의 반환 형식은 ?로 표시합니다. 이 IR은 조사 가능한 중간 단계이며 네이티브 코드 생성이나 링크를 수행하지 않습니다. 현재 stage2 고정점은 C 출력의 일치성을 확인할 뿐 GCC/Clang 없는 실행 파일 생성을 뜻하지 않습니다.
 
 ## 셀프 호스팅 검증 범위
 

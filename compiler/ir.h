@@ -11,7 +11,7 @@ typedef uint32_t IRValue;
 
 typedef enum {
     IR_CONST_INT, IR_CONST_FLOAT, IR_CONST_BOOL, IR_CONST_STRING,
-    IR_LOAD_LOCAL, IR_LOAD_SYMBOL, IR_PARAM,
+    IR_LOAD_LOCAL, IR_LOAD_GLOBAL, IR_LOAD_SYMBOL, IR_PARAM,
     IR_BINARY, IR_PHI, IR_CALL, IR_QUAL_CALL, IR_RECV, IR_INDEX, IR_FIELD, IR_MOVE,
     IR_STORE_LOCAL, IR_SPAWN, IR_SEND, IR_YIELD, IR_AWAIT, IR_EVAL
 } IROp;
@@ -49,6 +49,32 @@ typedef struct {
     ForgeType type;
 } IRLocal;
 
+typedef enum { IR_GLOBAL_INT, IR_GLOBAL_FLOAT, IR_GLOBAL_BOOL, IR_GLOBAL_STRING } IRGlobalKind;
+
+typedef struct {
+    ForgeStr name;
+    ForgeType type;
+    IRGlobalKind kind;
+    int64_t int_value;
+    double float_value;
+    bool bool_value;
+    ForgeStr string_value;
+    char *owned_name;
+} IRGlobal;
+
+typedef struct {
+    ForgeStr name;
+    IRLocal *fields;
+    size_t field_count;
+} IRStruct;
+
+typedef struct {
+    ForgeStr name;
+    ForgeStr *variants;
+    int64_t *values;
+    size_t variant_count;
+} IREnum;
+
 typedef struct {
     ForgeStr name, module;
     ForgeType return_type;
@@ -63,12 +89,19 @@ typedef struct {
 typedef struct {
     IRFunction *functions;
     size_t function_count, function_cap;
+    IRGlobal *globals;
+    size_t global_count, global_cap;
+    IRStruct *structs;
+    size_t struct_count, struct_cap;
+    IREnum *enums;
+    size_t enum_count, enum_cap;
 } IRModule;
 
 /* Lowers the currently supported ordinary-function subset into target-neutral
  * basic blocks and typed values. Calls without a visible declaration are kept
- * with an explicitly unknown result type. Unsupported globals and declaration
- * forms fail with a diagnostic rather than producing partial IR. */
+ * with an explicitly unknown result type. Literal constants, structs and enums
+ * are represented explicitly; unsupported declaration forms fail with a
+ * diagnostic rather than producing partial IR. */
 bool ir_lower_program(const Program *program, IRModule *out);
 void ir_dump(const IRModule *module, FILE *out);
 void ir_module_free(IRModule *module);

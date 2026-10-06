@@ -6,6 +6,7 @@
 typedef struct {
     IRFunction *fn;
     const Program *program;
+    IRModule *module_data;
     ForgeStr module;
     uint32_t block_id;
     size_t *scopes;
@@ -106,6 +107,12 @@ static int ir_local_find(const Lower *l, ForgeStr name) {
     return -1;
 }
 
+static const IRGlobal *ir_global_find(const IRModule *m, ForgeStr name) {
+    for (size_t i=0;i<m->global_count;i++)
+        if (forge_str_eq(m->globals[i].name,name)) return &m->globals[i];
+    return NULL;
+}
+
 static void ir_lower_block(Lower *l, const Block *block, bool own_scope);
 static uint32_t ir_new_open_block(Lower *l);
 static IRValue ir_lower_expr(Lower *l, Expr *expr);
@@ -141,7 +148,9 @@ static ForgeType ir_expr_type(Lower *l, Expr *e) {
     switch (e->kind) {
     case EXPR_IDENT: {
         int slot=ir_local_find(l,e->as.ident);
-        return slot>=0?l->fn->locals[slot].type:forge_type_void();
+        if(slot>=0) return l->fn->locals[slot].type;
+        const IRGlobal *global=ir_global_find(l->module_data,e->as.ident);
+        return global?global->type:forge_type_void();
     }
     case EXPR_CALL: {
         const FnDecl *fn=ir_lookup_fn(l->program,l->module,e->as.call.name,false);
@@ -184,8 +193,12 @@ static IRValue ir_lower_expr(Lower *l, Expr *e) {
         return ir_emit(l, inst);
     case EXPR_IDENT: {
         int slot = ir_local_find(l, e->as.ident);
-        if (slot < 0) { inst.op = IR_LOAD_SYMBOL; inst.name = e->as.ident; }
-        else { inst.op = IR_LOAD_LOCAL; inst.local = (uint32_t)slot; inst.type = l->fn->locals[slot].type; }
+        if (slot < 0) {
+            const IRGlobal *global=ir_global_find(l->module_data,e->as.ident);
+            inst.op = global ? IR_LOAD_GLOBAL : IR_LOAD_SYMBOL;
+            inst.name = e->as.ident;
+            if(global) { inst.type=global->type; inst.type_known=true; }
+        } else { inst.op = IR_LOAD_LOCAL; inst.local = (uint32_t)slot; inst.type = l->fn->locals[slot].type; inst.type_known=inst.type.kind!=TY_VOID; }
         return ir_emit(l, inst);
     }
     case EXPR_BINARY:
@@ -389,7 +402,7 @@ static bool ir_lower_function(IRModule *m, const Program *program, ForgeStr modu
     fn->name=decl->name; fn->module=module_name; fn->return_type=decl->ret_type; fn->is_extern=decl->is_extern;
     if(fn->is_extern) return true;
     uint32_t entry=ir_new_block(fn);
-    Lower l={0}; l.fn=fn; l.program=program; l.module=module_name; l.block_id=entry;
+    Lower l={0}; l.fn=fn; l.program=program; l.module_data=m; l.module=module_name; l.block_id=entry;
     ir_scope_enter(&l);
     for(const Param *p=decl->params;p;p=p->next) {
         uint32_t slot=ir_local_add(&l,p->name,p->type);
@@ -406,13 +419,70 @@ static bool ir_lower_function(IRModule *m, const Program *program, ForgeStr modu
     return true;
 }
 
+static bool ir_copy_globals(const Program *program, IRModule *out, const char **error) {
+    for(size_t i=0;i<program->const_count;i++) {
+        const ConstDecl *decl=&program->consts[i];
+        if(!decl->value) { *error="constant has no initializer"; return false; }
+        out->globals=ir_grow(out->globals,&out->global_cap,out->global_count+1,sizeof(IRGlobal));
+        IRGlobal *g=&out->globals[out->global_count++]; memset(g,0,sizeof(*g));
+        g->name=decl->name;
+        switch(decl->value->kind) {
+        case EXPR_INT: g->kind=IR_GLOBAL_INT; g->type=forge_type_int(); g->int_value=decl->value->as.int_val; break;
+        case EXPR_FLOAT: g->kind=IR_GLOBAL_FLOAT; g->type=forge_type_float(); g->float_value=decl->value->as.float_val; break;
+        case EXPR_BOOL: g->kind=IR_GLOBAL_BOOL; g->type=forge_type_bool(); g->bool_value=decl->value->as.bool_val; break;
+        case EXPR_STRING: g->kind=IR_GLOBAL_STRING; g->type=forge_type_string(); g->string_value=decl->value->as.string_val; break;
+        default: *error="constant initializer is not a literal"; return false;
+        }
+    }
+    for(size_t i=0;i<program->struct_count;i++) {
+        const StructDecl *decl=&program->structs[i];
+        out->structs=ir_grow(out->structs,&out->struct_cap,out->struct_count+1,sizeof(IRStruct));
+        IRStruct *result=&out->structs[out->struct_count++]; memset(result,0,sizeof(*result));
+        result->name=decl->name;
+        for(const Field *f=decl->fields;f;f=f->next) result->field_count++;
+        if(result->field_count) {
+            result->fields=calloc(result->field_count,sizeof(IRLocal));
+            if(!result->fields) forge_die("out of memory");
+            size_t field=0;
+            for(const Field *f=decl->fields;f;f=f->next) result->fields[field++]=(IRLocal){f->name,f->type};
+        }
+    }
+    for(size_t i=0;i<program->enum_count;i++) {
+        const EnumDecl *decl=&program->enums[i];
+        out->enums=ir_grow(out->enums,&out->enum_cap,out->enum_count+1,sizeof(IREnum));
+        IREnum *result=&out->enums[out->enum_count++]; memset(result,0,sizeof(*result));
+        result->name=decl->name;
+        for(const EnumVariant *v=decl->variants;v;v=v->next) result->variant_count++;
+        if(result->variant_count) {
+            result->variants=calloc(result->variant_count,sizeof(ForgeStr));
+            result->values=calloc(result->variant_count,sizeof(int64_t));
+            if(!result->variants||!result->values) forge_die("out of memory");
+            size_t variant=0;
+            for(const EnumVariant *v=decl->variants;v;v=v->next) {
+                size_t n=decl->name.len+1+v->name.len;
+                char *joined=malloc(n+1); if(!joined) forge_die("out of memory");
+                memcpy(joined,decl->name.data,decl->name.len); joined[decl->name.len]='_';
+                memcpy(joined+decl->name.len+1,v->name.data,v->name.len); joined[n]='\0';
+                result->variants[variant]=(ForgeStr){joined,n};
+                result->values[variant++]=v->value;
+                out->globals=ir_grow(out->globals,&out->global_cap,out->global_count+1,sizeof(IRGlobal));
+                IRGlobal *g=&out->globals[out->global_count++]; memset(g,0,sizeof(*g));
+                g->name=result->variants[variant-1]; g->owned_name=joined;
+                g->kind=IR_GLOBAL_INT; g->type=forge_type_struct(decl->name); g->int_value=v->value;
+            }
+        }
+    }
+    return true;
+}
+
 bool ir_lower_program(const Program *program, IRModule *out) {
     memset(out,0,sizeof(*out));
-    if(program->process_count || program->native_count || program->supervisor_count || program->const_count || program->struct_count || program->enum_count) {
-        fprintf(stderr,"forge: --emit-ir currently requires ordinary functions without globals, structs, enums, processes, coroutines, native blocks, or supervisors\n");
+    if(program->process_count || program->native_count || program->supervisor_count) {
+        fprintf(stderr,"forge: --emit-ir currently does not support processes, coroutines, native blocks, or supervisors\n");
         return false;
     }
     const char *error=NULL;
+    if(!ir_copy_globals(program,out,&error)) goto fail;
     for(size_t i=0;i<program->fn_count;i++) if(!ir_lower_function(out,program,forge_str(""),&program->functions[i],&error)) goto fail;
     for(size_t m=0;m<program->module_count;m++) for(size_t i=0;i<program->modules[m].fn_count;i++)
         if(!ir_lower_function(out,program,program->modules[m].name,&program->modules[m].functions[i],&error)) goto fail;
@@ -429,6 +499,10 @@ static const char *ir_type_name(ForgeType t) {
     switch(t.kind) { case TY_VOID:return "void"; case TY_INT:return "i64"; case TY_FLOAT:return "f64"; case TY_BOOL:return "bool"; case TY_STRING:return "string"; case TY_PTR:return "ptr"; case TY_STRUCT:return "struct"; }
     return "?";
 }
+static void ir_dump_type(FILE *out, ForgeType t) {
+    if(t.kind==TY_STRUCT) fprintf(out,"struct %.*s",(int)t.struct_name.len,t.struct_name.data);
+    else fputs(ir_type_name(t),out);
+}
 static const char *ir_bin_name(BinOp op) {
     static const char *names[]={"add","sub","mul","div","mod","eq","ne","lt","le","gt","ge","and","or"};
     return (unsigned)op<sizeof(names)/sizeof(names[0])?names[op]:"?";
@@ -436,8 +510,8 @@ static const char *ir_bin_name(BinOp op) {
 static void ir_dump_value(FILE *out,IRValue v) { if(v==IR_NO_VALUE) fputs("none",out); else fprintf(out,"%%%u",v); }
 static void ir_dump_fn(const IRFunction *fn,FILE *out) {
     if(fn->module.len) fprintf(out,"module %.*s::",(int)fn->module.len,fn->module.data);
-    fprintf(out,"fn %.*s -> %s%s\n",(int)fn->name.len,fn->name.data,ir_type_name(fn->return_type),fn->is_extern?" extern":"");
-    for(size_t i=0;i<fn->local_count;i++) fprintf(out,"  local %%%zu %.*s: %s\n",i,(int)fn->locals[i].name.len,fn->locals[i].name.data,ir_type_name(fn->locals[i].type));
+    fprintf(out,"fn %.*s -> ",(int)fn->name.len,fn->name.data); ir_dump_type(out,fn->return_type); fprintf(out,"%s\n",fn->is_extern?" extern":"");
+    for(size_t i=0;i<fn->local_count;i++) { fprintf(out,"  local %%%zu %.*s: ",i,(int)fn->locals[i].name.len,fn->locals[i].name.data); ir_dump_type(out,fn->locals[i].type); fputc('\n',out); }
     for(size_t bi=0;bi<fn->block_count;bi++) {
         const IRBlock *b=&fn->blocks[bi]; fprintf(out,"b%u:\n",b->id);
         for(size_t ii=0;ii<b->inst_count;ii++) {
@@ -456,6 +530,7 @@ static void ir_dump_fn(const IRFunction *fn,FILE *out) {
                 }
                 fputc('\"',out); break;
             case IR_LOAD_LOCAL: fprintf(out,"load.local %%%u",x->local); break;
+            case IR_LOAD_GLOBAL: fprintf(out,"load.global @%.*s",(int)x->name.len,x->name.data); break;
             case IR_LOAD_SYMBOL: fprintf(out,"load.symbol %.*s",(int)x->name.len,x->name.data); break;
             case IR_PARAM: fprintf(out,"param %%%u",x->local); break;
             case IR_BINARY: fprintf(out,"%s ",ir_bin_name(x->bin_op)); ir_dump_value(out,x->a); fputs(", ",out); ir_dump_value(out,x->b); break;
@@ -474,7 +549,7 @@ static void ir_dump_fn(const IRFunction *fn,FILE *out) {
             case IR_EVAL: fputs("eval ",out);ir_dump_value(out,x->a);break;
             }
             if(x->result != IR_NO_VALUE)
-                fprintf(out," : %s\n",x->type_known?ir_type_name(x->type):"?");
+                { fputs(" : ",out); if(x->type_known) ir_dump_type(out,x->type); else fputc('?',out); fputc('\n',out); }
             else fputc('\n',out);
         }
         fputs("  ",out);
@@ -488,12 +563,50 @@ static void ir_dump_fn(const IRFunction *fn,FILE *out) {
     }
     fputc('\n',out);
 }
-void ir_dump(const IRModule *m,FILE *out) { for(size_t i=0;i<m->function_count;i++) ir_dump_fn(&m->functions[i],out); }
+static void ir_dump_string(FILE *out, ForgeStr s) {
+    fputc('"',out);
+    for(size_t i=0;i<s.len;i++) {
+        unsigned char ch=(unsigned char)s.data[i];
+        if(ch=='\\'||ch=='"') { fputc('\\',out); fputc(ch,out); }
+        else if(ch>=32&&ch<127) fputc(ch,out);
+        else fprintf(out,"\\x%02x",ch);
+    }
+    fputc('"',out);
+}
+void ir_dump(const IRModule *m,FILE *out) {
+    for(size_t i=0;i<m->global_count;i++) {
+        const IRGlobal *g=&m->globals[i];
+        fprintf(out,"global @%.*s: ",(int)g->name.len,g->name.data); ir_dump_type(out,g->type); fputs(" = ",out);
+        switch(g->kind) {
+        case IR_GLOBAL_INT: fprintf(out,"%" PRId64,g->int_value); break;
+        case IR_GLOBAL_FLOAT: fprintf(out,"%.17g",g->float_value); break;
+        case IR_GLOBAL_BOOL: fputs(g->bool_value?"true":"false",out); break;
+        case IR_GLOBAL_STRING: ir_dump_string(out,g->string_value); break;
+        }
+        fputc('\n',out);
+    }
+    for(size_t i=0;i<m->struct_count;i++) {
+        const IRStruct *st=&m->structs[i]; fprintf(out,"struct %.*s {",(int)st->name.len,st->name.data);
+        for(size_t f=0;f<st->field_count;f++) { fprintf(out," %.*s: ",(int)st->fields[f].name.len,st->fields[f].name.data); ir_dump_type(out,st->fields[f].type); fputc(';',out); }
+        fputs(" }\n",out);
+    }
+    for(size_t i=0;i<m->enum_count;i++) {
+        const IREnum *en=&m->enums[i]; fprintf(out,"enum %.*s {",(int)en->name.len,en->name.data);
+        for(size_t v=0;v<en->variant_count;v++) fprintf(out," %.*s=%" PRId64 ";",(int)en->variants[v].len-(int)en->name.len-1,en->variants[v].data+en->name.len+1,en->values[v]);
+        fputs(" }\n",out);
+    }
+    if(m->global_count||m->struct_count||m->enum_count) fputc('\n',out);
+    for(size_t i=0;i<m->function_count;i++) ir_dump_fn(&m->functions[i],out);
+}
 void ir_module_free(IRModule *m) {
     for(size_t f=0;f<m->function_count;f++) {
         IRFunction *fn=&m->functions[f];
         for(size_t b=0;b<fn->block_count;b++) { for(size_t i=0;i<fn->blocks[b].inst_count;i++) free(fn->blocks[b].insts[i].args); free(fn->blocks[b].insts); }
         free(fn->blocks); free(fn->locals);
     }
+    for(size_t i=0;i<m->global_count;i++) free(m->globals[i].owned_name);
+    for(size_t i=0;i<m->struct_count;i++) free(m->structs[i].fields);
+    for(size_t i=0;i<m->enum_count;i++) { free(m->enums[i].variants); free(m->enums[i].values); }
+    free(m->globals); free(m->structs); free(m->enums);
     free(m->functions); memset(m,0,sizeof(*m));
 }

@@ -104,13 +104,14 @@ The compiler now has an initial `--emit-ir` path in `compiler/ir.c`. It lowers
 ordinary function bodies, local slots, calls with visible signatures, structured
 control flow, `match`, and short-circuit boolean operations into target-neutral
 basic blocks while preserving the C backend. This is deliberately an inspectable
-partial IR: globals, structs, enums, process declarations, native blocks, and
-other unsupported top-level forms produce a diagnostic; imported calls without
-a visible signature carry an unknown result type. It neither emits machine code
-nor links executables.
+partial IR: literal globals and struct/enum declarations are represented,
+while process declarations, native blocks, and other unsupported top-level
+forms produce a diagnostic. Imported calls without a visible signature carry an
+unknown result type. Aggregate construction/layout, machine-code generation,
+and executable linking are still absent.
 
-The next IR work is to resolve imported/builtin signatures, represent globals
-and aggregates, and lower process/coroutine semantics without losing ownership,
+The next IR work is to resolve imported/builtin signatures, model aggregate
+construction/layout, and lower process/coroutine semantics without losing ownership,
 scheduling, or event-loop behavior. Only then can each target backend consume a
 stable contract. The first native backend should be selected only after the
 platform matrix is recorded; a Linux x86_64-only executable writer would be a
