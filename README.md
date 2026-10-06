@@ -491,7 +491,7 @@ Issues and pull requests are welcome. Please read **[CONTRIBUTING.md](CONTRIBUTI
 
 ## License
 
-[MIT License](LICENSE) — free to use, modify, and distribute.
+[Apache License 2.0](LICENSE).
 
 ## Design Docs
 

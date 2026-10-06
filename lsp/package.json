@@ -2,7 +2,7 @@
   "name": "@forge/language-server",
   "version": "0.1.0",
   "description": "Language Server Protocol implementation for Forge",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "main": "./out/server.js",
   "bin": {
     "forge-language-server": "./out/server.js"

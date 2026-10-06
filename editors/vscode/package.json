@@ -4,7 +4,7 @@
   "description": "Forge language support — syntax highlighting and LSP",
   "version": "0.1.0",
   "publisher": "forge-lang",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "engines": {
     "vscode": "^1.85.0"
   },
