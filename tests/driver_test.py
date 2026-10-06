@@ -63,6 +63,8 @@ class DriverTest(unittest.TestCase):
             ('native main { let n: int = 8; return n == 8; }', 1),
             ('native main { let n: int = 40; if (n < 42) { return 42; } else { return 1; } }', 42),
             ('native main { let mut n: int = 0; while (n < 42) { n = n + 1; } return n; }', 42),
+            ('native main { let n: int = 8; if (n == 8 && n < 9) { return 42; } else { return 1; } }', 42),
+            ('native main { let n: int = 8; if (n == 7 || n == 8) { return 42; } else { return 1; } }', 42),
         ]
         for index, (source, expected) in enumerate(cases):
             with self.subTest(source=source):

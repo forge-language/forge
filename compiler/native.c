@@ -124,14 +124,49 @@ static bool emit_block_insts(Code *c,const IRFunction *fn,const IRBlock *b) {
         case IR_EVAL:
             if(x->a==IR_NO_VALUE)return false;
             break;
+        case IR_PHI:
+            /* Phi copies are emitted on their incoming edges. */
+            break;
         default:return false;
         }
     }
     return true;
 }
 
+static bool validate_phis(const IRFunction *fn) {
+    for(size_t bi=0;bi<fn->block_count;bi++) {
+        const IRBlock *merge=&fn->blocks[bi];
+        for(size_t ii=0;ii<merge->inst_count;ii++) {
+            const IRInst *phi=&merge->insts[ii];
+            if(phi->op!=IR_PHI)continue;
+            if(phi->local>=fn->block_count||phi->int_value<0||
+               (uint64_t)phi->int_value>=fn->block_count)return false;
+            const IRBlock *left=&fn->blocks[phi->local];
+            const IRBlock *right=&fn->blocks[(size_t)phi->int_value];
+            if(left->term!=IR_TERM_JUMP||left->target!=bi||
+               right->term!=IR_TERM_JUMP||right->target!=bi)return false;
+        }
+    }
+    return true;
+}
+
+static bool emit_phi_edge_copies(Code *c,const IRFunction *fn,uint32_t from,uint32_t to) {
+    if(to>=fn->block_count)return false;
+    const IRBlock *merge=&fn->blocks[to];
+    for(size_t ii=0;ii<merge->inst_count;ii++) {
+        const IRInst *phi=&merge->insts[ii];
+        if(phi->op!=IR_PHI)continue;
+        IRValue incoming;
+        if(phi->local==from)incoming=phi->a;
+        else if(phi->int_value>=0&&(uint64_t)phi->int_value==from)incoming=phi->b;
+        else return false;
+        if(!load_value(c,fn,incoming)||!store_value(c,fn,phi->result))return false;
+    }
+    return true;
+}
+
 static bool emit_function(Code *c,const IRFunction *fn) {
-    if(fn->is_extern||!fn->block_count||fn->local_count>UINT32_MAX-fn->next_value)return false;
+    if(fn->is_extern||!fn->block_count||fn->local_count>UINT32_MAX-fn->next_value||!validate_phis(fn))return false;
     uint64_t slots=(uint64_t)fn->next_value+fn->local_count;
     uint64_t frame=(slots*8+15)&~UINT64_C(15);
     if(frame>INT32_MAX)return false;
@@ -151,7 +186,8 @@ static bool emit_function(Code *c,const IRFunction *fn) {
         if(!ok)break;
         switch(b->term) {
         case IR_TERM_JUMP: {
-            ok=byte(c,0xe9);size_t at=c->len;ok=ok&&imm32(c,0)&&add_patch(patches,patch_cap,&patch_count,at,b->target);
+            ok=emit_phi_edge_copies(c,fn,(uint32_t)bi,b->target)&&byte(c,0xe9);
+            size_t at=c->len;ok=ok&&imm32(c,0)&&add_patch(patches,patch_cap,&patch_count,at,b->target);
             break;
         }
         case IR_TERM_BRANCH: {
@@ -220,7 +256,7 @@ static bool emit_elf(const IRModule *m,const char *path) {
     if(!ok)fprintf(stderr,"forge: cannot write executable '%s': %s\n",path,strerror(errno));
     free(image);free(code.data);return ok;
 unsupported:
-    fprintf(stderr,"forge: native ELF prototype supports integer constants, arithmetic, comparisons, integer locals and basic branches in `native main`\n");
+    fprintf(stderr,"forge: native ELF prototype supports integer constants, arithmetic, comparisons, locals, branches, loops and direct-edge phi values in `native main`\n");
     free(code.data);return false;
 }
 

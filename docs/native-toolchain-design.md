@@ -109,6 +109,6 @@ unknown result type.
 x86_64 ELF executable directly. It supports integer constants, arithmetic,
 comparisons, integer locals, and basic branches and loops, with no C compiler,
 assembler, linker or Forge runtime in that output path. Driver regressions run
-these programs with `--cc` set to a missing executable. Calls, phi nodes,
-object files, runtime linking, self-hosting and the remaining requested targets
-are still outstanding.
+these programs with `--cc` set to a missing executable. Function calls,
+general phi lowering across conditional edges, object files, runtime linking,
+self-hosting and the remaining requested targets are still outstanding.
