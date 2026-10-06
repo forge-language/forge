@@ -95,16 +95,14 @@ static bool emit_binary(Code *c,const IRFunction *fn,const IRInst *x) {
     return emit_disp(c,d)&&store_value(c,fn,x->result);
 }
 
-static bool emit_function(Code *c,const IRFunction *fn) {
-    if(fn->is_extern||fn->block_count!=1||fn->local_count>UINT32_MAX-fn->next_value)return false;
-    const IRBlock *b=&fn->blocks[0];
-    if(b->term!=IR_TERM_RETURN||!b->has_value||b->value==IR_NO_VALUE)return false;
-    uint64_t slots=(uint64_t)fn->next_value+fn->local_count;
-    uint64_t frame=(slots*8+15)&~UINT64_C(15);
-    if(frame>INT32_MAX)return false;
-    /* push rbp; mov rbp,rsp; sub rsp, aligned frame size */
-    if(!byte(c,0x55)||!byte(c,0x48)||!byte(c,0x89)||!byte(c,0xe5))return false;
-    if(frame && (!byte(c,0x48)||!byte(c,0x81)||!byte(c,0xec)||!imm32(c,(uint32_t)frame)))return false;
+typedef struct { size_t displacement_at; uint32_t target; } BranchPatch;
+
+static bool add_patch(BranchPatch *patches,size_t cap,size_t *count,size_t at,uint32_t target) {
+    if(*count>=cap)return false;
+    patches[(*count)++]=(BranchPatch){at,target};return true;
+}
+
+static bool emit_block_insts(Code *c,const IRFunction *fn,const IRBlock *b) {
     for(size_t i=0;i<b->inst_count;i++) {
         const IRInst *x=&b->insts[i];
         switch(x->op) {
@@ -129,8 +127,55 @@ static bool emit_function(Code *c,const IRFunction *fn) {
         default:return false;
         }
     }
-    if(!load_value(c,fn,b->value)||!byte(c,0xc9)||!byte(c,0xc3))return false;
     return true;
+}
+
+static bool emit_function(Code *c,const IRFunction *fn) {
+    if(fn->is_extern||!fn->block_count||fn->local_count>UINT32_MAX-fn->next_value)return false;
+    uint64_t slots=(uint64_t)fn->next_value+fn->local_count;
+    uint64_t frame=(slots*8+15)&~UINT64_C(15);
+    if(frame>INT32_MAX)return false;
+    /* push rbp; mov rbp,rsp; sub rsp, aligned frame size */
+    if(!byte(c,0x55)||!byte(c,0x48)||!byte(c,0x89)||!byte(c,0xe5))return false;
+    if(frame && (!byte(c,0x48)||!byte(c,0x81)||!byte(c,0xec)||!imm32(c,(uint32_t)frame)))return false;
+    size_t offset_bytes=fn->block_count*sizeof(size_t),patch_cap=fn->block_count*2;
+    size_t *block_offsets=malloc(offset_bytes);
+    BranchPatch *patches=calloc(patch_cap,sizeof(BranchPatch));
+    if(!block_offsets||!patches){free(block_offsets);free(patches);return false;}
+    size_t patch_count=0;
+    bool ok=true;
+    for(size_t bi=0;bi<fn->block_count&&ok;bi++) {
+        const IRBlock *b=&fn->blocks[bi];
+        block_offsets[bi]=c->len;
+        ok=emit_block_insts(c,fn,b);
+        if(!ok)break;
+        switch(b->term) {
+        case IR_TERM_JUMP: {
+            ok=byte(c,0xe9);size_t at=c->len;ok=ok&&imm32(c,0)&&add_patch(patches,patch_cap,&patch_count,at,b->target);
+            break;
+        }
+        case IR_TERM_BRANCH: {
+            ok=load_value(c,fn,b->value)&&byte(c,0x48)&&byte(c,0x85)&&byte(c,0xc0)&&byte(c,0x0f)&&byte(c,0x85);
+            size_t yes_at=c->len;ok=ok&&imm32(c,0)&&add_patch(patches,patch_cap,&patch_count,yes_at,b->target);
+            ok=ok&&byte(c,0xe9);size_t no_at=c->len;ok=ok&&imm32(c,0)&&add_patch(patches,patch_cap,&patch_count,no_at,b->target_false);
+            break;
+        }
+        case IR_TERM_RETURN:
+            if(b->has_value)ok=load_value(c,fn,b->value);
+            else ok=byte(c,0x31)&&byte(c,0xc0);
+            ok=ok&&byte(c,0xc9)&&byte(c,0xc3);
+            break;
+        case IR_TERM_NONE: default: ok=false;break;
+        }
+    }
+    for(size_t i=0;i<patch_count&&ok;i++) {
+        BranchPatch p=patches[i];
+        if(p.target>=fn->block_count){ok=false;break;}
+        int64_t rel=(int64_t)block_offsets[p.target]-(int64_t)(p.displacement_at+4);
+        if(rel<INT32_MIN||rel>INT32_MAX){ok=false;break;}
+        put32(c->data+p.displacement_at,(uint32_t)(int32_t)rel);
+    }
+    free(block_offsets);free(patches);return ok;
 }
 
 static bool write_all(int fd,const unsigned char *p,size_t n) {
@@ -175,7 +220,7 @@ static bool emit_elf(const IRModule *m,const char *path) {
     if(!ok)fprintf(stderr,"forge: cannot write executable '%s': %s\n",path,strerror(errno));
     free(image);free(code.data);return ok;
 unsupported:
-    fprintf(stderr,"forge: native ELF prototype supports integer constants, arithmetic, comparisons and integer locals in a single-block `native main`\n");
+    fprintf(stderr,"forge: native ELF prototype supports integer constants, arithmetic, comparisons, integer locals and basic branches in `native main`\n");
     free(code.data);return false;
 }
 

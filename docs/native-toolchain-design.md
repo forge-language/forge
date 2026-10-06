@@ -105,9 +105,10 @@ and struct/enum declarations are represented; process declarations and
 supervisors remain unsupported. Calls without visible signatures retain an
 unknown result type.
 
-`compiler/native.c` consumes a single-block integer `native main` and writes a
-Linux x86_64 ELF executable directly. It supports integer constants, arithmetic,
-comparisons and integer locals, and invokes no C compiler, assembler, linker or
-Forge runtime. The driver regression includes an execution check with a missing
-`--cc` path. General control flow, calls, object files, runtime linking,
-self-hosting and the remaining requested targets are still outstanding.
+`compiler/native.c` consumes a single-entry `native main` and writes a Linux
+x86_64 ELF executable directly. It supports integer constants, arithmetic,
+comparisons, integer locals, and basic branches and loops, with no C compiler,
+assembler, linker or Forge runtime in that output path. Driver regressions run
+these programs with `--cc` set to a missing executable. Calls, phi nodes,
+object files, runtime linking, self-hosting and the remaining requested targets
+are still outstanding.

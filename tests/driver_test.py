@@ -61,6 +61,8 @@ class DriverTest(unittest.TestCase):
             ('native main { return (100 - 16) / 2; }', 42),
             ('native main { return 89 % 47; }', 42),
             ('native main { let n: int = 8; return n == 8; }', 1),
+            ('native main { let n: int = 40; if (n < 42) { return 42; } else { return 1; } }', 42),
+            ('native main { let mut n: int = 0; while (n < 42) { n = n + 1; } return n; }', 42),
         ]
         for index, (source, expected) in enumerate(cases):
             with self.subTest(source=source):
