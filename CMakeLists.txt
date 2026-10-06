@@ -1,554 +1,160 @@
 cmake_minimum_required(VERSION 3.16)
 project(forge VERSION 0.3.0 LANGUAGES C)
-
 include(GNUInstallDirs)
-
+include(CTest)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS OFF)
-
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
 endif()
-
-option(FORGE_ENABLE_LTO "Enable link-time optimization for forge_std/runtime" OFF)
-
-include(CheckIPOSupported)
-check_ipo_supported(RESULT FORGE_IPO_SUPPORTED OUTPUT FORGE_IPO_ERROR)
-if(FORGE_ENABLE_LTO AND FORGE_IPO_SUPPORTED)
+option(FORGE_ENABLE_LTO "Enable link-time optimization" OFF)
+if(FORGE_ENABLE_LTO)
+    include(CheckIPOSupported)
+    check_ipo_supported(RESULT FORGE_IPO_SUPPORTED OUTPUT FORGE_IPO_ERROR)
+    if(NOT FORGE_IPO_SUPPORTED)
+        message(FATAL_ERROR "LTO unsupported: ${FORGE_IPO_ERROR}")
+    endif()
     set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
 endif()
-
 if(MSVC)
     add_compile_options(/W4)
 else()
     add_compile_options(-Wall -Wextra)
 endif()
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
+set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
+include(cmake/Dependencies.cmake)
 
-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
-set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
-set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
-
+# Assemble the build SDK from the two repositories' exported headers. Compiler
+# invocations and installed consumers use the same bin/include/lib layout.
+set(FORGE_ROOT_DIR "${CMAKE_BINARY_DIR}")
+set(FORGE_LIB_DIR "${CMAKE_BINARY_DIR}/lib")
+file(MAKE_DIRECTORY "${FORGE_ROOT_DIR}/include" "${CMAKE_BINARY_DIR}/generated")
+file(COPY "${forge_runtime_SOURCE_DIR}/include/" DESTINATION "${FORGE_ROOT_DIR}/include")
+file(COPY "${forge_stdlib_SOURCE_DIR}/include/" DESTINATION "${FORGE_ROOT_DIR}/include")
 set(FORGE_CC_ARGS --cc "${CMAKE_C_COMPILER}")
-set(FORGE_BOOTSTRAP_LINK -lforge_runtime -lforge_std -lforge_runtime -lforge_std -lm)
-if(NOT WIN32)
-    list(APPEND FORGE_BOOTSTRAP_LINK -pthread)
-else()
-    list(APPEND FORGE_BOOTSTRAP_LINK -lws2_32)
-endif()
+add_executable(forge compiler/main.c compiler/lexer.c compiler/parser.c
+    compiler/ast.c compiler/codegen.c compiler/codegen_js.c compiler/mod_registry.c
+    compiler/module_loader.c compiler/symbols.c compiler/optimize.c compiler/driver.c)
+target_include_directories(forge PRIVATE compiler "${FORGE_ROOT_DIR}/include")
+target_link_libraries(forge PRIVATE forge_runtime)
+install(TARGETS forge RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 
-option(FORGE_ENABLE_GPU "Enable OpenCL GPU stdlib (gpu module)" ON)
-option(FORGE_ENABLE_IO_URING "Enable io_uring HTTP serve mode (Linux)" ON)
-option(FORGE_ENABLE_TLS "Enable OpenSSL TLS HTTP (http_listen_tls)" ON)
-
-add_library(forge_std STATIC
-    stdlib/io.c
-    stdlib/string.c
-    stdlib/math.c
-    stdlib/time.c
-    stdlib/fs.c
-    stdlib/os.c
-    stdlib/tcp.c
-    stdlib/udp.c
-    stdlib/http.c
-    stdlib/http_uring.c
-    stdlib/http_tls.c
-    stdlib/http_routing.c
-    stdlib/json.c
-    stdlib/gpu.c
-    stdlib/threading.c
-    stdlib/process.c
-    stdlib/docstore.c
-    stdlib/lsprpc.c
-    runtime/arena.c
-)
-target_include_directories(forge_std PUBLIC include)
-if(NOT WIN32)
-    target_link_libraries(forge_std PUBLIC pthread)
-    target_compile_definitions(forge_std PRIVATE _GNU_SOURCE)
-endif()
-
-set(FORGE_LINK_EXTRAS "")
-
-if(FORGE_ENABLE_GPU)
-    find_package(OpenCL)
-    if(NOT OpenCL_FOUND)
-        find_path(OpenCL_INCLUDE_DIR NAMES CL/cl.h OpenCL/cl.h
-            PATHS "${CMAKE_SOURCE_DIR}/third_party/opencl")
-        find_library(OpenCL_LIBRARY NAMES OpenCL OpenCL.so.1)
-        if(OpenCL_INCLUDE_DIR AND OpenCL_LIBRARY)
-            set(OpenCL_FOUND TRUE)
-            set(OpenCL_INCLUDE_DIRS "${OpenCL_INCLUDE_DIR}")
-            set(OpenCL_LIBRARIES "${OpenCL_LIBRARY}")
-        endif()
-    endif()
-    if(OpenCL_FOUND)
-        message(STATUS "Forge GPU: OpenCL enabled (${OpenCL_LIBRARIES})")
-        target_compile_definitions(forge_std PRIVATE FORGE_HAS_OPENCL=1)
-        target_include_directories(forge_std PRIVATE ${OpenCL_INCLUDE_DIRS})
-        target_link_libraries(forge_std PUBLIC ${OpenCL_LIBRARIES})
-        list(APPEND FORGE_LINK_EXTRAS "${OpenCL_LIBRARIES}")
+include(cmake/ForgeLibrary.cmake)
+forge_add_library(greeting "${CMAKE_CURRENT_SOURCE_DIR}/libs/greeting/greeting.fg")
+forge_add_library(mathutil "${CMAKE_CURRENT_SOURCE_DIR}/libs/mathutil/mathutil.fg")
+file(GLOB FORGE_EXAMPLES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/examples/*.fg")
+foreach(example IN LISTS FORGE_EXAMPLES)
+    get_filename_component(name "${example}" NAME_WE)
+    if(name STREQUAL "use_library")
+        forge_add_executable(${name} "${example}"
+            EXTRA_ARGS -I "${CMAKE_BINARY_DIR}/generated/libs" -l forge_greeting -l forge_mathutil
+            EXTRA_DEPENDS forge_lib_greeting forge_lib_mathutil)
     else()
-        message(STATUS "Forge GPU: OpenCL not found — gpu module will report unavailable at runtime")
+        forge_add_executable(${name} "${example}")
     endif()
-endif()
-
-if(FORGE_ENABLE_IO_URING AND NOT WIN32)
-    find_path(LIBURING_INCLUDE_DIR NAMES liburing.h PATHS /usr/include /usr/local/include)
-    find_library(LIBURING_LIBRARY NAMES uring)
-    if(LIBURING_INCLUDE_DIR AND LIBURING_LIBRARY)
-        message(STATUS "Forge HTTP: io_uring enabled (${LIBURING_LIBRARY})")
-        target_compile_definitions(forge_std PRIVATE FORGE_HAS_IO_URING=1)
-        target_include_directories(forge_std PRIVATE ${LIBURING_INCLUDE_DIR})
-        target_link_libraries(forge_std PUBLIC ${LIBURING_LIBRARY})
-        list(APPEND FORGE_LINK_EXTRAS "${LIBURING_LIBRARY}")
-    else()
-        message(STATUS "Forge HTTP: io_uring not found — http_serve_uring falls back to epoll")
-    endif()
-endif()
-
-if(FORGE_ENABLE_TLS)
-    find_package(OpenSSL)
-    if(OpenSSL_FOUND)
-        message(STATUS "Forge HTTP: TLS enabled (${OPENSSL_SSL_LIBRARY})")
-        target_compile_definitions(forge_std PRIVATE FORGE_HAS_TLS=1)
-        target_include_directories(forge_std PRIVATE ${OPENSSL_INCLUDE_DIR})
-        target_link_libraries(forge_std PUBLIC OpenSSL::SSL OpenSSL::Crypto)
-        list(APPEND FORGE_LINK_EXTRAS "${OPENSSL_SSL_LIBRARY}" "${OPENSSL_CRYPTO_LIBRARY}")
-    else()
-        message(STATUS "Forge HTTP: OpenSSL not found — TLS falls back to plain HTTP")
-    endif()
-endif()
-
-if(FORGE_LINK_EXTRAS)
-    string(REPLACE ";" "\n" FORGE_LINK_CONTENT "${FORGE_LINK_EXTRAS}")
-    file(WRITE "${CMAKE_BINARY_DIR}/lib/forge.link" "${FORGE_LINK_CONTENT}\n")
-else()
-    file(WRITE "${CMAKE_BINARY_DIR}/lib/forge.link" "")
-endif()
-
-add_library(forge_runtime STATIC
-    runtime/runtime.c
-    runtime/scheduler.c
-    runtime/work_queue.c
-    runtime/event_loop.c
-    runtime/ownership.c
-    runtime/platform.c
-    runtime/thread.c
-)
-if(WIN32)
-    target_link_libraries(forge_runtime PUBLIC forge_std ws2_32)
-else()
-    target_link_libraries(forge_runtime PUBLIC forge_std pthread)
-endif()
-target_include_directories(forge_runtime PUBLIC include runtime)
-
-add_executable(forge
-    compiler/main.c
-    compiler/lexer.c
-    compiler/parser.c
-    compiler/ast.c
-    compiler/codegen.c
-    compiler/codegen_js.c
-    compiler/mod_registry.c
-    compiler/module_loader.c
-    compiler/symbols.c
-    compiler/optimize.c
-    compiler/driver.c
-)
-target_include_directories(forge PRIVATE include compiler)
-target_sources(forge PRIVATE runtime/platform.c)
-
-install(TARGETS forge
-    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
-)
-install(TARGETS forge_std forge_runtime
-    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
-)
-install(DIRECTORY include/forge DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
-install(FILES include/forge_runtime.h DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
-install(FILES "${CMAKE_BINARY_DIR}/lib/forge.link" DESTINATION ${CMAKE_INSTALL_LIBDIR} OPTIONAL)
-
-file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/generated")
-
-include(${CMAKE_SOURCE_DIR}/cmake/ForgeLibrary.cmake)
-
-forge_add_library(greeting "${CMAKE_SOURCE_DIR}/libs/greeting/greeting.fg")
-forge_add_library(mathutil "${CMAKE_SOURCE_DIR}/libs/mathutil/mathutil.fg")
-
-file(GLOB FORGE_EXAMPLES CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/examples/*.fg")
-
-set(FORGE_EXAMPLE_TARGETS "")
-foreach(example_file IN LISTS FORGE_EXAMPLES)
-    get_filename_component(example_name "${example_file}" NAME_WE)
-    if(example_name STREQUAL "use_library")
-        continue()
-    endif()
-    if(example_name STREQUAL "web_server")
-        continue()
-    endif()
-    set(gen_bin "${CMAKE_BINARY_DIR}/bin/${example_name}")
-
-    add_custom_command(
-        OUTPUT "${gen_bin}"
-        COMMAND forge "${example_file}" -o "${gen_bin}"
-            ${FORGE_CC_ARGS}
-            --forge-root "${CMAKE_SOURCE_DIR}" --lib-dir "${CMAKE_BINARY_DIR}/lib"
-        DEPENDS forge forge_runtime forge_std "${example_file}"
-        COMMENT "Compiling ${example_name}.fg (native)"
-        VERBATIM
-    )
-    add_custom_target("${example_name}" DEPENDS "${gen_bin}")
-    list(APPEND FORGE_EXAMPLE_TARGETS "${example_name}")
+    list(APPEND FORGE_EXAMPLE_TARGETS ${name})
 endforeach()
+add_custom_target(examples DEPENDS ${FORGE_EXAMPLE_TARGETS})
 
-set(gen_use_lib "${CMAKE_BINARY_DIR}/bin/use_library")
-add_custom_command(
-    OUTPUT "${gen_use_lib}"
-    COMMAND forge "${CMAKE_SOURCE_DIR}/examples/use_library.fg" -o "${gen_use_lib}"
-        ${FORGE_CC_ARGS}
-        --forge-root "${CMAKE_SOURCE_DIR}" --lib-dir "${CMAKE_BINARY_DIR}/lib"
-        -I "${CMAKE_BINARY_DIR}/generated/libs"
-        -l forge_greeting -l forge_mathutil
-    DEPENDS forge forge_runtime forge_std forge_lib_greeting forge_lib_mathutil "${CMAKE_SOURCE_DIR}/examples/use_library.fg"
-    COMMENT "Compiling use_library.fg (native)"
-    VERBATIM
-)
-add_custom_target(use_library DEPENDS "${gen_use_lib}")
-list(APPEND FORGE_EXAMPLE_TARGETS use_library)
-
-if(FORGE_EXAMPLE_TARGETS)
-    add_custom_target(examples ALL DEPENDS ${FORGE_EXAMPLE_TARGETS})
-endif()
-
-# Self-hosted compiler bootstrap (stage0 C forge -> stage1 -> stage2)
-set(FORGE_BOOTSTRAP_SRC "${CMAKE_SOURCE_DIR}/bootstrap/compiler.fg")
+set(FORGE_BOOTSTRAP_SRC "${CMAKE_CURRENT_SOURCE_DIR}/bootstrap/compiler.fg")
 set(FORGE_STAGE1_BIN "${CMAKE_BINARY_DIR}/bin/forge-stage1")
 set(FORGE_STAGE2_C "${CMAKE_BINARY_DIR}/generated/forge-stage2.c")
 set(FORGE_STAGE2_BIN "${CMAKE_BINARY_DIR}/bin/forge-stage2")
-
-add_custom_command(
-    OUTPUT "${FORGE_STAGE1_BIN}"
+set(FORGE_BOOTSTRAP_LINK -lforge_std -lforge_runtime -lm)
+if(WIN32)
+    list(APPEND FORGE_BOOTSTRAP_LINK -lws2_32)
+else()
+    list(APPEND FORGE_BOOTSTRAP_LINK -pthread)
+endif()
+add_custom_command(OUTPUT "${FORGE_STAGE1_BIN}"
     COMMAND forge "${FORGE_BOOTSTRAP_SRC}" -o "${FORGE_STAGE1_BIN}"
-        ${FORGE_CC_ARGS}
-        --forge-root "${CMAKE_SOURCE_DIR}" --lib-dir "${CMAKE_BINARY_DIR}/lib"
-    DEPENDS forge forge_runtime forge_std "${FORGE_BOOTSTRAP_SRC}"
-    COMMENT "Bootstrap stage1: C forge compiles compiler.fg"
-    VERBATIM
-)
-
+        ${FORGE_CC_ARGS} --forge-root "${FORGE_ROOT_DIR}" --lib-dir "${FORGE_LIB_DIR}"
+    DEPENDS forge forge_runtime forge_std "${FORGE_BOOTSTRAP_SRC}" VERBATIM)
 add_custom_target(forge-stage1 DEPENDS "${FORGE_STAGE1_BIN}")
-
-add_custom_command(
-    OUTPUT "${FORGE_STAGE2_BIN}"
+add_custom_command(OUTPUT "${FORGE_STAGE2_BIN}"
     COMMAND "${FORGE_STAGE1_BIN}" "${FORGE_BOOTSTRAP_SRC}" -o "${FORGE_STAGE2_C}"
-    COMMAND ${CMAKE_C_COMPILER} -std=c11 -O3
-        "-I${CMAKE_SOURCE_DIR}/include"
-        "${FORGE_STAGE2_C}"
-        -o "${FORGE_STAGE2_BIN}"
-        "-L${CMAKE_BINARY_DIR}/lib"
-        ${FORGE_BOOTSTRAP_LINK}
-    DEPENDS forge-stage1 "${FORGE_STAGE1_BIN}" forge_std forge_runtime "${FORGE_BOOTSTRAP_SRC}"
-    COMMENT "Bootstrap stage2: self-hosted compiler compiles itself"
-    VERBATIM
-)
-
+    COMMAND ${CMAKE_C_COMPILER} -std=c11 -O3 "-I${FORGE_ROOT_DIR}/include"
+        "${FORGE_STAGE2_C}" -o "${FORGE_STAGE2_BIN}" "-L${FORGE_LIB_DIR}" ${FORGE_BOOTSTRAP_LINK}
+    DEPENDS forge-stage1 forge_std forge_runtime "${FORGE_BOOTSTRAP_SRC}" VERBATIM)
 add_custom_target(forge-selfhost ALL DEPENDS "${FORGE_STAGE2_BIN}")
-
-# Self-hosted compiler compiles match.fg to C (bootstrap verification)
-set(FORGE_SELFHOST_TEST_C "${CMAKE_BINARY_DIR}/generated/selfhost_match.c")
-add_custom_command(
-    OUTPUT "${FORGE_SELFHOST_TEST_C}"
-    COMMAND "${FORGE_STAGE2_BIN}" "${CMAKE_SOURCE_DIR}/examples/match.fg"
-        -o "${FORGE_SELFHOST_TEST_C}"
-    DEPENDS forge-selfhost "${FORGE_STAGE2_BIN}" "${CMAKE_SOURCE_DIR}/examples/match.fg"
-    COMMENT "Self-host test: stage2 compiles match.fg"
-    VERBATIM
-)
-add_custom_target(forge-selfhost-test DEPENDS "${FORGE_SELFHOST_TEST_C}")
-
-set(FORGE_SELFHOST_CONTROL_C "${CMAKE_BINARY_DIR}/generated/selfhost_control_flow.c")
-add_custom_command(
-    OUTPUT "${FORGE_SELFHOST_CONTROL_C}"
-    COMMAND "${FORGE_STAGE2_BIN}" "${CMAKE_SOURCE_DIR}/examples/control_flow.fg"
-        -o "${FORGE_SELFHOST_CONTROL_C}"
-    DEPENDS forge-selfhost "${FORGE_STAGE2_BIN}" "${CMAKE_SOURCE_DIR}/examples/control_flow.fg"
-    COMMENT "Self-host test: stage2 compiles control_flow.fg"
-    VERBATIM
-)
-add_custom_target(forge-selfhost-control DEPENDS "${FORGE_SELFHOST_CONTROL_C}")
-
-# Fixed-point check: stage2 output recompiles to identical stage3 output
+foreach(name IN ITEMS match control_flow)
+    set(output "${CMAKE_BINARY_DIR}/generated/selfhost_${name}.c")
+    add_custom_command(OUTPUT "${output}"
+        COMMAND "${FORGE_STAGE2_BIN}" "${CMAKE_CURRENT_SOURCE_DIR}/examples/${name}.fg" -o "${output}"
+        DEPENDS forge-selfhost "${CMAKE_CURRENT_SOURCE_DIR}/examples/${name}.fg" VERBATIM)
+    if(name STREQUAL "match")
+        add_custom_target(forge-selfhost-test DEPENDS "${output}")
+    else()
+        add_custom_target(forge-selfhost-control DEPENDS "${output}")
+    endif()
+endforeach()
 set(FORGE_STAGE3_C "${CMAKE_BINARY_DIR}/generated/forge-stage3.c")
 set(FORGE_STAGE3_BIN "${CMAKE_BINARY_DIR}/bin/forge-stage3")
 set(FORGE_STAGE4_C "${CMAKE_BINARY_DIR}/generated/forge-stage4.c")
-add_custom_command(
-    OUTPUT "${FORGE_STAGE4_C}"
+add_custom_command(OUTPUT "${FORGE_STAGE4_C}"
     COMMAND "${FORGE_STAGE2_BIN}" "${FORGE_BOOTSTRAP_SRC}" -o "${FORGE_STAGE3_C}"
-    COMMAND ${CMAKE_C_COMPILER} -std=c11 -O3
-        "-I${CMAKE_SOURCE_DIR}/include"
-        "${FORGE_STAGE3_C}"
-        -o "${FORGE_STAGE3_BIN}"
-        "-L${CMAKE_BINARY_DIR}/lib"
-        ${FORGE_BOOTSTRAP_LINK}
+    COMMAND ${CMAKE_C_COMPILER} -std=c11 -O3 "-I${FORGE_ROOT_DIR}/include"
+        "${FORGE_STAGE3_C}" -o "${FORGE_STAGE3_BIN}" "-L${FORGE_LIB_DIR}" ${FORGE_BOOTSTRAP_LINK}
     COMMAND "${FORGE_STAGE3_BIN}" "${FORGE_BOOTSTRAP_SRC}" -o "${FORGE_STAGE4_C}"
     COMMAND ${CMAKE_COMMAND} -E compare_files "${FORGE_STAGE3_C}" "${FORGE_STAGE4_C}"
-    DEPENDS forge-selfhost "${FORGE_STAGE2_BIN}" forge_std forge_runtime "${FORGE_BOOTSTRAP_SRC}"
-    COMMENT "Self-host verify: stage3 recompiles compiler.fg to identical output"
-    VERBATIM
-)
+    DEPENDS forge-selfhost forge_std forge_runtime "${FORGE_BOOTSTRAP_SRC}" VERBATIM)
 add_custom_target(forge-selfhost-verify DEPENDS "${FORGE_STAGE4_C}")
 
-# Benchmark HTTP server (Forge)
-set(FORGE_BENCH_SRC "${CMAKE_SOURCE_DIR}/benchmark/forge/bench_server.fg")
-set(FORGE_BENCH_BIN "${CMAKE_BINARY_DIR}/bin/bench_server")
-add_custom_command(
-    OUTPUT "${FORGE_BENCH_BIN}"
-    COMMAND forge "${FORGE_BENCH_SRC}" -o "${FORGE_BENCH_BIN}"
-        ${FORGE_CC_ARGS}
-        --forge-root "${CMAKE_SOURCE_DIR}" --lib-dir "${CMAKE_BINARY_DIR}/lib"
-    DEPENDS forge forge_runtime forge_std "${FORGE_BENCH_SRC}"
-    COMMENT "Compiling bench_server.fg (native)"
-    VERBATIM
-)
-add_custom_target(bench_server DEPENDS "${FORGE_BENCH_BIN}")
-list(APPEND FORGE_BENCH_TARGETS bench_server)
-
-set(FORGE_BENCH_HYBRID_SRC "${CMAKE_SOURCE_DIR}/benchmark/forge/bench_hybrid_server.fg")
-set(FORGE_BENCH_HYBRID_BIN "${CMAKE_BINARY_DIR}/bin/bench_hybrid_server")
-add_custom_command(
-    OUTPUT "${FORGE_BENCH_HYBRID_BIN}"
-    COMMAND forge "${FORGE_BENCH_HYBRID_SRC}" -o "${FORGE_BENCH_HYBRID_BIN}"
-        ${FORGE_CC_ARGS}
-        --forge-root "${CMAKE_SOURCE_DIR}" --lib-dir "${CMAKE_BINARY_DIR}/lib"
-    DEPENDS forge forge_runtime forge_std "${FORGE_BENCH_HYBRID_SRC}"
-    COMMENT "Compiling bench_hybrid_server.fg (native)"
-    VERBATIM
-)
-add_custom_target(bench_hybrid_server DEPENDS "${FORGE_BENCH_HYBRID_BIN}")
-list(APPEND FORGE_BENCH_TARGETS bench_hybrid_server)
-
-set(FORGE_BENCH_CORO_SRC "${CMAKE_SOURCE_DIR}/benchmark/forge/bench_coro.fg")
-set(FORGE_BENCH_CORO_BIN "${CMAKE_BINARY_DIR}/bin/bench_coro")
-add_custom_command(
-    OUTPUT "${FORGE_BENCH_CORO_BIN}"
-    COMMAND forge "${FORGE_BENCH_CORO_SRC}" -o "${FORGE_BENCH_CORO_BIN}"
-        ${FORGE_CC_ARGS}
-        --forge-root "${CMAKE_SOURCE_DIR}" --lib-dir "${CMAKE_BINARY_DIR}/lib"
-    DEPENDS forge forge_runtime forge_std "${FORGE_BENCH_CORO_SRC}"
-    COMMENT "Compiling bench_coro.fg (process)"
-    VERBATIM
-)
-add_custom_target(bench_coro DEPENDS "${FORGE_BENCH_CORO_BIN}")
-list(APPEND FORGE_BENCH_TARGETS bench_coro)
-
-set(FORGE_BENCH_SENDFILE_SRC "${CMAKE_SOURCE_DIR}/benchmark/forge/bench_sendfile_server.fg")
-set(FORGE_BENCH_SENDFILE_BIN "${CMAKE_BINARY_DIR}/bin/bench_sendfile_server")
-add_custom_command(
-    OUTPUT "${FORGE_BENCH_SENDFILE_BIN}"
-    COMMAND forge "${FORGE_BENCH_SENDFILE_SRC}" -o "${FORGE_BENCH_SENDFILE_BIN}"
-        ${FORGE_CC_ARGS}
-        --forge-root "${CMAKE_SOURCE_DIR}" --lib-dir "${CMAKE_BINARY_DIR}/lib"
-    DEPENDS forge forge_runtime "${FORGE_BENCH_SENDFILE_SRC}"
-    COMMENT "Compiling bench_sendfile_server.fg (native)"
-    VERBATIM
-)
-add_custom_target(bench_sendfile_server DEPENDS "${FORGE_BENCH_SENDFILE_BIN}")
-list(APPEND FORGE_BENCH_TARGETS bench_sendfile_server)
-
-set(FORGE_BENCH_URING_SRC "${CMAKE_SOURCE_DIR}/benchmark/forge/bench_uring_server.fg")
-set(FORGE_BENCH_URING_BIN "${CMAKE_BINARY_DIR}/bin/bench_uring_server")
-add_custom_command(
-    OUTPUT "${FORGE_BENCH_URING_BIN}"
-    COMMAND forge "${FORGE_BENCH_URING_SRC}" -o "${FORGE_BENCH_URING_BIN}"
-        ${FORGE_CC_ARGS}
-        --forge-root "${CMAKE_SOURCE_DIR}" --lib-dir "${CMAKE_BINARY_DIR}/lib"
-    DEPENDS forge forge_runtime "${FORGE_BENCH_URING_SRC}"
-    COMMENT "Compiling bench_uring_server.fg (native)"
-    VERBATIM
-)
-add_custom_target(bench_uring_server DEPENDS "${FORGE_BENCH_URING_BIN}")
-list(APPEND FORGE_BENCH_TARGETS bench_uring_server)
-
-set(FORGE_BENCH_TLS_SRC "${CMAKE_SOURCE_DIR}/benchmark/forge/bench_tls_server.fg")
-set(FORGE_BENCH_TLS_BIN "${CMAKE_BINARY_DIR}/bin/bench_tls_server")
-add_custom_command(
-    OUTPUT "${FORGE_BENCH_TLS_BIN}"
-    COMMAND forge "${FORGE_BENCH_TLS_SRC}" -o "${FORGE_BENCH_TLS_BIN}"
-        ${FORGE_CC_ARGS}
-        --forge-root "${CMAKE_SOURCE_DIR}" --lib-dir "${CMAKE_BINARY_DIR}/lib"
-    DEPENDS forge forge_runtime "${FORGE_BENCH_TLS_SRC}"
-    COMMENT "Compiling bench_tls_server.fg (native)"
-    VERBATIM
-)
-add_custom_target(bench_tls_server DEPENDS "${FORGE_BENCH_TLS_BIN}")
-list(APPEND FORGE_BENCH_TARGETS bench_tls_server)
-
-set(FORGE_BENCH_ROUTING_SRC "${CMAKE_SOURCE_DIR}/benchmark/forge/bench_routing_server.fg")
-set(FORGE_BENCH_ROUTING_BIN "${CMAKE_BINARY_DIR}/bin/bench_routing_server")
-add_custom_command(
-    OUTPUT "${FORGE_BENCH_ROUTING_BIN}"
-    COMMAND forge "${FORGE_BENCH_ROUTING_SRC}" -o "${FORGE_BENCH_ROUTING_BIN}"
-        ${FORGE_CC_ARGS}
-        --forge-root "${CMAKE_SOURCE_DIR}" --lib-dir "${CMAKE_BINARY_DIR}/lib"
-    DEPENDS forge forge_runtime "${FORGE_BENCH_ROUTING_SRC}"
-    COMMENT "Compiling bench_routing_server.fg (native)"
-    VERBATIM
-)
-add_custom_target(bench_routing_server DEPENDS "${FORGE_BENCH_ROUTING_BIN}")
-list(APPEND FORGE_BENCH_TARGETS bench_routing_server)
-
-if(FORGE_BENCH_TARGETS)
-    add_custom_target(benchmarks DEPENDS ${FORGE_BENCH_TARGETS})
-endif()
-
-# Simple web server example (native main, port 8080)
-set(FORGE_WEB_SRC "${CMAKE_SOURCE_DIR}/examples/web_server.fg")
-set(FORGE_WEB_BIN "${CMAKE_BINARY_DIR}/bin/web_server")
-add_custom_command(
-    OUTPUT "${FORGE_WEB_BIN}"
-    COMMAND forge "${FORGE_WEB_SRC}" -o "${FORGE_WEB_BIN}"
-        ${FORGE_CC_ARGS}
-        --forge-root "${CMAKE_SOURCE_DIR}" --lib-dir "${CMAKE_BINARY_DIR}/lib"
-    DEPENDS forge forge_runtime forge_std "${FORGE_WEB_SRC}"
-    COMMENT "Compiling web_server.fg (native)"
-    VERBATIM
-)
-add_custom_target(web_server DEPENDS "${FORGE_WEB_BIN}")
-
-# Install the CMake package config so external, out-of-tree projects can
-# find_package(Forge) and use forge_add_library/forge_add_executable
-# (see cmake/ForgeLibrary.cmake and cmake/ForgeConfig.cmake.in) against an
-# installed toolchain instead of this repo's build tree.
 install(FILES cmake/ForgeLibrary.cmake DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/Forge)
-
 include(CMakePackageConfigHelpers)
-write_basic_package_version_file(
-    "${CMAKE_CURRENT_BINARY_DIR}/ForgeConfigVersion.cmake"
-    VERSION ${PROJECT_VERSION}
-    COMPATIBILITY SameMajorVersion
-)
-configure_package_config_file(
-    cmake/ForgeConfig.cmake.in
+write_basic_package_version_file("${CMAKE_CURRENT_BINARY_DIR}/ForgeConfigVersion.cmake"
+    VERSION ${PROJECT_VERSION} COMPATIBILITY SameMajorVersion)
+configure_package_config_file(cmake/ForgeConfig.cmake.in
     "${CMAKE_CURRENT_BINARY_DIR}/ForgeConfig.cmake"
     INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/Forge
-    PATH_VARS CMAKE_INSTALL_BINDIR CMAKE_INSTALL_LIBDIR CMAKE_INSTALL_INCLUDEDIR
-)
-install(FILES
-    "${CMAKE_CURRENT_BINARY_DIR}/ForgeConfig.cmake"
+    PATH_VARS CMAKE_INSTALL_BINDIR CMAKE_INSTALL_LIBDIR CMAKE_INSTALL_INCLUDEDIR)
+install(FILES "${CMAKE_CURRENT_BINARY_DIR}/ForgeConfig.cmake"
     "${CMAKE_CURRENT_BINARY_DIR}/ForgeConfigVersion.cmake"
-    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/Forge
-)
-
-# Forge-native LSP server (self-hosted, used by editors/vscode, Claude Code's LSP tool,
-# and the Neovim/Vim plugins under editors/)
-set(FORGE_LSP_SRC "${CMAKE_SOURCE_DIR}/tools/forge-lsp/main.fg")
-set(FORGE_LSP_BIN "${CMAKE_BINARY_DIR}/bin/forge-lsp")
-add_custom_command(
-    OUTPUT "${FORGE_LSP_BIN}"
-    COMMAND forge "${FORGE_LSP_SRC}" -o "${FORGE_LSP_BIN}"
-        ${FORGE_CC_ARGS}
-        --forge-root "${CMAKE_SOURCE_DIR}" --lib-dir "${CMAKE_BINARY_DIR}/lib"
-    DEPENDS forge forge_runtime forge_std "${FORGE_LSP_SRC}"
-    COMMENT "Compiling forge-lsp (native LSP server)"
-    VERBATIM
-)
-add_custom_target(forge-lsp ALL DEPENDS "${FORGE_LSP_BIN}")
-
-include(CTest)
-if(BUILD_TESTING)
-    add_executable(optimizer_test tests/optimizer_test.c compiler/ast.c compiler/optimize.c)
-    target_include_directories(optimizer_test PRIVATE compiler)
-    add_test(NAME optimizer_regressions COMMAND optimizer_test)
-
-    add_executable(arena_test tests/arena_test.c runtime/arena.c)
-    target_include_directories(arena_test PRIVATE include)
-    add_test(NAME arena_regressions COMMAND arena_test)
-
-    add_executable(work_queue_test tests/work_queue_test.c)
-    target_include_directories(work_queue_test PRIVATE runtime)
-    target_link_libraries(work_queue_test PRIVATE forge_runtime)
-    add_test(NAME work_queue_regressions COMMAND work_queue_test)
-    set_tests_properties(work_queue_regressions PROPERTIES TIMEOUT 30)
-
-    add_executable(string_test tests/string_test.c)
-    target_link_libraries(string_test PRIVATE forge_runtime)
-    add_test(NAME string_regressions COMMAND string_test)
-
-    add_executable(os_test tests/os_test.c)
-    target_link_libraries(os_test PRIVATE forge_std)
-    add_test(NAME os_regressions COMMAND os_test)
-    set_tests_properties(os_regressions PROPERTIES TIMEOUT 30)
-
-    add_executable(fs_test tests/fs_test.c)
-    # Organization fs_temp_path delegates to the runtime platform helper.
-    target_link_libraries(fs_test PRIVATE forge_std forge_runtime)
-    add_test(NAME filesystem_regressions COMMAND fs_test)
-
-    if(UNIX)
-        add_executable(scheduler_test tests/scheduler_test.c)
-        target_link_libraries(scheduler_test PRIVATE forge_runtime)
-        if(NOT MSVC)
-            target_compile_options(scheduler_test PRIVATE -UNDEBUG)
-        endif()
-        add_test(NAME scheduler_regressions COMMAND scheduler_test)
-        set_tests_properties(scheduler_regressions PROPERTIES TIMEOUT 30)
-    endif()
-
-    foreach(test_target optimizer_test arena_test work_queue_test string_test os_test)
-        if(MSVC)
-            target_compile_options(${test_target} PRIVATE /UNDEBUG)
-        else()
-            target_compile_options(${test_target} PRIVATE -UNDEBUG)
-        endif()
-    endforeach()
-
-    find_package(Python3 COMPONENTS Interpreter)
-    if(Python3_Interpreter_FOUND)
-        add_test(NAME module_merge_regressions
-            COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/module_merge_test.py"
-                "$<TARGET_FILE:forge>")
-        add_test(NAME compiler_regressions
-            COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/compiler_test.py"
-                --forge "$<TARGET_FILE:forge>" --root "${CMAKE_SOURCE_DIR}"
-                --lib-dir "${CMAKE_BINARY_DIR}/lib" --cc "${CMAKE_C_COMPILER}")
-        set_tests_properties(compiler_regressions PROPERTIES TIMEOUT 120)
-        if(UNIX)
-            add_test(NAME organization_integration_regressions
-                COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/org_integration_test.py"
-                    --forge "$<TARGET_FILE:forge>" --root "${CMAKE_SOURCE_DIR}"
-                    --lib-dir "${CMAKE_BINARY_DIR}/lib" --cc "${CMAKE_C_COMPILER}"
-                    --lsp "${FORGE_LSP_BIN}")
-            set_tests_properties(organization_integration_regressions PROPERTIES TIMEOUT 120)
-        endif()
-        add_test(NAME driver_regressions
-            COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/driver_test.py"
-                --forge "$<TARGET_FILE:forge>" --root "${CMAKE_SOURCE_DIR}"
-                --lib-dir "${CMAKE_BINARY_DIR}/lib" --cc "${CMAKE_C_COMPILER}")
-        add_test(NAME selfhost_regressions
-            COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/selfhost_test.py"
-                --forge "${FORGE_STAGE2_BIN}" --root "${CMAKE_SOURCE_DIR}"
-                --lib-dir "${CMAKE_BINARY_DIR}/lib" --cc "${CMAKE_C_COMPILER}")
-        set_tests_properties(driver_regressions selfhost_regressions PROPERTIES TIMEOUT 120)
-        find_program(FORGE_NODE node)
-        if(FORGE_NODE)
-            add_test(NAME javascript_regressions COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/js_test.py" "$<TARGET_FILE:forge>")
-        endif()
-    endif()
-endif()
-
-add_executable(work_queue_bench EXCLUDE_FROM_ALL benchmark/work_queue_bench.c)
-target_include_directories(work_queue_bench PRIVATE runtime)
-target_link_libraries(work_queue_bench PRIVATE forge_runtime)
-
-add_executable(string_bench EXCLUDE_FROM_ALL benchmark/string_bench.c)
-target_link_libraries(string_bench PRIVATE forge_runtime)
-
-if(UNIX)
-    add_executable(scheduler_bench EXCLUDE_FROM_ALL benchmark/scheduler_bench.c)
-    target_link_libraries(scheduler_bench PRIVATE forge_runtime)
-endif()
-
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/Forge)
 install(PROGRAMS "${FORGE_STAGE2_BIN}" DESTINATION ${CMAKE_INSTALL_BINDIR} RENAME forge-fg OPTIONAL)
 install(FILES bootstrap/compiler.fg DESTINATION ${CMAKE_INSTALL_DATADIR}/forge/bootstrap)
 install(FILES LICENSE DESTINATION ${CMAKE_INSTALL_DATADIR}/forge)
+
+if(BUILD_TESTING)
+    add_executable(optimizer_test tests/optimizer_test.c compiler/ast.c compiler/optimize.c)
+    add_executable(parser_test tests/parser_test.c compiler/parser.c compiler/lexer.c compiler/ast.c)
+    foreach(name IN ITEMS optimizer parser)
+        target_include_directories(${name}_test PRIVATE compiler)
+        if(MSVC)
+            target_compile_options(${name}_test PRIVATE /UNDEBUG)
+        else()
+            target_compile_options(${name}_test PRIVATE -UNDEBUG)
+        endif()
+        add_test(NAME ${name}_regressions COMMAND ${name}_test)
+    endforeach()
+    find_package(Python3 COMPONENTS Interpreter)
+    if(Python3_Interpreter_FOUND)
+        add_test(NAME module_merge_regressions COMMAND "${Python3_EXECUTABLE}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/module_merge_test.py" "$<TARGET_FILE:forge>")
+        foreach(name IN ITEMS compiler driver selfhost org_integration)
+            if(name STREQUAL "org_integration" AND NOT UNIX)
+                continue()
+            endif()
+            if(name STREQUAL "selfhost")
+                set(test_compiler "${FORGE_STAGE2_BIN}")
+                set(extra_args --source-root "${CMAKE_CURRENT_SOURCE_DIR}")
+            else()
+                set(test_compiler "$<TARGET_FILE:forge>")
+                set(extra_args "")
+            endif()
+            add_test(NAME ${name}_regressions COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/${name}_test.py"
+                --forge "${test_compiler}" --root "${FORGE_ROOT_DIR}"
+                --lib-dir "${FORGE_LIB_DIR}" --cc "${CMAKE_C_COMPILER}" ${extra_args})
+            set_tests_properties(${name}_regressions PROPERTIES TIMEOUT 120)
+        endforeach()
+        find_program(FORGE_NODE node)
+        if(FORGE_NODE)
+            add_test(NAME javascript_regressions COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/js_test.py" "$<TARGET_FILE:forge>")
+        endif()
+    endif()
+endif()

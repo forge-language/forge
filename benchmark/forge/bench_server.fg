@@ -1,9 +1,0 @@
-// Benchmark: one REUSEPORT accept worker per CPU core (threads=0 → auto)
-
-import http;
-
-native main {
-    let server: int = http_listen(19080);
-    http_prepare(server, "Hello, World");
-    http_serve_mt(server, 0);
-}

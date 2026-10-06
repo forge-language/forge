@@ -6,12 +6,9 @@
 .vscode
 .env
 .env.*
-build
-build-opt
+build*
 **/node_modules
 **/target
 **/__pycache__
 **/*.pyc
 **/.venv
-benchmark/results.txt
-benchmark/scheduler_results.txt

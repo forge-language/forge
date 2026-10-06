@@ -1,52 +1,28 @@
 @PACKAGE_INIT@
-
+include(CMakeFindDependencyMacro)
+find_dependency(ForgeRuntime 0.3 CONFIG)
+find_dependency(ForgeStd 0.3 CONFIG)
 set_and_check(FORGE_ROOT_DIR "${PACKAGE_PREFIX_DIR}")
 set_and_check(FORGE_BIN_DIR "@PACKAGE_CMAKE_INSTALL_BINDIR@")
 set_and_check(FORGE_LIB_DIR "@PACKAGE_CMAKE_INSTALL_LIBDIR@")
 set_and_check(FORGE_INCLUDE_DIR "@PACKAGE_CMAKE_INSTALL_INCLUDEDIR@")
-
 if(NOT TARGET Forge::forge)
     add_executable(Forge::forge IMPORTED)
-    set_target_properties(Forge::forge PROPERTIES
-        IMPORTED_LOCATION "${FORGE_BIN_DIR}/forge${CMAKE_EXECUTABLE_SUFFIX}")
+    set_target_properties(Forge::forge PROPERTIES IMPORTED_LOCATION "${FORGE_BIN_DIR}/forge${CMAKE_EXECUTABLE_SUFFIX}")
 endif()
-
-if(NOT TARGET Forge::forge_std)
-    add_library(Forge::forge_std STATIC IMPORTED)
-    set_target_properties(Forge::forge_std PROPERTIES
-        IMPORTED_LOCATION "${FORGE_LIB_DIR}/${CMAKE_STATIC_LIBRARY_PREFIX}forge_std${CMAKE_STATIC_LIBRARY_SUFFIX}"
-        INTERFACE_INCLUDE_DIRECTORIES "${FORGE_INCLUDE_DIR}"
-        # stdlib fs/thread helpers call runtime platform/scheduler functions.
-        # Declare the static cycle so CMake repeats both archives for consumers.
-        INTERFACE_LINK_LIBRARIES Forge::forge_runtime)
-    if(NOT WIN32)
-        set_property(TARGET Forge::forge_std APPEND PROPERTY INTERFACE_LINK_LIBRARIES pthread)
-    endif()
-endif()
-
 if(NOT TARGET Forge::forge_runtime)
-    add_library(Forge::forge_runtime STATIC IMPORTED)
-    set_target_properties(Forge::forge_runtime PROPERTIES
-        IMPORTED_LOCATION "${FORGE_LIB_DIR}/${CMAKE_STATIC_LIBRARY_PREFIX}forge_runtime${CMAKE_STATIC_LIBRARY_SUFFIX}"
-        INTERFACE_INCLUDE_DIRECTORIES "${FORGE_INCLUDE_DIR}"
-        INTERFACE_LINK_LIBRARIES Forge::forge_std)
-    if(WIN32)
-        set_property(TARGET Forge::forge_runtime APPEND PROPERTY INTERFACE_LINK_LIBRARIES ws2_32)
-    else()
-        set_property(TARGET Forge::forge_runtime APPEND PROPERTY INTERFACE_LINK_LIBRARIES pthread)
-    endif()
+    add_library(Forge::forge_runtime INTERFACE IMPORTED)
+    set_property(TARGET Forge::forge_runtime PROPERTY INTERFACE_LINK_LIBRARIES ForgeRuntime::runtime)
 endif()
-
-# Variables consumed by ForgeLibrary.cmake (forge_add_library / forge_add_executable).
+if(NOT TARGET Forge::forge_std)
+    add_library(Forge::forge_std INTERFACE IMPORTED)
+    set_property(TARGET Forge::forge_std PROPERTY INTERFACE_LINK_LIBRARIES ForgeStd::stdlib)
+endif()
 set(FORGE_EXECUTABLE Forge::forge)
 set(FORGE_RUNTIME_TARGET Forge::forge_runtime)
 set(FORGE_BUILD_DEPS Forge::forge Forge::forge_runtime Forge::forge_std)
 if(CMAKE_C_COMPILER)
     set(FORGE_CC_ARGS --cc "${CMAKE_C_COMPILER}")
-else()
-    set(FORGE_CC_ARGS "")
 endif()
-
 include("${CMAKE_CURRENT_LIST_DIR}/ForgeLibrary.cmake")
-
 check_required_components(Forge)

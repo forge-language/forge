@@ -24,7 +24,7 @@ class ModuleMergeTest(unittest.TestCase):
             (root / 'main.fg').write_text('import large; native main { println(large.first()); return 0; }')
             result = subprocess.run([str(FORGE), str(root / 'main.fg'),
                                      '-o', str(root / 'main'), '--forge-root',
-                                     str(pathlib.Path(__file__).resolve().parents[1]),
+                                     str(FORGE.parent.parent),
                                      '--lib-dir', str(FORGE.parent.parent / 'lib')],
                                     capture_output=True, text=True, timeout=30)
             self.assertEqual(result.returncode, 0, result.stderr)

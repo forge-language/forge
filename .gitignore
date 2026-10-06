@@ -1,67 +1,20 @@
-# Build
-build/
+# Generated builds and local tooling state
+/build*/
 *.o
 *.a
-
-# OMC agent local state
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
 .omc/
-
-# Editor (keep shared workspace settings visible)
-.vscode/*
-!.vscode/settings.json
-!.vscode/extensions.json
-!.vscode/launch.json
-!.vscode/tasks.json
+.omo/
+.serena/
 .idea/
 *.swp
 *~
-
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-.Python
-venv/
-.venv/
-benchmark/python/.venv/
-*.egg-info/
-.pytest_cache/
-.mypy_cache/
-
-# Elixir / Phoenix benchmark
-benchmark/phoenix/**/_build/
-benchmark/phoenix/**/deps/
-benchmark/phoenix/**/.fetch
-erl_crash.dump
-.elixir_ls/
-
-# Rust / Axum benchmark
-benchmark/axum/**/target/
-
-# Benchmark output
-benchmark/results.txt
-
-# Local practice builds
-practice/a.out
-practice/*.o
-
-# Lean 4 proofs
-lean/.lake/
-lean/lake-packages/
-lean/build/
-
-# Node / LSP
-lsp/node_modules/
-lsp/out/
-editors/vscode/node_modules/
-editors/vscode/out/
-editors/vscode/server/
-
-# OMO local agent state
-.omo/
-.omc/
-.serena/
-
-/build-opt/
-
-/build-integration/
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+!.vscode/tasks.json

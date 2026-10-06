@@ -50,7 +50,7 @@ Follow the style already used in this repository:
 ```
 Add GitHub Actions CI for Lean proofs and Linux build.
 
-Run lake build on lean/ and verify the C compiler builds on Ubuntu.
+Run lake build in forge-proofs/ and verify the C compiler builds on Ubuntu.
 ```
 
 ### Before you open a PR
@@ -59,7 +59,7 @@ Run lake build on lean/ and verify the C compiler builds on Ubuntu.
 |-------|-------------|
 | CI | All GitHub Actions checks must pass |
 | C changes | `cmake -B build && cmake --build build` succeeds on your machine |
-| Lean changes | `cd lean && lake build` succeeds with **no `sorry`** |
+| Lean changes | `cd ../forge-proofs && lake build` succeeds with **no `sorry`** |
 | Docs | Update README or `docs/` when behavior or usage changes |
 | Examples | Add or update `examples/` when introducing user-facing features |
 
@@ -107,12 +107,13 @@ For Lean proofs: AI-generated proofs are acceptable, but they must **`lake build
 
 | Path | Notes |
 |------|-------|
-| `compiler/`, `runtime/`, `stdlib/` | C compiler and runtime — follow existing patterns |
-| `lean/` | Formal proofs — keep in sync with C semantics where modeled |
-| `examples/`, `docs/` | User-facing material — keep accurate and runnable |
-| `bootstrap/` | Self-hosting compiler — high bar for changes |
-| `benchmark/` | Performance tooling — avoid breaking scripts |
-| `editors/vscode/`, `lsp/` | Editor tooling — may lag split repos in the org |
+| `compiler/` | Compiler implementation and parser/codegen regressions |
+| `examples/`, `docs/` | Compiler fixtures and language documentation |
+| `bootstrap/` | Self-hosting compiler — verify the fixed point |
+| `tests/` | Compiler and integrated SDK regressions |
+| `cmake/` | Component pins and installed SDK build helpers |
+
+Other component paths are listed in [repository layout](docs/repository-layout.md).
 
 ## Reporting bugs and requesting features
 
@@ -181,7 +182,7 @@ To auto-request review from specific people or teams, add `.github/CODEOWNERS`:
 *       @forge-language/maintainers
 
 # Area experts (replace with real handles)
-/lean/  @forge-language/maintainers
+/compiler/  @forge-language/maintainers
 ```
 
 Teams must exist in the org and have repository access.
@@ -189,3 +190,10 @@ Teams must exist in the org and have repository access.
 ## License
 
 By contributing, you agree that your contributions will be licensed under the [Apache License 2.0](LICENSE) that covers this project.
+
+## Component repositories
+
+See [repository layout](docs/repository-layout.md). Submit library, server, editor,
+benchmark and proof changes to the repository that owns those files. Compiler
+changes run the core build, CTest and self-host fixed-point check. Library updates
+require an explicit pinned revision update in `cmake/Dependencies.cmake`.

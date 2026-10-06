@@ -229,6 +229,11 @@ fn emit_header(src: string): string {
     out = str_builder_append(out, "forge_runtime.h");
     out = str_builder_append(out, q());
     out = str_builder_append(out, nl());
+    out = str_builder_append(out, "#include ");
+    out = str_builder_append(out, q());
+    out = str_builder_append(out, "forge/io.h");
+    out = str_builder_append(out, q());
+    out = str_builder_append(out, nl());
     out = str_builder_append(out, "#include <stdio.h>");
     out = str_builder_append(out, nl());
     out = str_builder_append(out, "#include <stdlib.h>");

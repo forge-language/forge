@@ -1,18 +1,6 @@
 {
   "version": "2.0.0",
-  "tasks": [
-    {
-      "label": "build-forge-extension",
-      "type": "shell",
-      "command": "npm run build",
-      "options": {
-        "cwd": "${workspaceFolder}/editors/vscode"
-      },
-      "group": {
-        "kind": "build",
-        "isDefault": true
-      },
-      "problemMatcher": ["$tsc"]
-    }
-  ]
+  "tasks": [{"label":"build-forge", "type":"shell",
+    "command":"cmake --build build -j2",
+    "group":{"kind":"build","isDefault":true}, "problemMatcher":["$gcc"]}]
 }

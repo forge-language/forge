@@ -11,6 +11,7 @@ import unittest
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--forge', required=True)
+parser.add_argument('--source-root', default=None)
 parser.add_argument('--root', required=True)
 parser.add_argument('--lib-dir', required=True)
 parser.add_argument('--cc', required=True)
@@ -199,7 +200,7 @@ native main {
                     'control_flow': '2\n0\n1\n2\n0\n1\n2\n1\n2\n3\n4\n6\n7\n'}
         for name, stdout in expected.items():
             with self.subTest(example=name):
-                source = Path(config.root) / 'examples' / (name + '.fg')
+                source = Path(config.source_root or config.root) / 'examples' / (name + '.fg')
                 result = self.invoke(source, '-o', name, *self.native_flags())
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.run_binary(self.directory / name, stdout)

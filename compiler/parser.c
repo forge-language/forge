@@ -13,6 +13,22 @@ static void parser_error(Parser *p, const char *msg) {
     exit(1);
 }
 
+/* Parser-local capacities keep the public AST layout unchanged. Geometric
+ * growth bounds reallocations and copying as declaration lists get larger. */
+static void *reserve_declarations(void *items, size_t count, size_t *capacity,
+                                  size_t item_size) {
+    if (count < *capacity) return items;
+    size_t max_count = SIZE_MAX / item_size;
+    if (count >= max_count) forge_die("too many declarations");
+    size_t next = *capacity ? *capacity : 8;
+    if (next <= count) next = next <= max_count / 2 ? next * 2 : max_count;
+    if (next > max_count) next = max_count;
+    void *grown = realloc(items, next * item_size);
+    if (!grown) forge_die("out of memory growing declarations");
+    *capacity = next;
+    return grown;
+}
+
 static void expect(Parser *p, TokenKind kind) {
     if (!lexer_match(p->lx, kind)) {
         parser_error(p, "unexpected token");
@@ -628,6 +644,7 @@ static SupervisorDecl parse_supervisor(Parser *p) {
     SupervisorDecl sup = {0};
     sup.name = token_str(name);
     sup.policy = SUP_RESTART_PROCESS;
+    size_t child_capacity = 0;
 
     while (lexer_peek(p->lx).kind != TOK_RBRACE) {
         if (lexer_match(p->lx, TOK_KW_RESTART)) {
@@ -642,9 +659,9 @@ static SupervisorDecl parse_supervisor(Parser *p) {
             Token child_tok = lexer_peek(p->lx);
             expect(p, TOK_IDENT);
             ForgeStr child = token_str(child_tok);
-            sup.child_count++;
-            sup.children = (ForgeStr *)realloc(sup.children, sup.child_count * sizeof(ForgeStr));
-            sup.children[sup.child_count - 1] = child;
+            sup.children = reserve_declarations(sup.children, sup.child_count,
+                &child_capacity, sizeof(*sup.children));
+            sup.children[sup.child_count++] = child;
             expect(p, TOK_SEMI);
         }
     }
@@ -661,21 +678,22 @@ static LibraryDecl parse_library(Parser *p) {
     LibraryDecl lib = {0};
     lib.name = token_str(name);
     lib.present = true;
+    size_t import_capacity = 0, fn_capacity = 0;
 
     while (lexer_peek(p->lx).kind != TOK_RBRACE) {
         if (lexer_match(p->lx, TOK_KW_IMPORT)) {
             Token mod = lexer_peek(p->lx);
             expect(p, TOK_IDENT);
             expect(p, TOK_SEMI);
-            lib.import_count++;
-            lib.imports = (ForgeStr *)realloc(lib.imports, lib.import_count * sizeof(ForgeStr));
-            lib.imports[lib.import_count - 1] = token_str(mod);
+            lib.imports = reserve_declarations(lib.imports, lib.import_count,
+                &import_capacity, sizeof(*lib.imports));
+            lib.imports[lib.import_count++] = token_str(mod);
         } else if (lexer_match(p->lx, TOK_KW_EXPORT)) {
             expect(p, TOK_KW_FN);
             FnDecl fn = parse_fn_body(p, false);
-            lib.fn_count++;
-            lib.functions = (FnDecl *)realloc(lib.functions, lib.fn_count * sizeof(FnDecl));
-            lib.functions[lib.fn_count - 1] = fn;
+            lib.functions = reserve_declarations(lib.functions, lib.fn_count,
+                &fn_capacity, sizeof(*lib.functions));
+            lib.functions[lib.fn_count++] = fn;
         } else {
             parser_error(p, "expected import or export in library");
         }
@@ -753,6 +771,10 @@ static NativeDecl parse_native(Parser *p) {
 Program parse_program(Lexer *lx) {
     Parser p = { lx, 0 };
     Program prog = {0};
+    size_t path_import_capacity = 0, import_capacity = 0;
+    size_t struct_capacity = 0, enum_capacity = 0, native_capacity = 0;
+    size_t fn_capacity = 0, process_capacity = 0, const_capacity = 0;
+    size_t supervisor_capacity = 0;
 
     while (lexer_peek(p.lx).kind != TOK_EOF) {
         Token t = lexer_peek(p.lx);
@@ -762,41 +784,40 @@ Program parse_program(Lexer *lx) {
                 Token path_tok = lexer_peek(p.lx);
                 lexer_next(p.lx);
                 expect(&p, TOK_SEMI);
-                prog.path_import_count++;
-                prog.path_imports = (ForgeStr *)realloc(prog.path_imports,
-                    prog.path_import_count * sizeof(ForgeStr));
-                prog.path_imports[prog.path_import_count - 1] = token_str(path_tok);
+                prog.path_imports = reserve_declarations(prog.path_imports, prog.path_import_count,
+                    &path_import_capacity, sizeof(*prog.path_imports));
+                prog.path_imports[prog.path_import_count++] = token_str(path_tok);
             } else {
                 Token mod = lexer_peek(p.lx);
                 expect(&p, TOK_IDENT);
                 expect(&p, TOK_SEMI);
-                prog.import_count++;
-                prog.imports = (ForgeStr *)realloc(prog.imports, prog.import_count * sizeof(ForgeStr));
-                prog.imports[prog.import_count - 1] = token_str(mod);
+                prog.imports = reserve_declarations(prog.imports, prog.import_count,
+                    &import_capacity, sizeof(*prog.imports));
+                prog.imports[prog.import_count++] = token_str(mod);
             }
         } else if (t.kind == TOK_KW_LIBRARY) {
             if (prog.library.present) parser_error(&p, "only one library per file");
             prog.library = parse_library(&p);
         } else if (t.kind == TOK_KW_STRUCT) {
-            prog.struct_count++;
-            prog.structs = (StructDecl *)realloc(prog.structs, prog.struct_count * sizeof(StructDecl));
-            prog.structs[prog.struct_count - 1] = parse_struct(&p);
+            prog.structs = reserve_declarations(prog.structs, prog.struct_count,
+                &struct_capacity, sizeof(*prog.structs));
+            prog.structs[prog.struct_count++] = parse_struct(&p);
         } else if (t.kind == TOK_KW_ENUM) {
-            prog.enum_count++;
-            prog.enums = (EnumDecl *)realloc(prog.enums, prog.enum_count * sizeof(EnumDecl));
-            prog.enums[prog.enum_count - 1] = parse_enum(&p);
+            prog.enums = reserve_declarations(prog.enums, prog.enum_count,
+                &enum_capacity, sizeof(*prog.enums));
+            prog.enums[prog.enum_count++] = parse_enum(&p);
         } else if (t.kind == TOK_KW_NATIVE) {
-            prog.native_count++;
-            prog.natives = (NativeDecl *)realloc(prog.natives, prog.native_count * sizeof(NativeDecl));
-            prog.natives[prog.native_count - 1] = parse_native(&p);
+            prog.natives = reserve_declarations(prog.natives, prog.native_count,
+                &native_capacity, sizeof(*prog.natives));
+            prog.natives[prog.native_count++] = parse_native(&p);
         } else if (t.kind == TOK_KW_EXTERN) {
-            prog.fn_count++;
-            prog.functions = (FnDecl *)realloc(prog.functions, prog.fn_count * sizeof(FnDecl));
-            prog.functions[prog.fn_count - 1] = parse_extern_fn(&p);
+            prog.functions = reserve_declarations(prog.functions, prog.fn_count,
+                &fn_capacity, sizeof(*prog.functions));
+            prog.functions[prog.fn_count++] = parse_extern_fn(&p);
         } else if (t.kind == TOK_KW_PROCESS) {
-            prog.process_count++;
-            prog.processes = (ProcessDecl *)realloc(prog.processes, prog.process_count * sizeof(ProcessDecl));
-            prog.processes[prog.process_count - 1] = parse_process(&p);
+            prog.processes = reserve_declarations(prog.processes, prog.process_count,
+                &process_capacity, sizeof(*prog.processes));
+            prog.processes[prog.process_count++] = parse_process(&p);
         } else if (t.kind == TOK_KW_CONST) {
             lexer_next(p.lx);
             Token name = lexer_peek(p.lx);
@@ -804,17 +825,17 @@ Program parse_program(Lexer *lx) {
             expect(&p, TOK_EQ);
             Expr *val = parse_expr(&p);
             expect(&p, TOK_SEMI);
-            prog.const_count++;
-            prog.consts = (ConstDecl *)realloc(prog.consts, prog.const_count * sizeof(ConstDecl));
-            prog.consts[prog.const_count - 1] = (ConstDecl){ token_str(name), val };
+            prog.consts = reserve_declarations(prog.consts, prog.const_count,
+                &const_capacity, sizeof(*prog.consts));
+            prog.consts[prog.const_count++] = (ConstDecl){ token_str(name), val };
         } else if (t.kind == TOK_KW_FN) {
-            prog.fn_count++;
-            prog.functions = (FnDecl *)realloc(prog.functions, prog.fn_count * sizeof(FnDecl));
-            prog.functions[prog.fn_count - 1] = parse_fn(&p);
+            prog.functions = reserve_declarations(prog.functions, prog.fn_count,
+                &fn_capacity, sizeof(*prog.functions));
+            prog.functions[prog.fn_count++] = parse_fn(&p);
         } else if (t.kind == TOK_KW_SUPERVISOR) {
-            prog.supervisor_count++;
-            prog.supervisors = (SupervisorDecl *)realloc(prog.supervisors, prog.supervisor_count * sizeof(SupervisorDecl));
-            prog.supervisors[prog.supervisor_count - 1] = parse_supervisor(&p);
+            prog.supervisors = reserve_declarations(prog.supervisors, prog.supervisor_count,
+                &supervisor_capacity, sizeof(*prog.supervisors));
+            prog.supervisors[prog.supervisor_count++] = parse_supervisor(&p);
         } else {
             parser_error(&p, "expected top-level declaration");
         }

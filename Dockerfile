@@ -1,6 +1,6 @@
 FROM debian:bookworm-slim AS builder
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates cmake gcc make libc6-dev \
+    ca-certificates git cmake gcc make libc6-dev \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY . .

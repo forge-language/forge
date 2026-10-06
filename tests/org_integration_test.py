@@ -16,7 +16,6 @@ p.add_argument('--forge',required=True)
 p.add_argument('--root',required=True)
 p.add_argument('--lib-dir',required=True)
 p.add_argument('--cc',required=True)
-p.add_argument('--lsp',required=True)
 config,args=p.parse_known_args();sys.argv=[sys.argv[0],*args]
 
 class OrganizationIntegration(unittest.TestCase):
@@ -79,14 +78,6 @@ class OrganizationIntegration(unittest.TestCase):
         subprocess.run(['openssl','req','-x509','-newkey','rsa:2048','-nodes','-days','1','-subj','/CN=localhost','-keyout',str(key),'-out',str(cert)],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=15)
         port=self.port();binary=self.compile('import http;native main{let s: int=http_listen_tls('+str(port)+',"'+str(cert)+'","'+str(key)+'");http_prepare(s,"tls ok");http_serve_tls_mt(s,2);}')
         self.assertEqual(self.request(self.server(binary),port,tls=True),b'tls ok')
-    def test_lsp_initialize_shutdown(self):
-        messages=[{'jsonrpc':'2.0','id':1,'method':'initialize','params':{'rootUri':None,'capabilities':{}}},{'jsonrpc':'2.0','id':2,'method':'textDocument/completion','params':{'textDocument':{'uri':'file:///tmp/forge-integration.fg'},'position':{'line':0,'character':0}}},{'jsonrpc':'2.0','id':3,'method':'shutdown','params':None},{'jsonrpc':'2.0','method':'exit'}]
-        payload=b''.join(b'Content-Length: '+str(len(body)).encode()+b'\r\n\r\n'+body for body in [json.dumps(m).encode() for m in messages])
-        r=subprocess.run([config.lsp],input=payload,capture_output=True,timeout=10)
-        self.assertEqual(r.returncode,0,r.stderr);out=r.stdout;responses=[]
-        while out:
-            header,out=out.split(b'\r\n\r\n',1);length=int(header.split(b':',1)[1]);responses.append(json.loads(out[:length]));out=out[length:]
-        self.assertEqual([x['id'] for x in responses],[1,2,3]);self.assertIn('capabilities',responses[0]['result']);self.assertIn('str_builder', [x['label'] for x in responses[1]['result']])
     def test_coroutine_arena_isolation(self):
         binary=self.compile('import strings;process main{coroutine first(){let b: int=0;b=str_builder();str_builder_append(b,"preserved");yield;println(str_builder_finish(b));}coroutine second(){str_reset_arena();yield;str_reset_arena();}spawn first();spawn second();}')
         r=subprocess.run([str(binary)],capture_output=True,text=True,timeout=5)

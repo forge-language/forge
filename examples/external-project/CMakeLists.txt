@@ -23,9 +23,9 @@ forge_add_executable(hello "${CMAKE_CURRENT_SOURCE_DIR}/main.fg"
     EXTRA_DEPENDS forge_lib_greeting_ext
 )
 
-# Test both public SDK entry targets: fs/thread helpers in forge_std call
-# back into forge_runtime, so a single imported target must close that cycle.
-add_executable(sdk_runtime sdk_consumer.c)
+# Each consumer links the component that owns its API. The runtime is independent;
+# the standard library declares its runtime dependency through its exported target.
+add_executable(sdk_runtime sdk_runtime_consumer.c)
 target_link_libraries(sdk_runtime PRIVATE Forge::forge_runtime)
 add_executable(sdk_std sdk_consumer.c)
 target_link_libraries(sdk_std PRIVATE Forge::forge_std)
