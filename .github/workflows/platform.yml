@@ -1,0 +1,61 @@
+name: Platform
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'compiler/**'
+      - 'include/**'
+      - 'runtime/**'
+      - 'stdlib/**'
+      - 'CMakeLists.txt'
+      - 'cmake/**'
+      - '.gitmodules'
+      - 'platform/**'
+      - '.github/workflows/platform.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'compiler/**'
+      - 'include/**'
+      - 'runtime/**'
+      - 'stdlib/**'
+      - 'CMakeLists.txt'
+      - 'cmake/**'
+      - '.gitmodules'
+      - 'platform/**'
+      - '.github/workflows/platform.yml'
+
+concurrency:
+  group: platform-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  platform:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: platform/frontend/package-lock.json
+      - name: Install site dependencies
+        run: npm ci --prefix platform/frontend
+      - name: Install browser test dependencies
+        run: node platform/frontend/node_modules/@playwright/test/cli.js install --with-deps chromium
+      - name: Build platform services
+        run: docker compose -f platform/compose.yml --env-file platform/tests/config.env build
+      - name: Run platform checks
+        run: sh platform/scripts/test.sh
+      - name: Build release toolchain image
+        run: docker build -f platform/Release.Containerfile -t forge-platform-release:local .
+      - name: Build release and verify installed cache
+        run: |
+          docker run --rm -v "$PWD:/src" -e BUILD_DIR=/src/platform/build/glibc forge-platform-release:local sh -c 'sh platform/scripts/build.sh && sh platform/scripts/release.sh'
+          python3 platform/tests/installed-cache.py --local-release
+      - name: Verify installer
+        run: python3 platform/tests/installer.py

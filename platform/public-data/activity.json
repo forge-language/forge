@@ -1,0 +1,74 @@
+{
+  "updated_at": "2026-10-06T00:33:17.074464+00:00",
+  "repository": "https://github.com/forge-language/forge",
+  "stats": {
+    "stars": 1,
+    "forks": 0,
+    "open_items": 0
+  },
+  "pulls": [
+    {
+      "number": 8,
+      "title": "Optimize self-hosted compiler and report portfolio DB CPU improvements",
+      "url": "https://github.com/forge-language/forge/pull/8",
+      "state": "closed",
+      "merged_at": "2026-10-05T14:09:13Z",
+      "author": "Helloworld0822",
+      "labels": []
+    },
+    {
+      "number": 7,
+      "title": "Integrate native compiler, self-hosting and reviewed runtime improvements",
+      "url": "https://github.com/forge-language/forge/pull/7",
+      "state": "closed",
+      "merged_at": "2026-10-03T16:08:49Z",
+      "author": "Helloworld0822",
+      "labels": []
+    },
+    {
+      "number": 5,
+      "title": "Full codebase audit fixes + advanced HTTP serving modes (io_uring/TLS/routing)",
+      "url": "https://github.com/forge-language/forge/pull/5",
+      "state": "closed",
+      "merged_at": "2026-09-08T12:38:55Z",
+      "author": "Helloworld0822",
+      "labels": []
+    },
+    {
+      "number": 4,
+      "title": "Support building Forge libraries in external out-of-tree projects",
+      "url": "https://github.com/forge-language/forge/pull/4",
+      "state": "closed",
+      "merged_at": "2026-09-08T12:35:02Z",
+      "author": "Helloworld0822",
+      "labels": []
+    },
+    {
+      "number": 6,
+      "title": "Fix secure temporary file suffix handling",
+      "url": "https://github.com/forge-language/forge/pull/6",
+      "state": "closed",
+      "merged_at": "2026-09-08T12:32:25Z",
+      "author": "Helloworld0822",
+      "labels": []
+    },
+    {
+      "number": 2,
+      "title": "Harden the HTTP stdlib server: fd capacity, recv timeout, full body reads",
+      "url": "https://github.com/forge-language/forge/pull/2",
+      "state": "closed",
+      "merged_at": "2026-09-08T12:28:02Z",
+      "author": "Helloworld0822",
+      "labels": []
+    },
+    {
+      "number": 3,
+      "title": "Add self-hosted Forge LSP server with editor integrations",
+      "url": "https://github.com/forge-language/forge/pull/3",
+      "state": "closed",
+      "merged_at": "2026-09-08T12:28:00Z",
+      "author": "Helloworld0822",
+      "labels": []
+    }
+  ]
+}

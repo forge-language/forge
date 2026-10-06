@@ -15,3 +15,19 @@ build-opt
 **/.venv
 benchmark/results.txt
 benchmark/scheduler_results.txt
+
+# Platform local state and generated content
+**/.env
+**/.env.*
+platform/.deployment
+platform/build
+platform/frontend/node_modules
+platform/frontend/dist
+platform/frontend/test-results
+platform/frontend/*.tsbuildinfo
+platform/frontend/public/playground/compiler.mjs
+platform/frontend/public/playground/compiler.wasm
+platform/frontend/public/reports
+platform/frontend/public/project
+platform/public-data/*.tmp
+platform/releases/*

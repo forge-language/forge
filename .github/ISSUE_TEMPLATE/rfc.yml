@@ -1,0 +1,30 @@
+name: Language / runtime RFC
+description: Propose a significant design change with current behavior and verification
+title: "[RFC] "
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem and current behavior
+      description: Include an executable example and relevant implementation paths.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal and alternatives
+      description: Explain safety, compatibility, migration and performance tradeoffs.
+    validations:
+      required: true
+  - type: textarea
+    id: validation
+    attributes:
+      label: Acceptance criteria and validation
+      description: Accepted/rejected programs, failure cases, regressions and measurements.
+    validations:
+      required: true
+  - type: textarea
+    id: questions
+    attributes:
+      label: Unanswered questions and AI assistance
+      description: State evidence still needed and how agent work will receive human review.

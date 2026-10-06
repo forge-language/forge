@@ -1,0 +1,23 @@
+FROM emscripten/emsdk:4.0.15 AS playground
+WORKDIR /src
+COPY compiler compiler
+COPY include include
+COPY runtime runtime
+COPY platform/playground platform/playground
+COPY platform/scripts/build-playground.sh platform/scripts/build-playground.sh
+RUN sh platform/scripts/build-playground.sh
+FROM node:22-alpine AS builder
+WORKDIR /site
+COPY platform/frontend/package*.json ./
+RUN npm ci
+COPY platform/frontend ./
+COPY platform/content/project ./public/project/
+COPY platform/content/reports ./public/reports/
+COPY --from=playground /src/platform/frontend/public/playground/compiler.* ./public/playground/
+RUN npm run build
+FROM nginx:1.27-alpine
+COPY --from=builder /site/dist /usr/share/nginx/html
+COPY platform/frontend/nginx.conf /etc/nginx/conf.d/default.conf
+COPY platform/scripts/install.sh /usr/share/nginx/html/install.sh
+COPY platform/frontend/40-forge.sh /docker-entrypoint.d/40-forge.sh
+EXPOSE 80

@@ -1,0 +1,6 @@
+[submodule "platform/vendor/forge-postgres"]
+	path = platform/vendor/forge-postgres
+	url = https://github.com/forge-language/forge-postgres.git
+[submodule "platform/vendor/forge-web"]
+	path = platform/vendor/forge-web
+	url = https://github.com/forge-language/forge-web.git

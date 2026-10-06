@@ -65,3 +65,18 @@ editors/vscode/server/
 /build-opt/
 
 /build-integration/
+
+# Platform local state and generated outputs
+platform/.deployment/
+platform/build/
+platform/frontend/node_modules/
+platform/frontend/dist/
+platform/frontend/test-results/
+platform/frontend/*.tsbuildinfo
+platform/frontend/public/playground/compiler.mjs
+platform/frontend/public/playground/compiler.wasm
+platform/frontend/public/reports/
+platform/frontend/public/project/
+platform/public-data/*.tmp
+platform/releases/*
+!platform/releases/.gitkeep
