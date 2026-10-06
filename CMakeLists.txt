@@ -32,8 +32,16 @@ include(cmake/Dependencies.cmake)
 set(FORGE_ROOT_DIR "${CMAKE_BINARY_DIR}")
 set(FORGE_LIB_DIR "${CMAKE_BINARY_DIR}/lib")
 file(MAKE_DIRECTORY "${FORGE_ROOT_DIR}/include" "${CMAKE_BINARY_DIR}/generated")
-file(COPY "${forge_runtime_SOURCE_DIR}/include/" DESTINATION "${FORGE_ROOT_DIR}/include")
-file(COPY "${forge_stdlib_SOURCE_DIR}/include/" DESTINATION "${FORGE_ROOT_DIR}/include")
+foreach(component IN ITEMS runtime stdlib)
+    set(header_root "${forge_${component}_SOURCE_DIR}/include")
+    file(GLOB_RECURSE public_headers CONFIGURE_DEPENDS "${header_root}/*.h")
+    foreach(header IN LISTS public_headers)
+        file(RELATIVE_PATH relative_header "${header_root}" "${header}")
+        # configure_file registers the source header as a configure dependency,
+        # so local component edits refresh the SDK before generated C is built.
+        configure_file("${header}" "${FORGE_ROOT_DIR}/include/${relative_header}" COPYONLY)
+    endforeach()
+endforeach()
 set(FORGE_CC_ARGS --cc "${CMAKE_C_COMPILER}")
 add_executable(forge compiler/main.c compiler/lexer.c compiler/parser.c
     compiler/ast.c compiler/codegen.c compiler/codegen_js.c compiler/mod_registry.c

@@ -20,7 +20,9 @@ if(NOT TARGET Forge::forge_std)
 endif()
 set(FORGE_EXECUTABLE Forge::forge)
 set(FORGE_RUNTIME_TARGET Forge::forge_runtime)
-set(FORGE_BUILD_DEPS Forge::forge Forge::forge_runtime Forge::forge_std)
+# Use the actual imported archive targets for file timestamp dependencies of
+# custom Forge compiler commands; legacy interface aliases only forward links.
+set(FORGE_BUILD_DEPS Forge::forge ForgeRuntime::runtime ForgeStd::stdlib)
 if(CMAKE_C_COMPILER)
     set(FORGE_CC_ARGS --cc "${CMAKE_C_COMPILER}")
 endif()
