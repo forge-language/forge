@@ -11,7 +11,10 @@ generation and linking to a C toolchain.
 The target scope includes Linux, macOS and Windows, including Windows and 32-bit
 ARM targets. Before backend implementation, record each supported OS/CPU/ABI
 combination explicitly; “ARM32” alone does not define an executable format,
-calling convention, object relocations, system-call interface or C ABI.
+calling convention, object relocations, system-call interface or C ABI. The
+repo currently names these three OS families but does not publish an architecture
+matrix; use user-confirmed target combinations rather than inferring them from
+the host used by CI.
 
 ## Current pipeline and blockers
 
@@ -27,9 +30,12 @@ invokes `cc` to produce the executable. Its stage2 fixed-point check proves
 stable C output for that subset, not native code generation or full-language
 self-hosting.
 
-The runtime and much of the standard library are C. Native adapters and system
-APIs also depend on operating-system libraries. Removing GCC/Clang from the
-Forge source-to-executable path therefore requires all of the following:
+The runtime and much of the standard library are C. A source inventory in this
+checkout counts about 5.8k lines across 21 compiler C/header files, 1.3k lines
+in the single Forge bootstrap source, and another 5.8k lines across 28 runtime
+and standard-library C/header files. Native adapters and system APIs also
+depend on operating-system libraries. Removing GCC/Clang from the Forge
+source-to-executable path therefore requires all of the following:
 
 - A Forge-authored frontend that reaches the required language and module parity.
 - A typed, target-independent intermediate representation (IR).
