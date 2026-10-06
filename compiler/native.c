@@ -97,11 +97,17 @@ static bool emit_binary(Code *c,const IRFunction *fn,const IRInst *x) {
 
 typedef struct { size_t displacement_at; uint32_t target; } BranchPatch;
 typedef struct { size_t displacement_at; size_t function; } CallPatch;
+typedef struct { ForgeStr bytes; size_t offset; } StringEntry;
+typedef struct { size_t displacement_at; size_t string_index; } StringPatch;
 typedef struct {
     Code *code;
     const IRModule *module;
     CallPatch *calls;
     size_t call_cap, call_count;
+    StringEntry *strings;
+    size_t string_count, string_cap;
+    StringPatch *string_patches;
+    size_t string_patch_count, string_patch_cap;
 } EmitContext;
 
 static bool add_patch(BranchPatch *patches,size_t cap,size_t *count,size_t at,uint32_t target) {
@@ -129,8 +135,62 @@ static bool move_rax_to_arg(Code *c,size_t arg) {
     return arg<sizeof(regs)/sizeof(regs[0])&&bytes(c,regs[arg],3);
 }
 
+static size_t add_string(EmitContext *ctx,ForgeStr s) {
+    for(size_t i=0;i<ctx->string_count;i++)
+        if(forge_str_eq(ctx->strings[i].bytes,s))return i;
+    if(ctx->string_count==ctx->string_cap) {
+        size_t cap=ctx->string_cap?ctx->string_cap*2:8;
+        StringEntry *p=realloc(ctx->strings,cap*sizeof(*p));if(!p)return SIZE_MAX;
+        ctx->strings=p;ctx->string_cap=cap;
+    }
+    size_t i=ctx->string_count++;
+    ctx->strings[i]=(StringEntry){s,0};return i;
+}
+
+static bool add_string_patch(EmitContext *ctx,size_t at,size_t index) {
+    if(ctx->string_patch_count==ctx->string_patch_cap) {
+        size_t cap=ctx->string_patch_cap?ctx->string_patch_cap*2:8;
+        StringPatch *p=realloc(ctx->string_patches,cap*sizeof(*p));if(!p)return false;
+        ctx->string_patches=p;ctx->string_patch_cap=cap;
+    }
+    ctx->string_patches[ctx->string_patch_count++]=(StringPatch){at,index};return true;
+}
+
+static ForgeType value_type(const IRFunction *fn,IRValue value) {
+    for(size_t bi=0;bi<fn->block_count;bi++)
+        for(size_t ii=0;ii<fn->blocks[bi].inst_count;ii++) {
+            const IRInst *x=&fn->blocks[bi].insts[ii];
+            if(x->result==value&&x->type_known)return x->type;
+        }
+    return forge_type_void();
+}
+
+static bool emit_helper_call(EmitContext *ctx,size_t helper) {
+    Code *c=ctx->code;
+    if(!byte(c,0xe8))return false;
+    size_t at=c->len;
+    if(!imm32(c,0)||ctx->call_count>=ctx->call_cap)return false;
+    ctx->calls[ctx->call_count++]=(CallPatch){at,helper};return true;
+}
+
+static bool emit_println(EmitContext *ctx,const IRFunction *fn,const IRInst *x) {
+    if(x->arg_count>1)return false;
+    size_t helper=ctx->module->function_count+1; /* string printer */
+    if(x->arg_count==0) {
+        if(!byte(ctx->code,0x31)||!byte(ctx->code,0xff))return false;
+        return emit_helper_call(ctx,helper);
+    }
+    ForgeType type=value_type(fn,x->args[0]);
+    if(type.kind!=TY_STRING&&type.kind!=TY_INT&&type.kind!=TY_BOOL)return false;
+    if(!load_value(ctx->code,fn,x->args[0])||!move_rax_to_arg(ctx->code,0))return false;
+    if(type.kind==TY_STRING)return emit_helper_call(ctx,helper);
+    return emit_helper_call(ctx,ctx->module->function_count); /* integer printer */
+}
+
 static bool emit_call(EmitContext *ctx,const IRFunction *caller,const IRInst *x) {
-    if(x->op!=IR_CALL||!x->type_known)return false;
+    if(x->op!=IR_CALL)return false;
+    if(x->name.len==7&&!memcmp(x->name.data,"println",7))return emit_println(ctx,caller,x);
+    if(!x->type_known)return false;
     size_t callee=find_function(ctx->module,x->module,x->name);
     if(callee==SIZE_MAX)return false;
     const IRFunction *target=&ctx->module->functions[callee];
@@ -159,6 +219,13 @@ static bool emit_block_insts(EmitContext *ctx,const IRFunction *fn,const IRBlock
         case IR_CONST_BOOL:
             if(x->result==IR_NO_VALUE||!byte(c,0x48)||!byte(c,0xb8)||!imm64(c,x->bool_value?1:0)||!store_value(c,fn,x->result))return false;
             break;
+        case IR_CONST_STRING: {
+            size_t index=add_string(ctx,x->name);
+            if(index==SIZE_MAX||x->result==IR_NO_VALUE||!byte(c,0x48)||!byte(c,0x8d)||!byte(c,0x05))return false;
+            size_t at=c->len;
+            if(!imm32(c,0)||!add_string_patch(ctx,at,index)||!store_value(c,fn,x->result))return false;
+            break;
+        }
         case IR_PARAM: {
             static const unsigned char from_arg[][3]={{0x48,0x89,0xf8},{0x48,0x89,0xf0},
                 {0x48,0x89,0xd0},{0x48,0x89,0xc8},{0x4c,0x89,0xc0},{0x4c,0x89,0xc8}};
@@ -227,7 +294,7 @@ static bool emit_function(EmitContext *ctx,const IRFunction *fn) {
     if(fn->is_extern||!fn->block_count||fn->local_count>UINT32_MAX-fn->next_value||!validate_phis(fn))return false;
     if(function_param_count(fn)>6)return false;
     for(size_t i=0;i<fn->local_count;i++)
-        if(fn->locals[i].type.kind!=TY_INT&&fn->locals[i].type.kind!=TY_BOOL)return false;
+        if(fn->locals[i].type.kind!=TY_INT&&fn->locals[i].type.kind!=TY_BOOL&&fn->locals[i].type.kind!=TY_STRING)return false;
     uint64_t slots=(uint64_t)fn->next_value+fn->local_count;
     uint64_t frame=(slots*8+15)&~UINT64_C(15);
     if(frame>INT32_MAX)return false;
@@ -275,6 +342,64 @@ static bool emit_function(EmitContext *ctx,const IRFunction *fn) {
     free(block_offsets);free(patches);return ok;
 }
 
+static bool patch_rel32(Code *c,size_t at,size_t target) {
+    int64_t rel=(int64_t)target-(int64_t)(at+4);
+    if(rel<INT32_MIN||rel>INT32_MAX)return false;
+    put32(c->data+at,(uint32_t)(int32_t)rel);return true;
+}
+
+static bool emit_print_string_helper(Code *c) {
+    /* RDI is a C string. Write its bytes and a newline through Linux write(2). */
+    if(!byte(c,0x55)||!byte(c,0x48)||!byte(c,0x89)||!byte(c,0xe5)||
+       !byte(c,0x48)||!byte(c,0x89)||!byte(c,0xfe)||
+       !byte(c,0x48)||!byte(c,0x85)||!byte(c,0xf6)||!byte(c,0x0f)||!byte(c,0x84))return false;
+    size_t null_jump=c->len;if(!imm32(c,0)||!byte(c,0x31)||!byte(c,0xc9))return false;
+    size_t loop=c->len;
+    if(!byte(c,0x80)||!byte(c,0x3c)||!byte(c,0x0e)||!byte(c,0x00)||
+       !byte(c,0x0f)||!byte(c,0x84))return false;
+    size_t empty_jump=c->len;if(!imm32(c,0)||!byte(c,0x48)||!byte(c,0xff)||!byte(c,0xc1)||!byte(c,0xe9))return false;
+    size_t loop_jump=c->len;if(!imm32(c,0))return false;
+    size_t write_text=c->len;
+    if(!byte(c,0x48)||!byte(c,0x85)||!byte(c,0xc9)||!byte(c,0x0f)||!byte(c,0x84))return false;
+    size_t zero_jump=c->len;
+    if(!imm32(c,0)||!byte(c,0xb8)||!imm32(c,1)||!byte(c,0xbf)||!imm32(c,1)||
+       !byte(c,0x48)||!byte(c,0x89)||!byte(c,0xca)||!byte(c,0x0f)||!byte(c,0x05))return false;
+    size_t newline=c->len;
+    if(!byte(c,0x6a)||!byte(c,10)||!byte(c,0xb8)||!imm32(c,1)||!byte(c,0xbf)||!imm32(c,1)||
+       !byte(c,0x48)||!byte(c,0x89)||!byte(c,0xe6)||!byte(c,0xba)||!imm32(c,1)||
+       !byte(c,0x0f)||!byte(c,0x05)||!byte(c,0x48)||!byte(c,0x83)||!byte(c,0xc4)||!byte(c,8)||
+       !byte(c,0xc9)||!byte(c,0xc3))return false;
+    return patch_rel32(c,null_jump,newline)&&patch_rel32(c,empty_jump,write_text)&&
+           patch_rel32(c,loop_jump,loop)&&patch_rel32(c,zero_jump,newline)&&write_text<=newline;
+}
+
+static bool emit_print_int_helper(Code *c) {
+    /* RDI is a signed i64. Build decimal digits backwards in a 64-byte stack buffer. */
+    if(!byte(c,0x55)||!byte(c,0x48)||!byte(c,0x89)||!byte(c,0xe5)||
+       !byte(c,0x48)||!byte(c,0x83)||!byte(c,0xec)||!byte(c,64)||
+       !byte(c,0x48)||!byte(c,0x89)||!byte(c,0xf8)||!byte(c,0x48)||!byte(c,0x85)||!byte(c,0xc0)||
+       !byte(c,0x41)||!byte(c,0x0f)||!byte(c,0x9c)||!byte(c,0xc1)||!byte(c,0x0f)||!byte(c,0x89))return false;
+    size_t positive_jump=c->len;if(!imm32(c,0)||!byte(c,0x48)||!byte(c,0xf7)||!byte(c,0xd8))return false;
+    size_t positive=c->len;
+    if(!patch_rel32(c,positive_jump,positive)||!byte(c,0x48)||!byte(c,0x8d)||!byte(c,0xbd)||!imm32(c,(uint32_t)-2)||
+       !byte(c,0xc6)||!byte(c,0x45)||!byte(c,0xff)||!byte(c,10)||
+       !byte(c,0x49)||!byte(c,0xb8)||!imm64(c,10))return false;
+    size_t loop=c->len;
+    if(!byte(c,0x31)||!byte(c,0xd2)||!byte(c,0x49)||!byte(c,0xf7)||!byte(c,0xf0)||
+       !byte(c,0x80)||!byte(c,0xc2)||!byte(c,'0')||!byte(c,0x88)||!byte(c,0x17)||
+       !byte(c,0x48)||!byte(c,0xff)||!byte(c,0xcf)||!byte(c,0x48)||!byte(c,0x85)||!byte(c,0xc0)||!byte(c,0x0f)||!byte(c,0x85))return false;
+    size_t loop_jump=c->len;if(!imm32(c,0)||!byte(c,0x45)||!byte(c,0x84)||!byte(c,0xc9)||!byte(c,0x0f)||!byte(c,0x84))return false;
+    size_t no_sign_jump=c->len;
+    if(!imm32(c,0)||!byte(c,0xc6)||!byte(c,0x07)||!byte(c,'-')||!byte(c,0x48)||!byte(c,0xff)||!byte(c,0xcf))return false;
+    size_t no_sign=c->len;
+    if(!patch_rel32(c,loop_jump,loop)||!patch_rel32(c,no_sign_jump,no_sign)||
+       !byte(c,0x48)||!byte(c,0x8d)||!byte(c,0x77)||!byte(c,1)||
+       !byte(c,0x48)||!byte(c,0x8d)||!byte(c,0x95)||!imm32(c,(uint32_t)-1)||
+       !byte(c,0x48)||!byte(c,0x29)||!byte(c,0xf2)||!byte(c,0x48)||!byte(c,0xff)||!byte(c,0xc2)||
+       !byte(c,0xb8)||!imm32(c,1)||!byte(c,0xbf)||!imm32(c,1)||!byte(c,0x0f)||!byte(c,0x05)||!byte(c,0xc9)||!byte(c,0xc3))return false;
+    return true;
+}
+
 static bool write_all(int fd,const unsigned char *p,size_t n) {
     while(n){ssize_t k=write(fd,p,n);if(k<0&&errno==EINTR)continue;if(k<=0)return false;p+=(size_t)k;n-=(size_t)k;}return true;
 }
@@ -296,8 +421,8 @@ static bool emit_elf(const IRModule *m,const char *path) {
     for(size_t i=0;i<m->function_count;i++) {
         const IRFunction *fn=&m->functions[i];
         if(fn->module.len||fn->is_extern||find_function(m,forge_str(""),fn->name)!=i||
-           (fn->return_type.kind!=TY_INT&&fn->return_type.kind!=TY_BOOL&&fn->return_type.kind!=TY_VOID)) {
-            fprintf(stderr,"forge: native ELF prototype supports only unique, non-extern local functions returning int, bool or void\n");return false;
+           (fn->return_type.kind!=TY_INT&&fn->return_type.kind!=TY_BOOL&&fn->return_type.kind!=TY_VOID&&fn->return_type.kind!=TY_STRING)) {
+            fprintf(stderr,"forge: native ELF prototype supports only unique, non-extern local functions returning int, bool, string or void\n");return false;
         }
         if(fn->name.len==4&&!memcmp(fn->name.data,"main",4)) {
             if(main_index!=SIZE_MAX||function_param_count(fn)!=0||!fn->is_native) {
@@ -314,7 +439,7 @@ static bool emit_elf(const IRModule *m,const char *path) {
         fprintf(stderr,"forge: native ELF prototype requires `native main`\n");return false;
     }
     if(total_insts==SIZE_MAX)return false;
-    size_t *function_offsets=calloc(m->function_count,sizeof(size_t));
+    size_t *function_offsets=calloc(m->function_count+2,sizeof(size_t));
     size_t call_cap=total_insts+1;
     CallPatch *calls=calloc(call_cap,sizeof(CallPatch));
     if(!function_offsets||!calls){free(function_offsets);free(calls);return false;}
@@ -322,15 +447,27 @@ static bool emit_elf(const IRModule *m,const char *path) {
     /* _start calls main(int-return), then exits with its result. */
     static const unsigned char start[]={0x31,0xed,0xe8,0,0,0,0,0x89,0xc7,0xb8,60,0,0,0,0x0f,0x05};
     if(!bytes(&code,start,sizeof(start)))goto unsupported;
-    EmitContext ctx={&code,m,calls,call_cap,0};
+    EmitContext ctx={.code=&code,.module=m,.calls=calls,.call_cap=call_cap};
     calls[ctx.call_count++]=(CallPatch){3,main_index};
     for(size_t i=0;i<m->function_count;i++) {
         function_offsets[i]=code.len;
         if(!emit_function(&ctx,&m->functions[i]))goto unsupported;
     }
+    function_offsets[m->function_count]=code.len;
+    if(!emit_print_int_helper(&code))goto unsupported;
+    function_offsets[m->function_count+1]=code.len;
+    if(!emit_print_string_helper(&code))goto unsupported;
+    for(size_t i=0;i<ctx.string_count;i++) {
+        ctx.strings[i].offset=code.len;
+        if(!bytes(&code,ctx.strings[i].bytes.data,ctx.strings[i].bytes.len)||!byte(&code,0))goto unsupported;
+    }
+    for(size_t i=0;i<ctx.string_patch_count;i++) {
+        StringPatch p=ctx.string_patches[i];
+        if(p.string_index>=ctx.string_count||!patch_rel32(&code,p.displacement_at,ctx.strings[p.string_index].offset))goto unsupported;
+    }
     for(size_t i=0;i<ctx.call_count;i++) {
         CallPatch p=calls[i];
-        if(p.function>=m->function_count)goto unsupported;
+        if(p.function>=m->function_count+2)goto unsupported;
         int64_t rel=(int64_t)function_offsets[p.function]-(int64_t)(p.displacement_at+4);
         if(rel<INT32_MIN||rel>INT32_MAX)goto unsupported;
         put32(code.data+p.displacement_at,(uint32_t)(int32_t)rel);
@@ -347,10 +484,10 @@ static bool emit_elf(const IRModule *m,const char *path) {
     memcpy(image+ELF_EHDR+ELF_PHDR,code.data,code.len);
     bool ok=write_executable(path,image,image_len);
     if(!ok)fprintf(stderr,"forge: cannot write executable '%s': %s\n",path,strerror(errno));
-    free(image);free(code.data);free(function_offsets);free(calls);return ok;
+    free(image);free(code.data);free(function_offsets);free(calls);free(ctx.strings);free(ctx.string_patches);return ok;
 unsupported:
-    fprintf(stderr,"forge: native ELF prototype supports integer constants, arithmetic, comparisons, locals, branches, loops, direct-edge phi values and local calls with up to six arguments\n");
-    free(code.data);free(function_offsets);free(calls);return false;
+    fprintf(stderr,"forge: native ELF prototype cannot lower this program (supported output includes integer/string println, integer expressions, direct calls, and basic control flow)\n");
+    free(code.data);free(function_offsets);free(calls);free(ctx.strings);free(ctx.string_patches);return false;
 }
 
 bool forge_native_emit(const IRModule *m,const ForgeTarget *t,const char *path) {
