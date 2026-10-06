@@ -490,6 +490,7 @@ bool ir_lower_program(const Program *program, IRModule *out) {
         entry.ret_type=forge_type_int();
         entry.body=program->natives[i].body;
         if(!ir_lower_function(out,program,forge_str(""),&entry,&error)) goto fail;
+        out->functions[out->function_count-1].is_native=true;
     }
     for(size_t m=0;m<program->module_count;m++) for(size_t i=0;i<program->modules[m].fn_count;i++)
         if(!ir_lower_function(out,program,program->modules[m].name,&program->modules[m].functions[i],&error)) goto fail;

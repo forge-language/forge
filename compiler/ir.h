@@ -84,6 +84,7 @@ typedef struct {
     size_t block_count, block_cap;
     uint32_t next_value;
     bool is_extern;
+    bool is_native;
 } IRFunction;
 
 typedef struct {
@@ -97,11 +98,11 @@ typedef struct {
     size_t enum_count, enum_cap;
 } IRModule;
 
-/* Lowers the currently supported ordinary-function subset into target-neutral
- * basic blocks and typed values. Calls without a visible declaration are kept
- * with an explicitly unknown result type. Literal constants, structs and enums
- * are represented explicitly; unsupported declaration forms fail with a
- * diagnostic rather than producing partial IR. */
+/* Lowers supported ordinary functions and native entry blocks into
+ * target-neutral basic blocks and typed values. Calls without a visible
+ * declaration are kept with an explicitly unknown result type. Literal
+ * constants, structs and enums are represented explicitly; unsupported
+ * declaration forms fail with a diagnostic rather than producing partial IR. */
 bool ir_lower_program(const Program *program, IRModule *out);
 void ir_dump(const IRModule *module, FILE *out);
 void ir_module_free(IRModule *module);

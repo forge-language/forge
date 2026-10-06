@@ -96,13 +96,60 @@ static bool emit_binary(Code *c,const IRFunction *fn,const IRInst *x) {
 }
 
 typedef struct { size_t displacement_at; uint32_t target; } BranchPatch;
+typedef struct { size_t displacement_at; size_t function; } CallPatch;
+typedef struct {
+    Code *code;
+    const IRModule *module;
+    CallPatch *calls;
+    size_t call_cap, call_count;
+} EmitContext;
 
 static bool add_patch(BranchPatch *patches,size_t cap,size_t *count,size_t at,uint32_t target) {
     if(*count>=cap)return false;
     patches[(*count)++]=(BranchPatch){at,target};return true;
 }
 
-static bool emit_block_insts(Code *c,const IRFunction *fn,const IRBlock *b) {
+static size_t find_function(const IRModule *m,ForgeStr module,ForgeStr name) {
+    for(size_t i=0;i<m->function_count;i++)
+        if(forge_str_eq(m->functions[i].module,module)&&forge_str_eq(m->functions[i].name,name))return i;
+    return SIZE_MAX;
+}
+
+static size_t function_param_count(const IRFunction *fn) {
+    if(!fn->block_count)return SIZE_MAX;
+    size_t n=0;
+    for(size_t i=0;i<fn->blocks[0].inst_count;i++)
+        if(fn->blocks[0].insts[i].op==IR_PARAM)n++;
+    return n;
+}
+
+static bool move_rax_to_arg(Code *c,size_t arg) {
+    static const unsigned char regs[][3]={{0x48,0x89,0xc7},{0x48,0x89,0xc6},
+        {0x48,0x89,0xc2},{0x48,0x89,0xc1},{0x49,0x89,0xc0},{0x49,0x89,0xc1}};
+    return arg<sizeof(regs)/sizeof(regs[0])&&bytes(c,regs[arg],3);
+}
+
+static bool emit_call(EmitContext *ctx,const IRFunction *caller,const IRInst *x) {
+    if(x->op!=IR_CALL||!x->type_known)return false;
+    size_t callee=find_function(ctx->module,x->module,x->name);
+    if(callee==SIZE_MAX)return false;
+    const IRFunction *target=&ctx->module->functions[callee];
+    if(target->is_extern||target->module.len||function_param_count(target)!=x->arg_count||x->arg_count>6)return false;
+    if(target->return_type.kind!=x->type.kind ||
+       ((target->return_type.kind==TY_VOID)!=(x->result==IR_NO_VALUE)))return false;
+    for(size_t i=0;i<x->arg_count;i++)
+        if(!load_value(ctx->code,caller,x->args[i])||!move_rax_to_arg(ctx->code,i))return false;
+    if(!byte(ctx->code,0xe8))return false;
+    size_t at=ctx->code->len;
+    if(!imm32(ctx->code,0)||ctx->call_count>=ctx->call_cap)return false;
+    ctx->calls[ctx->call_count++]=(CallPatch){at,callee};
+    if(x->result!=IR_NO_VALUE&&!store_value(ctx->code,caller,x->result))return false;
+    return true;
+}
+
+static bool emit_block_insts(EmitContext *ctx,const IRFunction *fn,const IRBlock *b) {
+    Code *c=ctx->code;
+    size_t parameter=0;
     for(size_t i=0;i<b->inst_count;i++) {
         const IRInst *x=&b->insts[i];
         switch(x->op) {
@@ -112,6 +159,14 @@ static bool emit_block_insts(Code *c,const IRFunction *fn,const IRBlock *b) {
         case IR_CONST_BOOL:
             if(x->result==IR_NO_VALUE||!byte(c,0x48)||!byte(c,0xb8)||!imm64(c,x->bool_value?1:0)||!store_value(c,fn,x->result))return false;
             break;
+        case IR_PARAM: {
+            static const unsigned char from_arg[][3]={{0x48,0x89,0xf8},{0x48,0x89,0xf0},
+                {0x48,0x89,0xd0},{0x48,0x89,0xc8},{0x4c,0x89,0xc0},{0x4c,0x89,0xc8}};
+            if(parameter>=sizeof(from_arg)/sizeof(from_arg[0])||x->result==IR_NO_VALUE||
+               !bytes(c,from_arg[parameter],3)||!store_value(c,fn,x->result))return false;
+            parameter++;
+            break;
+        }
         case IR_BINARY:
             if(!emit_binary(c,fn,x))return false;
             break;
@@ -122,7 +177,9 @@ static bool emit_block_insts(Code *c,const IRFunction *fn,const IRBlock *b) {
             if(!load_value(c,fn,x->a)||!store_local(c,fn,x->local))return false;
             break;
         case IR_EVAL:
-            if(x->a==IR_NO_VALUE)return false;
+            break;
+        case IR_CALL:
+            if(!emit_call(ctx,fn,x))return false;
             break;
         case IR_PHI:
             /* Phi copies are emitted on their incoming edges. */
@@ -165,8 +222,12 @@ static bool emit_phi_edge_copies(Code *c,const IRFunction *fn,uint32_t from,uint
     return true;
 }
 
-static bool emit_function(Code *c,const IRFunction *fn) {
+static bool emit_function(EmitContext *ctx,const IRFunction *fn) {
+    Code *c=ctx->code;
     if(fn->is_extern||!fn->block_count||fn->local_count>UINT32_MAX-fn->next_value||!validate_phis(fn))return false;
+    if(function_param_count(fn)>6)return false;
+    for(size_t i=0;i<fn->local_count;i++)
+        if(fn->locals[i].type.kind!=TY_INT&&fn->locals[i].type.kind!=TY_BOOL)return false;
     uint64_t slots=(uint64_t)fn->next_value+fn->local_count;
     uint64_t frame=(slots*8+15)&~UINT64_C(15);
     if(frame>INT32_MAX)return false;
@@ -182,7 +243,7 @@ static bool emit_function(Code *c,const IRFunction *fn) {
     for(size_t bi=0;bi<fn->block_count&&ok;bi++) {
         const IRBlock *b=&fn->blocks[bi];
         block_offsets[bi]=c->len;
-        ok=emit_block_insts(c,fn,b);
+        ok=emit_block_insts(ctx,fn,b);
         if(!ok)break;
         switch(b->term) {
         case IR_TERM_JUMP: {
@@ -228,20 +289,52 @@ static bool write_executable(const char *path,const unsigned char *data,size_t l
 }
 
 static bool emit_elf(const IRModule *m,const char *path) {
-    if(m->function_count!=1||m->global_count||m->struct_count||m->enum_count) {
-        fprintf(stderr,"forge: native ELF prototype requires one standalone entry function\n");return false;
+    if(!m->function_count||m->global_count||m->struct_count||m->enum_count) {
+        fprintf(stderr,"forge: native ELF prototype requires functions without global data\n");return false;
     }
-    const IRFunction *fn=&m->functions[0];
-    if(fn->module.len||fn->name.len!=4||memcmp(fn->name.data,"main",4)) {
+    size_t main_index=SIZE_MAX,total_insts=0;
+    for(size_t i=0;i<m->function_count;i++) {
+        const IRFunction *fn=&m->functions[i];
+        if(fn->module.len||fn->is_extern||find_function(m,forge_str(""),fn->name)!=i||
+           (fn->return_type.kind!=TY_INT&&fn->return_type.kind!=TY_BOOL&&fn->return_type.kind!=TY_VOID)) {
+            fprintf(stderr,"forge: native ELF prototype supports only unique, non-extern local functions returning int, bool or void\n");return false;
+        }
+        if(fn->name.len==4&&!memcmp(fn->name.data,"main",4)) {
+            if(main_index!=SIZE_MAX||function_param_count(fn)!=0||!fn->is_native) {
+                fprintf(stderr,"forge: native entry must be a unique zero-argument `native main`\n");return false;
+            }
+            main_index=i;
+        }
+        for(size_t bi=0;bi<fn->block_count;bi++) {
+            if(total_insts>SIZE_MAX-fn->blocks[bi].inst_count)return false;
+            total_insts+=fn->blocks[bi].inst_count;
+        }
+    }
+    if(main_index==SIZE_MAX) {
         fprintf(stderr,"forge: native ELF prototype requires `native main`\n");return false;
     }
+    if(total_insts==SIZE_MAX)return false;
+    size_t *function_offsets=calloc(m->function_count,sizeof(size_t));
+    size_t call_cap=total_insts+1;
+    CallPatch *calls=calloc(call_cap,sizeof(CallPatch));
+    if(!function_offsets||!calls){free(function_offsets);free(calls);return false;}
     Code code={0};
     /* _start calls main(int-return), then exits with its result. */
     static const unsigned char start[]={0x31,0xed,0xe8,0,0,0,0,0x89,0xc7,0xb8,60,0,0,0,0x0f,0x05};
     if(!bytes(&code,start,sizeof(start)))goto unsupported;
-    int32_t displacement=(int32_t)code.len-(int32_t)(2+5);
-    put32(code.data+3,(uint32_t)displacement);
-    if(!emit_function(&code,fn))goto unsupported;
+    EmitContext ctx={&code,m,calls,call_cap,0};
+    calls[ctx.call_count++]=(CallPatch){3,main_index};
+    for(size_t i=0;i<m->function_count;i++) {
+        function_offsets[i]=code.len;
+        if(!emit_function(&ctx,&m->functions[i]))goto unsupported;
+    }
+    for(size_t i=0;i<ctx.call_count;i++) {
+        CallPatch p=calls[i];
+        if(p.function>=m->function_count)goto unsupported;
+        int64_t rel=(int64_t)function_offsets[p.function]-(int64_t)(p.displacement_at+4);
+        if(rel<INT32_MIN||rel>INT32_MAX)goto unsupported;
+        put32(code.data+p.displacement_at,(uint32_t)(int32_t)rel);
+    }
     if(code.len>SIZE_MAX-ELF_EHDR-ELF_PHDR)goto unsupported;
     size_t image_len=ELF_EHDR+ELF_PHDR+code.len;
     unsigned char *image=calloc(image_len,1);if(!image)goto unsupported;
@@ -254,10 +347,10 @@ static bool emit_elf(const IRModule *m,const char *path) {
     memcpy(image+ELF_EHDR+ELF_PHDR,code.data,code.len);
     bool ok=write_executable(path,image,image_len);
     if(!ok)fprintf(stderr,"forge: cannot write executable '%s': %s\n",path,strerror(errno));
-    free(image);free(code.data);return ok;
+    free(image);free(code.data);free(function_offsets);free(calls);return ok;
 unsupported:
-    fprintf(stderr,"forge: native ELF prototype supports integer constants, arithmetic, comparisons, locals, branches, loops and direct-edge phi values in `native main`\n");
-    free(code.data);return false;
+    fprintf(stderr,"forge: native ELF prototype supports integer constants, arithmetic, comparisons, locals, branches, loops, direct-edge phi values and local calls with up to six arguments\n");
+    free(code.data);free(function_offsets);free(calls);return false;
 }
 
 bool forge_native_emit(const IRModule *m,const ForgeTarget *t,const char *path) {

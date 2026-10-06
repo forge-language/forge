@@ -65,6 +65,9 @@ class DriverTest(unittest.TestCase):
             ('native main { let mut n: int = 0; while (n < 42) { n = n + 1; } return n; }', 42),
             ('native main { let n: int = 8; if (n == 8 && n < 9) { return 42; } else { return 1; } }', 42),
             ('native main { let n: int = 8; if (n == 7 || n == 8) { return 42; } else { return 1; } }', 42),
+            ('fn twice(x: int): int { return x * 2; } native main { return twice(21); }', 42),
+            ('fn sum(a: int, b: int): int { return a + b; } native main { return sum(20, 22); }', 42),
+            ('fn fact(n: int): int { if (n <= 1) { return 1; } return n * fact(n - 1); } native main { return fact(5); }', 120),
         ]
         for index, (source, expected) in enumerate(cases):
             with self.subTest(source=source):
