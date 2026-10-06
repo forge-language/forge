@@ -477,13 +477,20 @@ static bool ir_copy_globals(const Program *program, IRModule *out, const char **
 
 bool ir_lower_program(const Program *program, IRModule *out) {
     memset(out,0,sizeof(*out));
-    if(program->process_count || program->native_count || program->supervisor_count) {
-        fprintf(stderr,"forge: --emit-ir currently does not support processes, coroutines, native blocks, or supervisors\n");
+    if(program->process_count || program->supervisor_count) {
+        fprintf(stderr,"forge: --emit-ir does not support processes, coroutines, or supervisors\n");
         return false;
     }
     const char *error=NULL;
     if(!ir_copy_globals(program,out,&error)) goto fail;
     for(size_t i=0;i<program->fn_count;i++) if(!ir_lower_function(out,program,forge_str(""),&program->functions[i],&error)) goto fail;
+    for(size_t i=0;i<program->native_count;i++) {
+        FnDecl entry={0};
+        entry.name=program->natives[i].name;
+        entry.ret_type=forge_type_int();
+        entry.body=program->natives[i].body;
+        if(!ir_lower_function(out,program,forge_str(""),&entry,&error)) goto fail;
+    }
     for(size_t m=0;m<program->module_count;m++) for(size_t i=0;i<program->modules[m].fn_count;i++)
         if(!ir_lower_function(out,program,program->modules[m].name,&program->modules[m].functions[i],&error)) goto fail;
     if(program->library.present) for(size_t i=0;i<program->library.fn_count;i++)

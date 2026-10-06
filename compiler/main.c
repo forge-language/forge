@@ -15,6 +15,8 @@
 #include "module_loader.h"
 #include "driver.h"
 #include "symbols.h"
+#include "target.h"
+#include "native.h"
 
 static char *read_file(const char *path, size_t *out_len) {
     FILE *f = fopen(path, "rb");
@@ -51,6 +53,7 @@ static void usage(const char *prog) {
     fprintf(stderr, "  -I PATH            Extra include directory (also searches for .fg modules)\n");
     fprintf(stderr, "  -l NAME             Link libforge_NAME.a (repeatable)\n");
     fprintf(stderr, "  --cc PATH          C compiler for native output (default: CC, clang, gcc, or cc)\n");
+    fprintf(stderr, "  --target TRIPLE    Use Forge native output (initial backend: x86_64 Linux)\n");
     fprintf(stderr, "  --check            Parse only; exit 0 on success (for LSP / CI)\n");
     fprintf(stderr, "  --symbols-json     Print document symbols as JSON to stdout\n");
     fprintf(stderr, "  --keep-temp        Keep intermediate object files\n");
@@ -123,6 +126,8 @@ int main(int argc, char **argv) {
     const char *input = NULL;
     const char *output = NULL;
     const char *header = NULL;
+    const char *target_triple = NULL;
+    ForgeTarget target;
 
     ForgeDriverConfig cfg;
     forge_driver_config_init(&cfg);
@@ -165,6 +170,8 @@ int main(int argc, char **argv) {
             explicit_lib_dir = true;
         } else if (strcmp(argv[i], "--cc") == 0) {
             cfg.cc = option_value(argc, argv, &i);
+        } else if (strcmp(argv[i], "--target") == 0) {
+            target_triple = option_value(argc, argv, &i);
         } else if (strcmp(argv[i], "--check") == 0) {
             check_only = true;
         } else if (strcmp(argv[i], "--symbols-json") == 0) {
@@ -201,6 +208,15 @@ int main(int argc, char **argv) {
 
     if (!input) {
         usage(argv[0]);
+        return 1;
+    }
+    if (target_triple && !forge_target_parse(target_triple,&target)) {
+        fprintf(stderr,"forge: unsupported or invalid target triple '%s'\n",target_triple);
+        return 1;
+    }
+    if (target_triple && (emit_js || emit_ir || lib_mode || cfg.emit_c_only ||
+                          check_only || symbols_json || link_lib_count || lib_dir_count)) {
+        fprintf(stderr,"forge: --target currently requires native executable output without other output modes\n");
         return 1;
     }
     if (lib_mode && !header) {
@@ -275,6 +291,13 @@ int main(int argc, char **argv) {
             rc = 1;
         } else {
             rc = forge_driver_compile_library(&prog, output, header, &cfg);
+        }
+    } else if (target_triple) {
+        IRModule module;
+        if (!ir_lower_program(&prog,&module)) rc=1;
+        else {
+            rc=forge_native_emit(&module,&target,output)?0:1;
+            ir_module_free(&module);
         }
     } else {
         rc = forge_driver_compile_program(&prog, output, &cfg);

@@ -150,6 +150,8 @@ add_executable(forge
     compiler/ast.c
     compiler/codegen.c
     compiler/ir.c
+    compiler/native.c
+    compiler/target.c
     compiler/codegen_js.c
     compiler/mod_registry.c
     compiler/module_loader.c

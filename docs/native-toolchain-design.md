@@ -8,13 +8,11 @@ for the supported platform and CPU targets. A prebuilt copy of the current C
 compiler does not meet this goal: it emits C and delegates both machine-code
 generation and linking to a C toolchain.
 
-The target scope includes Linux, macOS and Windows, including Windows and 32-bit
-ARM targets. Before backend implementation, record each supported OS/CPU/ABI
-combination explicitly; “ARM32” alone does not define an executable format,
-calling convention, object relocations, system-call interface or C ABI. The
-repo currently names these three OS families but does not publish an architecture
-matrix; use user-confirmed target combinations rather than inferring them from
-the host used by CI.
+The requested scope includes Linux, macOS and Windows, plus 32-bit ARM.
+`compiler/target.c` parses architecture, OS, ABI, object format, libc and pointer
+width from target triples. This is target identification, not backend support.
+The exact ARM32 OS/ABI tuple remains to be selected; “ARM32” alone does not
+define object relocations, calling convention, system-call interface or C ABI.
 
 ## Current pipeline and blockers
 
@@ -100,19 +98,16 @@ milestone must say which tools remain required.
 
 ## First implementation boundary
 
-The compiler now has an initial `--emit-ir` path in `compiler/ir.c`. It lowers
-ordinary function bodies, local slots, calls with visible signatures, structured
-control flow, `match`, and short-circuit boolean operations into target-neutral
-basic blocks while preserving the C backend. This is deliberately an inspectable
-partial IR: literal globals and struct/enum declarations are represented,
-while process declarations, native blocks, and other unsupported top-level
-forms produce a diagnostic. Imported calls without a visible signature carry an
-unknown result type. Aggregate construction/layout, machine-code generation,
-and executable linking are still absent.
+The `--emit-ir` path lowers ordinary function bodies, local slots, calls with
+visible signatures, structured control flow, `match`, short-circuit boolean
+operations, and `native main` into target-neutral basic blocks. Literal globals
+and struct/enum declarations are represented; process declarations and
+supervisors remain unsupported. Calls without visible signatures retain an
+unknown result type.
 
-The next IR work is to resolve imported/builtin signatures, model aggregate
-construction/layout, and lower process/coroutine semantics without losing ownership,
-scheduling, or event-loop behavior. Only then can each target backend consume a
-stable contract. The first native backend should be selected only after the
-platform matrix is recorded; a Linux x86_64-only executable writer would be a
-prototype and must not be presented as completing the requested platform scope.
+`compiler/native.c` consumes a single-block integer `native main` and writes a
+Linux x86_64 ELF executable directly. It supports integer constants, arithmetic,
+comparisons and integer locals, and invokes no C compiler, assembler, linker or
+Forge runtime. The driver regression includes an execution check with a missing
+`--cc` path. General control flow, calls, object files, runtime linking,
+self-hosting and the remaining requested targets are still outstanding.

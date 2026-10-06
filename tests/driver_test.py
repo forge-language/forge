@@ -1,6 +1,7 @@
 """Verify the native compiler's default output and relocatable install layout."""
 import argparse
 import os
+import platform
 from pathlib import Path
 import shutil
 import subprocess
@@ -51,6 +52,25 @@ class DriverTest(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
         binary = self.root / ('hello world.exe' if os.name == 'nt' else 'hello world')
         self.assertGreater(int(subprocess.check_output([str(binary)], text=True)), 0)
+
+    @unittest.skipUnless(sys.platform.startswith('linux') and platform.machine().lower() in
+                         ('x86_64', 'amd64'), 'Forge native ELF prototype targets x86_64 Linux')
+    def test_forge_native_target_emits_without_a_c_compiler(self):
+        cases = [
+            ('native main { let answer: int = 6 * 7; return answer; }', 42),
+            ('native main { return (100 - 16) / 2; }', 42),
+            ('native main { return 89 % 47; }', 42),
+            ('native main { let n: int = 8; return n == 8; }', 1),
+        ]
+        for index, (source, expected) in enumerate(cases):
+            with self.subTest(source=source):
+                self.source.write_text(source)
+                binary = self.root / f'native-answer-{index}'
+                result = self.compile('--target', 'x86_64-unknown-linux-gnu', '--cc',
+                                      str(self.root / 'missing-cc'), '-o', str(binary))
+                self.assertEqual(result.returncode, 0, result.stderr)
+                run = subprocess.run([str(binary)], capture_output=True, text=True, timeout=10)
+                self.assertEqual(run.returncode, expected)
 
     def test_input_alias_cannot_be_overwritten(self):
         original = self.source.read_bytes()
