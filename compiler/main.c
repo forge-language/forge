@@ -10,6 +10,7 @@
 #include "lexer.h"
 #include "parser.h"
 #include "codegen.h"
+#include "ir.h"
 #include "optimize.h"
 #include "module_loader.h"
 #include "driver.h"
@@ -44,6 +45,7 @@ static void usage(const char *prog) {
     fprintf(stderr, "Options:\n");
     fprintf(stderr, "  --emit-js          Emit JavaScript for browser/native-JS FFI\n");
     fprintf(stderr, "  --emit-c           Emit C instead of a native binary\n");
+    fprintf(stderr, "  --emit-ir          Emit the target-neutral typed control-flow IR\n");
     fprintf(stderr, "  --forge-root PATH  Project root (include/, build/lib)\n");
     fprintf(stderr, "  --lib-dir PATH     Directory containing libforge_*.a\n");
     fprintf(stderr, "  -I PATH            Extra include directory (also searches for .fg modules)\n");
@@ -113,6 +115,7 @@ int main(int argc, char **argv) {
     }
 
     bool emit_js = false;
+    bool emit_ir = false;
     bool lib_mode = false;
     bool check_only = false;
     bool symbols_json = false;
@@ -150,6 +153,8 @@ int main(int argc, char **argv) {
             emit_js = true;
         } else if (strcmp(argv[i], "--emit-c") == 0) {
             cfg.emit_c_only = true;
+        } else if (strcmp(argv[i], "--emit-ir") == 0) {
+            emit_ir = true;
         } else if (strcmp(argv[i], "--forge-root") == 0) {
             cfg.forge_root = option_value(argc, argv, &i);
             cfg.include_dir = NULL;
@@ -202,6 +207,10 @@ int main(int argc, char **argv) {
         fprintf(stderr, "forge: library mode requires --header\n");
         return 1;
     }
+    if (emit_ir && (emit_js || lib_mode || cfg.emit_c_only || check_only || symbols_json || link_lib_count || lib_dir_count)) {
+        fprintf(stderr, "forge: --emit-ir cannot be combined with other output, check, symbol, or native library options\n");
+        return 1;
+    }
 
     size_t len = 0;
     char *src = read_file(input, &len);
@@ -233,13 +242,28 @@ int main(int argc, char **argv) {
 
     int rc = 0;
     char *inferred_output = NULL;
-    if (!output && !lib_mode && !emit_js && !cfg.emit_c_only) {
+    if (!output && !lib_mode && !emit_js && !emit_ir && !cfg.emit_c_only) {
         inferred_output = default_output(input);
         output = inferred_output;
     }
     if (same_file(input, output) || same_file(input, header))
         forge_die("output would overwrite input; use a different filename");
-    if (emit_js) {
+    if (emit_ir) {
+        IRModule module;
+        if (!ir_lower_program(&prog, &module)) rc = 1;
+        else {
+            FILE *ir_out = stdout;
+            if (output) {
+                ir_out = fopen(output, "wb");
+                if (!ir_out) { fprintf(stderr, "forge: cannot open IR output '%s'\n", output); rc = 1; }
+            }
+            if (!rc) {
+                ir_dump(&module, ir_out);
+                if (output && fclose(ir_out) != 0) { fprintf(stderr, "forge: cannot write IR output '%s'\n", output); rc = 1; }
+            }
+            ir_module_free(&module);
+        }
+    } else if (emit_js) {
         if (lib_mode || cfg.emit_c_only || !output || link_lib_count) forge_die("--emit-js requires -o and cannot be combined with native library options");
         FILE *out_js = fopen(output, "wb");
         if (!out_js) forge_die("cannot open JavaScript output");

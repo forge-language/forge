@@ -100,10 +100,18 @@ milestone must say which tools remain required.
 
 ## First implementation boundary
 
-The first code milestone should be the target-independent IR and its AST lowering,
-with the existing C backend still available as a compatibility backend. This
-lets the project move validation and lowering out of the C text emitter before
-committing to incompatible ELF, Mach-O, PE/COFF and CPU-specific designs. The
-first native backend should be selected only after the platform matrix is
-recorded; a Linux x86_64-only executable writer would be a prototype and must
-not be presented as completing the requested platform scope.
+The compiler now has an initial `--emit-ir` path in `compiler/ir.c`. It lowers
+ordinary function bodies, local slots, calls with visible signatures, structured
+control flow, `match`, and short-circuit boolean operations into target-neutral
+basic blocks while preserving the C backend. This is deliberately an inspectable
+partial IR: globals, structs, enums, process declarations, native blocks, and
+other unsupported top-level forms produce a diagnostic; imported calls without
+a visible signature carry an unknown result type. It neither emits machine code
+nor links executables.
+
+The next IR work is to resolve imported/builtin signatures, represent globals
+and aggregates, and lower process/coroutine semantics without losing ownership,
+scheduling, or event-loop behavior. Only then can each target backend consume a
+stable contract. The first native backend should be selected only after the
+platform matrix is recorded; a Linux x86_64-only executable writer would be a
+prototype and must not be presented as completing the requested platform scope.
