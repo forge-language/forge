@@ -194,8 +194,10 @@ The resumed session completed and verified the following local corrective work:
 - **Runtime integration:** the existing published runtime correction
   `39ab3daa90f15852cbbf4dd97f5d4c1502bd392d` fixes nested indexed-pool waits and
   consumes owned payloads rejected by full mailboxes. The compiler dependency pin
-  now selects that commit. The standalone stdlib dependency pin is also updated
-  locally. `scheduler_regressions` exercises single-/multi-worker nested waits,
+  now selects that commit. The standalone stdlib dependency pin is also updated;
+  the compiler selects stdlib revision
+  `261ac791443b0f857cd8bc0b3e72c174f9526527`. `scheduler_regressions` exercises
+  single-/multi-worker nested waits,
   coroutine and external-thread batches, full mailboxes and other scheduler paths.
 - **Lean 4:** `Forge.BoundedMailbox` proves capacity preservation, FIFO admission,
   rejection without queue mutation and the rejection disposal token.
@@ -240,8 +242,9 @@ no equivalent host signature check.
 The Lean results prove explicit mathematical models, not refinement of the C
 implementation, heap disposal, race freedom or scheduler liveness. Runtime
 integer overflow remains a separate unresolved language/backend policy.
-New compiler/stdlib/proof changes are local; publication is not established by
-these tests. The runtime correction itself was already published before resume.
+Compiler, stdlib and proof changes are tracked in their respective repositories.
+These tests establish the listed behavior rather than broader safety guarantees.
+The runtime correction itself was already published before resume.
 
 The most useful next production gates are semantic failure detection before
 execution, runtime bounds/recovery tests, precise optional-feature behavior,
