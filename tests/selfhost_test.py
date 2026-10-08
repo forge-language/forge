@@ -11,6 +11,7 @@ import unittest
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--forge', required=True)
+parser.add_argument('--stage0', default=None)
 parser.add_argument('--source-root', default=None)
 parser.add_argument('--root', required=True)
 parser.add_argument('--lib-dir', required=True)
@@ -40,6 +41,20 @@ class SelfHostedCompilerTests(unittest.TestCase):
                                 text=True, capture_output=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout, expected)
+
+    def compare_native_compilers(self, source, expected):
+        self.source.write_text(source)
+        compilers = [config.forge]
+        if config.stage0:
+            compilers.append(config.stage0)
+        for index, compiler in enumerate(compilers):
+            with self.subTest(compiler=compiler):
+                output = self.directory / f'comparison-{index}'
+                result = subprocess.run(
+                    [compiler, str(self.source), '-o', str(output), *self.native_flags()],
+                    cwd=self.directory, text=True, capture_output=True, timeout=30)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.run_binary(output, expected)
 
     def test_default_native_output(self):
         result = self.invoke(self.source, *self.native_flags())
@@ -195,6 +210,149 @@ native main {
         self.assertEqual(result.returncode, 0, result.stderr)
         self.run_binary(self.directory / 'flow', '10\na"b\n')
 
+    def test_expression_comments_preserve_native_semantics(self):
+        self.compare_native_compilers('''fn sum(n: int): int {
+    return n // ignored: } ) ; unsupported bool
+        + 2;
+}
+native main {
+    let value: int = sum(1 // ) ; }
+        );
+    println(value // generated closing punctuation must survive
+        );
+    println("string" // literal expressions also need comment removal
+        );
+    if ((value // ) } ;
+        == 3)) { println("literal // ; ) } \\\"quote\\\""); }
+    for (let i: int = 0 // ; ) }
+        ; i < 2 // ; ) }
+        ; i = i + 1 // ; ) }
+        ) { println(i); }
+    return 0 // ; }
+        ;
+}
+''', '3\nstring\nliteral // ; ) } "quote"\n0\n1\n')
+
+    def test_println_uses_expression_types_and_preserves_argument_order(self):
+        self.compare_native_compilers('''import strings;
+const GREETING = "constant";
+fn text(): string { return "function"; }
+fn number(): int { println(99); return 7; }
+fn choose(value: string, unused: int): string { return value; }
+fn show(value: string): void { println(value); }
+native main {
+    let value: string = "variable";
+    println(value);
+    println((text()));
+    println(GREETING);
+    show("parameter");
+    if (1) { let value: int = 42; println(value); }
+    println(value);
+    println("prefix:", number(), "tail");
+    println (choose("a,b", 1), // , ) ignored
+        str_concat("c", "d"), (1 + (2 * 3)));
+    println( // comments-only empty argument list
+        );
+    return 0;
+}
+''', 'variable\nfunction\nconstant\nparameter\n42\nvariable\nprefix:99\n7tail\na,bcd7\n\n')
+
+    def test_process_println_string_values_and_mixed_arguments(self):
+        self.compare_native_compilers('''fn message(): string { return "process"; }
+process main {
+    let value: string = message();
+    println(value, ":", 3);
+}
+''', 'process:3\n')
+
+    def test_println_rejects_empty_comma_arguments_before_emission(self):
+        for arguments in [', 1', '1,', '1, ,2', '1, // comment\n',
+                          '1, // comment\n , 2']:
+            with self.subTest(arguments=arguments):
+                self.source.write_text(f'native main {{ println({arguments}); return 0; }}\n')
+                output = self.directory / 'invalid-print.c'
+                result = self.invoke(self.source, '--emit-c', '-o', output)
+                self.assertNotEqual(result.returncode, 0, result.stderr)
+                self.assertIn('println argument', result.stderr)
+                self.assertFalse(output.exists())
+
+    def test_println_resolves_shadowed_values_after_nested_scopes(self):
+        self.compare_native_compilers('''native main {
+    let value: string = "outer";
+    { let value: int = 1; println(value); }
+    println(value);
+    while (0) { let value: int = 2; println(value); }
+    println(value);
+    for (let value: int = 0; value < 1; value = value + 1) {
+        println(value);
+    }
+    println(value);
+    match 1 {
+        1 => { let value: int = 3; println(value); }
+        _ => { println(value); }
+    }
+    println(value);
+    if (0) { let value: int = 4; println(value); }
+    else { println(value); }
+    println(value);
+    return 0;
+}
+''', '1\nouter\nouter\n0\nouter\n3\nouter\nouter\nouter\n')
+
+    def test_boolean_functions_literals_and_short_circuit(self):
+        self.compare_native_compilers('''const ON = true;
+const OFF = false;
+fn identity(value: bool): bool { return value; }
+fn even(n: int): bool {
+    if (n == 0) { return true; }
+    return odd(n - 1);
+}
+fn odd(n: int): bool {
+    if (n == 0) { return false; }
+    return even(n - 1);
+}
+fn effect(): bool { println("effect"); return true; }
+fn true_value(): int { return 8; }
+fn false_value(): int { return 9; }
+native main {
+    let ready: bool = identity(ON);
+    println(ready, OFF, true, false);
+    println(!ready, ready == true, false != ready);
+    println(false && effect());
+    println(true || effect());
+    println(true && effect());
+    println(false || effect());
+    println(even(6), odd(6), even(7), odd(7));
+    if (ready) { println("ready"); }
+    else { println("wrong"); }
+    while (ready) { ready = false; }
+    println(ready);
+    for (let running: bool = true; running; running = false) { println(5); }
+    println(true_value(), false_value(), "true,false");
+    return 0;
+}
+''', '1010\n011\n0\n1\neffect\n1\neffect\n1\n1001\nready\n0\n5\n89true,false\n')
+
+    def test_boolean_constants_and_parenthesized_constant_expressions(self):
+        self.compare_native_compilers('''const BASE = 1 + 2;
+const NEGATIVE = -2;
+const ENABLED = true;
+const LABEL = "true;false";
+native main {
+    println(BASE * 3, 10 / NEGATIVE);
+    println(ENABLED && !false, LABEL);
+    return 0;
+}
+''', '9-5\n1true;false\n')
+
+    def test_process_boolean_parameter_and_binding(self):
+        self.compare_native_compilers('''fn invert(value: bool): bool { return !value; }
+process main {
+    let value: bool = invert(false);
+    if (value) { println(value); }
+}
+''', '1\n')
+
     def test_existing_process_control_and_match_examples(self):
         expected = {'match': 'OK\nlucky seven\n',
                     'control_flow': '2\n0\n1\n2\n0\n1\n2\n1\n2\n3\n4\n6\n7\n'}
@@ -222,6 +380,82 @@ native main {
                                 text=True, timeout=2)
         self.assertEqual(native.returncode, 7, native.stderr)
         self.assertEqual(native.stdout, '1\n')
+
+    def test_multiline_inline_and_nested_match_arms(self):
+        self.compare_native_compilers('''fn select(): int { println("select"); return 1; }
+native main {
+    match(select()) // comment with a fake opening brace {
+    {
+        1 // comment with a fake => }
+        =>
+        {
+            println("first; => }");
+            println("second");
+            match(2) { 2 => println("nested"); _ => { println("wrong"); } }
+        }
+        _ => { println("wrong"); }
+    }
+    match 2 { 1 => println("wrong"); 2 => if(false) { println("wrong"); }
+        else if(true) // comment with a fake brace {
+        { println("branch"); } else { println("wrong"); }
+        _ => println("wrong"); }
+    match 9 { 0009 => { println("decimal"); } _ => { println("wrong"); } }
+    match 9223372036854775807 {
+        9223372036854775807 => println("maximum");
+        _ => println("wrong");
+    }
+    match 0 { _ => {} }
+    println("after");
+    return 0;
+}
+''', 'select\nfirst; => }\nsecond\nnested\nbranch\ndecimal\nmaximum\nafter\n')
+
+    def test_match_rejects_malformed_patterns_and_unreachable_arms(self):
+        for arms in ['_ => {} 1 => {}', '_ => {} _ => {}', 'name => {}',
+                     '-1 => {}', '9223372036854775808 => {}', '1 {}',
+                     '1 =>', '1 => println(1)', '1 => if(1) println(1);',
+                     '1 => println(1) 2 => println(2);']:
+            with self.subTest(arms=arms):
+                self.source.write_text(f'native main {{ match 1 {{ {arms} }} return 0; }}\n')
+                output = self.directory / 'invalid-match.c'
+                result = self.invoke(self.source, '--emit-c', '-o', output)
+                self.assertNotEqual(result.returncode, 0, result.stderr)
+                self.assertIn('match', result.stderr)
+                self.assertFalse(output.exists())
+
+    def test_match_arms_accept_loop_statements_and_keep_loop_control(self):
+        self.compare_native_compilers('''native main {
+    match 1 {
+        1 => for(let i: int = 0; i < 2; i = i + 1) { println(i); }
+        _ => {}
+    }
+    let n: int = 0;
+    match 0 {
+        0 => while(n < 2) { n = n + 1; println(n); }
+        _ => {}
+    }
+    for(let i: int = 0; i < 4; i = i + 1) {
+        match i {
+            0 => continue // ignored ;
+                ;
+            1 => println("one");
+            _ => break // ignored ;
+                ;
+        }
+        println("tail");
+    }
+    return 0;
+}
+''', '0\n1\n1\n2\none\ntail\n')
+
+    def test_match_statement_scan_rejects_excessive_else_nesting(self):
+        arms = 'if(0) {} else ' * 300 + '{}'
+        self.source.write_text(f'native main {{ match 1 {{ 1 => {arms} }} return 0; }}\n')
+        output = self.directory / 'deep-match.c'
+        result = self.invoke(self.source, '--emit-c', '-o', output)
+        self.assertGreater(result.returncode, 0, result.stderr)
+        self.assertIn('match arm requires a complete statement', result.stderr)
+        self.assertFalse(output.exists())
 
     def test_for_continue_executes_iteration_step(self):
         self.source.write_text('native main {\n let total: int = 0;\n for (let i: int = 0; i < 4; i = i + 1) {\n  if (i == 1) { continue; }\n  total = total + i;\n }\n println(total);\n return 0;\n}\n')

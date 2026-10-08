@@ -44,7 +44,7 @@ foreach(component IN ITEMS runtime stdlib)
 endforeach()
 set(FORGE_CC_ARGS --cc "${CMAKE_C_COMPILER}")
 add_executable(forge compiler/main.c compiler/lexer.c compiler/parser.c
-    compiler/ast.c compiler/codegen.c compiler/codegen_js.c compiler/mod_registry.c
+    compiler/ast.c compiler/semantic.c compiler/codegen.c compiler/codegen_js.c compiler/mod_registry.c
     compiler/module_loader.c compiler/symbols.c compiler/optimize.c compiler/driver.c)
 target_include_directories(forge PRIVATE compiler "${FORGE_ROOT_DIR}/include")
 target_link_libraries(forge PRIVATE forge_runtime)
@@ -148,7 +148,7 @@ if(BUILD_TESTING)
             endif()
             if(name STREQUAL "selfhost")
                 set(test_compiler "${FORGE_STAGE2_BIN}")
-                set(extra_args --source-root "${CMAKE_CURRENT_SOURCE_DIR}")
+                set(extra_args --source-root "${CMAKE_CURRENT_SOURCE_DIR}" --stage0 "$<TARGET_FILE:forge>")
             else()
                 set(test_compiler "$<TARGET_FILE:forge>")
                 set(extra_args "")

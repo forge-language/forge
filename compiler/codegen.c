@@ -278,12 +278,6 @@ static void cg_free_symbols(Codegen *cg) {
 }
 
 static void cg_push_local(Codegen *cg, ForgeStr name, ForgeType ty) {
-    for (size_t i = 0; i < cg->local_count; i++) {
-        if (forge_str_eq(cg->locals[i].name, name)) {
-            cg->locals[i].type = ty;
-            return;
-        }
-    }
     if (cg->local_count == cg->local_cap) {
         size_t cap = cg->local_cap ? cg->local_cap * 2 : 8;
         struct ForgeLocal *grown =
@@ -302,8 +296,8 @@ static void cg_push_params(Codegen *cg, Param *params) {
 }
 
 static ForgeType cg_lookup_local(Codegen *cg, ForgeStr name) {
-    for (size_t i = 0; i < cg->local_count; i++) {
-        if (forge_str_eq(cg->locals[i].name, name)) return cg->locals[i].type;
+    for (size_t i = cg->local_count; i > 0; i--) {
+        if (forge_str_eq(cg->locals[i - 1].name, name)) return cg->locals[i - 1].type;
     }
     return forge_type_int();
 }
@@ -985,6 +979,14 @@ static void emit_coro_fn(Codegen *cg, CoroDecl *coro) {
     fputs("}\n\n", cg->out);
 }
 
+/* Local declarations are a stack: exiting a generated C block restores the
+ * outer binding and its type rather than overwriting it during shadowing. */
+static void emit_block_stmts(Codegen *cg, Stmt *s, const char *proc_var, bool in_coro) {
+    size_t saved_locals = cg->local_count;
+    emit_stmts(cg, s, proc_var, in_coro);
+    cg->local_count = saved_locals;
+}
+
 static void emit_if_stmt(Codegen *cg, Stmt *s, const char *proc_var, bool in_coro) {
     cg_enter(cg);
     cg_indent(cg);
@@ -992,7 +994,7 @@ static void emit_if_stmt(Codegen *cg, Stmt *s, const char *proc_var, bool in_cor
     emit_expr(cg, s->as.if_stmt.cond);
     fputs(") {\n", cg->out);
     cg->indent++;
-    emit_stmts(cg, s->as.if_stmt.then_br->first, proc_var, in_coro);
+    emit_block_stmts(cg, s->as.if_stmt.then_br->first, proc_var, in_coro);
     cg->indent--;
     cg_indent(cg);
     fputs("}", cg->out);
@@ -1005,7 +1007,7 @@ static void emit_if_stmt(Codegen *cg, Stmt *s, const char *proc_var, bool in_cor
         } else {
             fputs(" else {\n", cg->out);
             cg->indent++;
-            emit_stmts(cg, s->as.if_stmt.else_br->first, proc_var, in_coro);
+            emit_block_stmts(cg, s->as.if_stmt.else_br->first, proc_var, in_coro);
             cg->indent--;
             cg_line(cg, "}");
         }
@@ -1080,7 +1082,7 @@ static void emit_stmts(Codegen *cg, Stmt *s, const char *proc_var, bool in_coro)
             /* C's own `continue` is correct for a while loop. */
             int saved_cont = cg->continue_label;
             cg->continue_label = 0;
-            emit_stmts(cg, s->as.while_stmt.body->first, proc_var, in_coro);
+            emit_block_stmts(cg, s->as.while_stmt.body->first, proc_var, in_coro);
             cg->continue_label = saved_cont;
             cg->indent--;
             cg_indent(cg);
@@ -1088,6 +1090,7 @@ static void emit_stmts(Codegen *cg, Stmt *s, const char *proc_var, bool in_coro)
             break;
         }
         case STMT_FOR: {
+            size_t saved_locals = cg->local_count;
             bool suspends = block_has_yield(s->as.for_stmt.body->first);
             bool inline_step = for_step_inlinable(s->as.for_stmt.step);
             int saved_cont = cg->continue_label;
@@ -1106,7 +1109,7 @@ static void emit_stmts(Codegen *cg, Stmt *s, const char *proc_var, bool in_coro)
                 fputs(") {\n", cg->out);
                 cg->indent++;
                 cg->continue_label = 0;
-                emit_stmts(cg, s->as.for_stmt.body->first, proc_var, in_coro);
+                emit_block_stmts(cg, s->as.for_stmt.body->first, proc_var, in_coro);
                 cg->continue_label = saved_cont;
                 cg->indent--;
                 cg_indent(cg);
@@ -1122,7 +1125,7 @@ static void emit_stmts(Codegen *cg, Stmt *s, const char *proc_var, bool in_coro)
                 fputs(") {\n", cg->out);
                 cg->indent++;
                 cg->continue_label = s->as.for_stmt.step ? label : 0;
-                emit_stmts(cg, s->as.for_stmt.body->first, proc_var, in_coro);
+                emit_block_stmts(cg, s->as.for_stmt.body->first, proc_var, in_coro);
                 cg->continue_label = saved_cont;
                 if (s->as.for_stmt.step) {
                     cg_line(cg, "__forge_cont_%d: ;", label);
@@ -1135,6 +1138,7 @@ static void emit_stmts(Codegen *cg, Stmt *s, const char *proc_var, bool in_coro)
             cg->indent--;
             cg_indent(cg);
             fputs("}\n", cg->out);
+            cg->local_count = saved_locals;
             break;
         }
         case STMT_BREAK:
@@ -1214,7 +1218,7 @@ static void emit_stmts(Codegen *cg, Stmt *s, const char *proc_var, bool in_coro)
                 }
                 fputs(" {\n", cg->out);
                 cg->indent++;
-                emit_stmts(cg, arm->body->first, proc_var, in_coro);
+                emit_block_stmts(cg, arm->body->first, proc_var, in_coro);
                 cg->indent--;
                 cg_line(cg, "}");
                 first = 0;
@@ -1225,9 +1229,11 @@ static void emit_stmts(Codegen *cg, Stmt *s, const char *proc_var, bool in_coro)
             break;
         }
         case STMT_BLOCK:
+            cg_line(cg, "{");
             cg->indent++;
-            emit_stmts(cg, s->as.block->first, proc_var, in_coro);
+            emit_block_stmts(cg, s->as.block->first, proc_var, in_coro);
             cg->indent--;
+            cg_line(cg, "}");
             break;
         }
         s = s->next;

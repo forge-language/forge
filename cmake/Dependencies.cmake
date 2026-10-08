@@ -1,5 +1,5 @@
 # Immutable versions; override source directories for local multi-repository work.
-set(FORGE_RUNTIME_REVISION "61cd2e54768ec9d1e9a4f727772cf1aae0eef778")
+set(FORGE_RUNTIME_REVISION "39ab3daa90f15852cbbf4dd97f5d4c1502bd392d")
 set(FORGE_STDLIB_REVISION "f0b92f8846f4797fd057b2c8b415f6bdba87a699")
 include(FetchContent)
 foreach(component IN ITEMS runtime stdlib)

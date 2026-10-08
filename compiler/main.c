@@ -1,3 +1,4 @@
+#include "semantic.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -49,7 +50,7 @@ static void usage(const char *prog) {
     fprintf(stderr, "  -I PATH            Extra include directory (also searches for .fg modules)\n");
     fprintf(stderr, "  -l NAME             Link libforge_NAME.a (repeatable)\n");
     fprintf(stderr, "  --cc PATH          C compiler for native output (default: CC, clang, gcc, or cc)\n");
-    fprintf(stderr, "  --check            Parse only; exit 0 on success (for LSP / CI)\n");
+    fprintf(stderr, "  --check            Parse and check visible types; exit 0 on success (for LSP / CI)\n");
     fprintf(stderr, "  --symbols-json     Print document symbols as JSON to stdout\n");
     fprintf(stderr, "  --keep-temp        Keep intermediate object files\n");
 }
@@ -217,6 +218,7 @@ int main(int argc, char **argv) {
         .include_dir_count = include_count,
     };
     forge_load_modules(&prog, &mcfg);
+    forge_check_program(&prog);
     optimize_program(&prog);
 
     if (symbols_json) {

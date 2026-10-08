@@ -40,8 +40,83 @@ class CompilerRegressionTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout, expected)
 
+    def test_semantic_errors_are_rejected_before_every_backend(self):
+        cases = [
+            ('native main { println(missing_name); }', 'unknown value'),
+            ('native main { let value: int = "wrong"; }', 'type mismatch'),
+            ('fn add(a: int, b: int): int { return a + b; } native main { add(1); }', 'argument count'),
+            ('fn f(a: int): int { return a; } native main { f("wrong"); }', 'type mismatch'),
+            ('fn f(): int { return "wrong"; } native main { return 0; }', 'type mismatch'),
+            ('fn f(): void { return 1; } native main { return 0; }', 'type mismatch'),
+            ('native main { let x: int; println(x); }', 'uninitialized'),
+            ('native main { let x: int; if (1) { x = 3; } println(x); }', 'uninitialized'),
+            ('native main { let x: int; while (0) { x = 3; } println(x); }', 'uninitialized'),
+            ('native main { { let x: int = 1; } println(x); }', 'unknown value'),
+            ('native main { if (0) { missing_function(); } }', 'unknown function'),
+            ('native main { let x: int = missing_function() * 0; }', 'unknown function'),
+            ('native main { break; }', 'outside loop'),
+            ('native main { yield; }', 'coroutine context'),
+            ('process main { coroutine worker(n: int) {} spawn worker(); }', 'argument count'),
+            ('native main { let x: int = x; }', 'unknown value'),
+            ('import thread; fn wrong(n: string): int { return 0; } native main { thread_spawn(wrong, 1); }', 'callback parameters'),
+        ]
+        for source, diagnostic in cases:
+            for mode in ['--check', '--emit-c', '--emit-js']:
+                with self.subTest(source=source, mode=mode):
+                    self.source.write_text(source)
+                    output = self.source.parent / 'rejected.out'
+                    output.write_text('preserve existing output')
+                    result = self.invoke(self.source, mode, '-o', output)
+                    self.assertEqual(result.returncode, 1, result.stderr)
+                    self.assertIn(diagnostic, result.stderr)
+                    self.assertEqual(output.read_text(), 'preserve existing output')
+
+    def test_semantic_initialization_and_shadowing(self):
+        self.run_program('''native main {
+            let x: int;
+            if (1) { x = 7; } else { x = 9; }
+            { let x: string = "inner"; println(x); }
+            println(x);
+            let y: int;
+            y = 3;
+            println(y);
+            return 0;
+        }''', 'inner\n7\n3\n')
+
+    def test_imported_function_signatures_are_checked(self):
+        (self.source.parent / 'helper.fg').write_text('fn value(n: int): string { return "ok"; }')
+        self.source.write_text('import helper; native main { helper.value("wrong"); }')
+        result = self.invoke(self.source, '--check')
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn('type mismatch', result.stderr)
+        self.source.write_text('import helper; native main { helper.missing(); }')
+        result = self.invoke(self.source, '--check')
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn('unknown function', result.stderr)
+
     def test_string_views_and_builder_snapshots(self):
         self.run_program('import strings;native main{let v: int=str_view("한글");println(str_view_len(v));println(str_view_at(v,0));println(str_view_at(v,9));let b: int=str_builder();str_builder_append(b,"one");let first: string=str_builder_finish(b);str_builder_char(b,65);println(first);println(str_builder_finish(b));println(str_builder_char(b,0));return 0;}', '6\n237\n-1\none\noneA\n0\n')
+
+    def test_local_type_and_constant_resolution_follow_lexical_scopes(self):
+        self.run_program('''const LABEL = "constant";
+fn show(value: string): void {
+    if (1) { let value: int = 11; println(value); }
+    println(value);
+}
+native main {
+    show("parameter");
+    { let LABEL: int = 12; println(LABEL); }
+    println(LABEL);
+    if (0) { let LABEL: int = 13; println(LABEL); }
+    else if (1) { println(LABEL); }
+    for (let LABEL: int = 0; LABEL < 1; LABEL = LABEL + 1) {
+        let LABEL: string = "body";
+        println(LABEL);
+    }
+    println(LABEL);
+    return 0;
+}
+''', '11\nparameter\n12\nconstant\nconstant\nbody\nconstant\n')
 
     def test_native_os_path_calls_print_strings_and_clean_temp_files(self):
         binary = self.compile_program('''import os; import fs;
