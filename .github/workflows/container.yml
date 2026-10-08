@@ -1,0 +1,25 @@
+name: Compiler container
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ['Containerfile', '.dockerignore', 'compiler/**', 'bootstrap/**', 'cmake/**', 'CMakeLists.txt', '.github/workflows/container.yml']
+  pull_request:
+    paths: ['Containerfile', '.dockerignore', 'compiler/**', 'bootstrap/**', 'cmake/**', 'CMakeLists.txt', '.github/workflows/container.yml']
+permissions:
+  contents: read
+jobs:
+  container:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -f Containerfile --target compiler -t forge-lang:test .
+      - name: Validate compiler and installed native SDK
+        run: |
+          mkdir -p "$RUNNER_TEMP/forge-container"
+          printf 'native main { println("Hello, Forge!"); return 0; }\n' > "$RUNNER_TEMP/forge-container/main.fg"
+          docker run --rm forge-lang:test --version
+          docker run --rm --user "$(id -u):$(id -g)" -v "$RUNNER_TEMP/forge-container:/workspace" forge-lang:test main.fg -o hello
+          test "$(docker run --rm --user "$(id -u):$(id -g)" -v "$RUNNER_TEMP/forge-container:/workspace" --entrypoint /workspace/hello forge-lang:test)" = 'Hello, Forge!'
+          docker run --rm --user "$(id -u):$(id -g)" -v "$RUNNER_TEMP/forge-container:/workspace" forge-lang:test main.fg --emit-js -o main.js
+          test -s "$RUNNER_TEMP/forge-container/main.js"
