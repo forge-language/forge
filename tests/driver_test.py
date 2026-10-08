@@ -102,6 +102,24 @@ class DriverTest(unittest.TestCase):
                 self.assertEqual(run.returncode, 0)
                 self.assertEqual(run.stdout, expected)
 
+    @unittest.skipUnless(sys.platform.startswith('linux') and platform.machine().lower() in
+                         ('x86_64', 'amd64'), 'Forge native ELF prototype targets x86_64 Linux')
+    def test_forge_native_print_uses_kernel_output_without_newlines(self):
+        cases = [
+            ('import io; native main { print("native"); print(42); return 0; }', 'native42'),
+            ('native main { print(-12); println("!"); return 0; }', '-12!\n'),
+        ]
+        for index, (source, expected) in enumerate(cases):
+            with self.subTest(source=source):
+                self.source.write_text(source)
+                binary = self.root / f'native-print-{index}'
+                result = self.compile('--target', 'x86_64-unknown-linux-gnu', '--cc',
+                                      str(self.root / 'missing-cc'), '-o', str(binary))
+                self.assertEqual(result.returncode, 0, result.stderr)
+                run = subprocess.run([str(binary)], capture_output=True, text=True, timeout=10)
+                self.assertEqual(run.returncode, 0)
+                self.assertEqual(run.stdout, expected)
+
     def test_input_alias_cannot_be_overwritten(self):
         original = self.source.read_bytes()
         alias = self.root / 'alias.c'

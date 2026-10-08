@@ -173,23 +173,27 @@ static bool emit_helper_call(EmitContext *ctx,size_t helper) {
     ctx->calls[ctx->call_count++]=(CallPatch){at,helper};return true;
 }
 
-static bool emit_println(EmitContext *ctx,const IRFunction *fn,const IRInst *x) {
+static bool emit_print(EmitContext *ctx,const IRFunction *fn,const IRInst *x,bool newline) {
     if(x->arg_count>1)return false;
-    size_t helper=ctx->module->function_count+1; /* string printer */
+    size_t int_helper=ctx->module->function_count+(newline?1:0);
+    size_t string_helper=ctx->module->function_count+(newline?3:2);
     if(x->arg_count==0) {
+        if(!newline)return false;
         if(!byte(ctx->code,0x31)||!byte(ctx->code,0xff))return false;
-        return emit_helper_call(ctx,helper);
+        return emit_helper_call(ctx,string_helper);
     }
     ForgeType type=value_type(fn,x->args[0]);
     if(type.kind!=TY_STRING&&type.kind!=TY_INT&&type.kind!=TY_BOOL)return false;
     if(!load_value(ctx->code,fn,x->args[0])||!move_rax_to_arg(ctx->code,0))return false;
-    if(type.kind==TY_STRING)return emit_helper_call(ctx,helper);
-    return emit_helper_call(ctx,ctx->module->function_count); /* integer printer */
+    if(type.kind==TY_STRING)return emit_helper_call(ctx,string_helper);
+    return emit_helper_call(ctx,int_helper);
 }
 
 static bool emit_call(EmitContext *ctx,const IRFunction *caller,const IRInst *x) {
     if(x->op!=IR_CALL)return false;
-    if(x->name.len==7&&!memcmp(x->name.data,"println",7))return emit_println(ctx,caller,x);
+    if(x->name.len==7&&!memcmp(x->name.data,"println",7))return emit_print(ctx,caller,x,true);
+    if(x->name.len==5&&!memcmp(x->name.data,"print",5)&&
+       find_function(ctx->module,x->module,x->name)==SIZE_MAX)return emit_print(ctx,caller,x,false);
     if(!x->type_known)return false;
     size_t callee=find_function(ctx->module,x->module,x->name);
     if(callee==SIZE_MAX)return false;
@@ -348,8 +352,8 @@ static bool patch_rel32(Code *c,size_t at,size_t target) {
     put32(c->data+at,(uint32_t)(int32_t)rel);return true;
 }
 
-static bool emit_print_string_helper(Code *c) {
-    /* RDI is a C string. Write its bytes and a newline through Linux write(2). */
+static bool emit_print_string_helper(Code *c,bool newline) {
+    /* RDI is a C string. Write its bytes and optionally a newline via write(2). */
     if(!byte(c,0x55)||!byte(c,0x48)||!byte(c,0x89)||!byte(c,0xe5)||
        !byte(c,0x48)||!byte(c,0x89)||!byte(c,0xfe)||
        !byte(c,0x48)||!byte(c,0x85)||!byte(c,0xf6)||!byte(c,0x0f)||!byte(c,0x84))return false;
@@ -364,16 +368,18 @@ static bool emit_print_string_helper(Code *c) {
     size_t zero_jump=c->len;
     if(!imm32(c,0)||!byte(c,0xb8)||!imm32(c,1)||!byte(c,0xbf)||!imm32(c,1)||
        !byte(c,0x48)||!byte(c,0x89)||!byte(c,0xca)||!byte(c,0x0f)||!byte(c,0x05))return false;
-    size_t newline=c->len;
-    if(!byte(c,0x6a)||!byte(c,10)||!byte(c,0xb8)||!imm32(c,1)||!byte(c,0xbf)||!imm32(c,1)||
-       !byte(c,0x48)||!byte(c,0x89)||!byte(c,0xe6)||!byte(c,0xba)||!imm32(c,1)||
-       !byte(c,0x0f)||!byte(c,0x05)||!byte(c,0x48)||!byte(c,0x83)||!byte(c,0xc4)||!byte(c,8)||
-       !byte(c,0xc9)||!byte(c,0xc3))return false;
-    return patch_rel32(c,null_jump,newline)&&patch_rel32(c,empty_jump,write_text)&&
-           patch_rel32(c,loop_jump,loop)&&patch_rel32(c,zero_jump,newline)&&write_text<=newline;
+    size_t finish=c->len;
+    if(newline) {
+        if(!byte(c,0x6a)||!byte(c,10)||!byte(c,0xb8)||!imm32(c,1)||!byte(c,0xbf)||!imm32(c,1)||
+           !byte(c,0x48)||!byte(c,0x89)||!byte(c,0xe6)||!byte(c,0xba)||!imm32(c,1)||
+           !byte(c,0x0f)||!byte(c,0x05)||!byte(c,0x48)||!byte(c,0x83)||!byte(c,0xc4)||!byte(c,8))return false;
+    }
+    if(!byte(c,0xc9)||!byte(c,0xc3))return false;
+    return patch_rel32(c,null_jump,finish)&&patch_rel32(c,empty_jump,write_text)&&
+           patch_rel32(c,loop_jump,loop)&&patch_rel32(c,zero_jump,finish);
 }
 
-static bool emit_print_int_helper(Code *c) {
+static bool emit_print_int_helper(Code *c,bool newline) {
     /* RDI is a signed i64. Build decimal digits backwards in a 64-byte stack buffer. */
     if(!byte(c,0x55)||!byte(c,0x48)||!byte(c,0x89)||!byte(c,0xe5)||
        !byte(c,0x48)||!byte(c,0x83)||!byte(c,0xec)||!byte(c,64)||
@@ -381,9 +387,12 @@ static bool emit_print_int_helper(Code *c) {
        !byte(c,0x41)||!byte(c,0x0f)||!byte(c,0x9c)||!byte(c,0xc1)||!byte(c,0x0f)||!byte(c,0x89))return false;
     size_t positive_jump=c->len;if(!imm32(c,0)||!byte(c,0x48)||!byte(c,0xf7)||!byte(c,0xd8))return false;
     size_t positive=c->len;
-    if(!patch_rel32(c,positive_jump,positive)||!byte(c,0x48)||!byte(c,0x8d)||!byte(c,0xbd)||!imm32(c,(uint32_t)-2)||
-       !byte(c,0xc6)||!byte(c,0x45)||!byte(c,0xff)||!byte(c,10)||
-       !byte(c,0x49)||!byte(c,0xb8)||!imm64(c,10))return false;
+    if(!patch_rel32(c,positive_jump,positive))return false;
+    if(newline) {
+        if(!byte(c,0x48)||!byte(c,0x8d)||!byte(c,0xbd)||!imm32(c,(uint32_t)-2)||
+           !byte(c,0xc6)||!byte(c,0x45)||!byte(c,0xff)||!byte(c,10))return false;
+    } else if(!byte(c,0x48)||!byte(c,0x8d)||!byte(c,0xbd)||!imm32(c,(uint32_t)-1))return false;
+    if(!byte(c,0x49)||!byte(c,0xb8)||!imm64(c,10))return false;
     size_t loop=c->len;
     if(!byte(c,0x31)||!byte(c,0xd2)||!byte(c,0x49)||!byte(c,0xf7)||!byte(c,0xf0)||
        !byte(c,0x80)||!byte(c,0xc2)||!byte(c,'0')||!byte(c,0x88)||!byte(c,0x17)||
@@ -394,9 +403,15 @@ static bool emit_print_int_helper(Code *c) {
     size_t no_sign=c->len;
     if(!patch_rel32(c,loop_jump,loop)||!patch_rel32(c,no_sign_jump,no_sign)||
        !byte(c,0x48)||!byte(c,0x8d)||!byte(c,0x77)||!byte(c,1)||
-       !byte(c,0x48)||!byte(c,0x8d)||!byte(c,0x95)||!imm32(c,(uint32_t)-1)||
-       !byte(c,0x48)||!byte(c,0x29)||!byte(c,0xf2)||!byte(c,0x48)||!byte(c,0xff)||!byte(c,0xc2)||
-       !byte(c,0xb8)||!imm32(c,1)||!byte(c,0xbf)||!imm32(c,1)||!byte(c,0x0f)||!byte(c,0x05)||!byte(c,0xc9)||!byte(c,0xc3))return false;
+       !byte(c,0x48)||!byte(c,0x8d)||!byte(c,0x95)||!imm32(c,newline?(uint32_t)-1:0)||
+       !byte(c,0x48)||!byte(c,0x29)||!byte(c,0xf2))return false;
+    if(newline&&!byte(c,0x48))return false;
+    if(newline&&!byte(c,0xff))return false;
+    if(newline&&!byte(c,0xc2))return false;
+    if(!byte(c,0xb8)||!imm32(c,1)||!byte(c,0xbf)||!imm32(c,1)||!byte(c,0x0f)||!byte(c,0x05))return false;
+    if(newline&&!byte(c,0xc9))return false;
+    if(newline&&!byte(c,0xc3))return false;
+    if(!newline&&(!byte(c,0xc9)||!byte(c,0xc3)))return false;
     return true;
 }
 
@@ -439,7 +454,7 @@ static bool emit_elf(const IRModule *m,const char *path) {
         fprintf(stderr,"forge: native ELF prototype requires `native main`\n");return false;
     }
     if(total_insts==SIZE_MAX)return false;
-    size_t *function_offsets=calloc(m->function_count+2,sizeof(size_t));
+    size_t *function_offsets=calloc(m->function_count+4,sizeof(size_t));
     size_t call_cap=total_insts+1;
     CallPatch *calls=calloc(call_cap,sizeof(CallPatch));
     if(!function_offsets||!calls){free(function_offsets);free(calls);return false;}
@@ -454,9 +469,13 @@ static bool emit_elf(const IRModule *m,const char *path) {
         if(!emit_function(&ctx,&m->functions[i]))goto unsupported;
     }
     function_offsets[m->function_count]=code.len;
-    if(!emit_print_int_helper(&code))goto unsupported;
+    if(!emit_print_int_helper(&code,false))goto unsupported;
     function_offsets[m->function_count+1]=code.len;
-    if(!emit_print_string_helper(&code))goto unsupported;
+    if(!emit_print_int_helper(&code,true))goto unsupported;
+    function_offsets[m->function_count+2]=code.len;
+    if(!emit_print_string_helper(&code,false))goto unsupported;
+    function_offsets[m->function_count+3]=code.len;
+    if(!emit_print_string_helper(&code,true))goto unsupported;
     for(size_t i=0;i<ctx.string_count;i++) {
         ctx.strings[i].offset=code.len;
         if(!bytes(&code,ctx.strings[i].bytes.data,ctx.strings[i].bytes.len)||!byte(&code,0))goto unsupported;
@@ -467,7 +486,7 @@ static bool emit_elf(const IRModule *m,const char *path) {
     }
     for(size_t i=0;i<ctx.call_count;i++) {
         CallPatch p=calls[i];
-        if(p.function>=m->function_count+2)goto unsupported;
+        if(p.function>=m->function_count+4)goto unsupported;
         int64_t rel=(int64_t)function_offsets[p.function]-(int64_t)(p.displacement_at+4);
         if(rel<INT32_MIN||rel>INT32_MAX)goto unsupported;
         put32(code.data+p.displacement_at,(uint32_t)(int32_t)rel);

@@ -108,11 +108,11 @@ unknown result type.
 `compiler/native.c` consumes a single-entry `native main` and writes a Linux
 x86_64 ELF executable directly. It supports integer constants, arithmetic,
 comparisons, integer/string locals, basic branches and loops, and
-`println` for one integer or string (or no argument). It writes a Linux x86_64
-ELF executable directly, with no C compiler, assembler, linker or Forge runtime
-in that output path. Driver regressions run these programs with `--cc` set to a
-missing executable. It also supports direct calls to local int/bool/string
-functions with up to six parameters, including recursion. General phi lowering
-across conditional edges, other I/O operations, external symbols, object files,
-runtime linking, self-hosting and the remaining requested targets are still
-outstanding.
+`print`/`println` for one integer or string (`println` also accepts no argument).
+It writes a Linux x86_64 ELF executable directly, with no C compiler, assembler,
+linker or Forge runtime in that output path. Driver regressions run these
+programs with `--cc` set to a missing executable, including `import io` calls.
+It also supports direct calls to local int/bool/string functions with up to six
+parameters, including recursion. General phi lowering across conditional
+edges, other I/O operations, external symbols, object files, runtime linking,
+self-hosting and the remaining requested targets are still outstanding.
