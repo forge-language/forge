@@ -6,6 +6,26 @@ Please read this guide before opening a pull request.
 
 ## Quick start
 
+For the active compiler implementation, use
+[forge-language/forge](https://github.com/forge-language/forge):
+
+```sh
+git clone https://github.com/forge-language/forge.git
+cd forge
+cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j2
+ctest --test-dir build --output-on-failure
+```
+
+Read the [architecture](ARCHITECTURE.md), [current language specification](LANGUAGE_SPEC.md),
+[roadmap](ROADMAP.md), [RFC process](RFC_PROCESS.md) and [code of conduct](CODE_OF_CONDUCT.md).
+The [first contribution candidates](GOOD_FIRST_ISSUES.md) are drafts for maintainers
+to triage, not a promise that all are currently open GitHub issues.
+
+AI agents may plan, implement, test and review. Human maintainers make the final
+design and merge decisions. Safety-sensitive compiler/runtime/ownership changes
+must include reproducible evidence and human review; agent approval alone is insufficient.
+
 1. Fork [forge-language/forge](https://github.com/forge-language/forge)
 2. Create a branch from `main`
 3. Make your changes and verify them locally
