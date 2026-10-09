@@ -243,10 +243,24 @@ int main(int argc, char **argv) {
         forge_die("output would overwrite input; use a different filename");
     if (emit_js) {
         if (lib_mode || cfg.emit_c_only || !output || link_lib_count) forge_die("--emit-js requires -o and cannot be combined with native library options");
+        /* Backend capability checks can fail during generation. Complete that
+         * work before opening the destination so a rejected native construct
+         * does not truncate a user's existing JavaScript file. */
+        FILE *staged_js = tmpfile();
+        if (!staged_js) forge_die("cannot stage JavaScript output");
+        codegen_emit_js(&prog, staged_js);
+        if (fflush(staged_js) != 0 || ferror(staged_js) || fseek(staged_js, 0, SEEK_SET) != 0)
+            forge_die("cannot stage JavaScript output");
         FILE *out_js = fopen(output, "wb");
         if (!out_js) forge_die("cannot open JavaScript output");
-        codegen_emit_js(&prog, out_js);
-        if (fclose(out_js) != 0) forge_die("cannot write JavaScript output");
+        char buffer[8192];
+        size_t bytes;
+        while ((bytes = fread(buffer, 1, sizeof(buffer), staged_js)) != 0)
+            if (fwrite(buffer, 1, bytes, out_js) != bytes) forge_die("cannot write JavaScript output");
+        if (ferror(staged_js)) forge_die("cannot read staged JavaScript output");
+        int staged_result = fclose(staged_js);
+        int output_result = fclose(out_js);
+        if (staged_result != 0 || output_result != 0) forge_die("cannot write JavaScript output");
     } else if (lib_mode) {
         if (!output) {
             fprintf(stderr, "forge: library mode requires -o\n");

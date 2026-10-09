@@ -1,6 +1,7 @@
 # ownership
 
-Heap-owned strings inside a coroutine using `own let`. Ownership prevents use-after-move at compile time.
+An initialized string binding inside a coroutine using `own let`. Stage0 checks
+use after a `send` move, including conservative branch and loop joins.
 
 ## Source
 
@@ -8,7 +9,7 @@ Heap-owned strings inside a coroutine using `own let`. Ownership prevents use-af
 
 ## Features
 
-- `own let` — heap-allocated string owned by the coroutine frame
+- `own let` — a string binding eligible for checked mailbox transfer
 - `yield` with owned state preserved across suspension
 
 ## Code
@@ -40,4 +41,10 @@ owned by coroutine
 
 ## Related
 
-See `docs/first.md` §6 for move semantics (`move(x)`, `send proc, tag, move(msg)`).
+The supported transfer syntax is `send target, Tag, move msg;`. Native lowering
+copies the string into a heap payload, clears the binding and transfers the copy
+to the mailbox. A rejected send also releases that copy. String literals and
+arena strings are not themselves freed, so borrowed aliases remain readable.
+This does not provide zero-copy transfer, exclusive ownership or full lifetime
+checking. General `move` expressions are rejected by stage0. The separate
+`forge-fg` compiler does not implement this ownership check.

@@ -71,6 +71,130 @@ class CompilerRegressionTests(unittest.TestCase):
                     self.assertIn(diagnostic, result.stderr)
                     self.assertEqual(output.read_text(), 'preserve existing output')
 
+    def test_scalar_function_references_and_fallthrough_are_rejected(self):
+        cases = [
+            ('fn f(): int { return 1; } native main { let n: int = f; }', 'type mismatch'),
+            ('fn f(): int { return 1; } native main { println(f); }', 'function reference'),
+            ('fn f(): int { return 1; } native main { println(f * 2); }', 'non-numeric'),
+            ('fn f(): int { return 1; } native main { if (f) {} }', 'non-numeric'),
+            ('fn f(): int { return 1; } fn consume(n: int): int { return n; } native main { consume(f); }', 'type mismatch'),
+            ('extern fn opaque(cb: int): int; fn f(): int { return 1; } fn wrapper(cb: int): int { println(cb * 2); return opaque(cb); } native main { wrapper(f); }', 'type mismatch'),
+            ('extern fn opaque(cb: int, n: int): int; fn f(): int { return 1; } fn wrapper(cb: int): int { return opaque(cb, cb * 2); } native main { wrapper(f); }', 'type mismatch'),
+            ('fn f(): int { return 1; } fn g(): int { return f; } native main {}', 'type mismatch'),
+            ('fn choose(flag: int): int { if (flag) { return 7; } } native main {}', 'reachable end'),
+            ('fn f(n: int): int { match n { 1 => { return 7; } } } native main {}', 'reachable end'),
+            ('fn f(): int { while (1) { break; } } native main {}', 'reachable end'),
+            ('fn f(n: int): int { while (n) { return 1; } } native main {}', 'reachable end'),
+        ]
+        for source, diagnostic in cases:
+            for mode in ['--check', '--emit-c', '--emit-js']:
+                with self.subTest(source=source, mode=mode):
+                    self.source.write_text(source)
+                    output = self.source.parent / 'preserved.out'
+                    output.write_text('existing output')
+                    result = self.invoke(self.source, mode, '-o', output)
+                    self.assertEqual(result.returncode, 1, result.stderr)
+                    self.assertIn(diagnostic, result.stderr)
+                    self.assertEqual(output.read_text(), 'existing output')
+
+    def test_reachable_returns_match_and_initialization(self):
+        self.run_program('''fn choose(flag: int): int {
+            if (flag) { return 7; } else { return 9; }
+        }
+        fn selected(n: int): int {
+            match n { 1 => { return 11; } _ => { return 13; } }
+        }
+        fn initialized(flag: int): int {
+            let value: int;
+            if (flag) { return 17; } else { value = 19; }
+            return value;
+        }
+        fn matched(n: int): int {
+            let value: int;
+            match n { 1 => { value = 23; } _ => { value = 29; } }
+            return value;
+        }
+        native main { println(choose(0)); println(selected(1));
+            println(initialized(0)); println(matched(0)); }
+        ''', '9\n11\n19\n29\n')
+        for source in ['fn forever(): int { while (1) { continue; } } native main {}',
+                       'fn forever(): int { while (1) { while (1) { break; } } } native main {}',
+                       'fn loop(): int { for (let i: int = 0; 1; i = i + 1) { return i; } } native main {}']:
+            for mode in ['--check', '--emit-c', '--emit-js']:
+                self.source.write_text(source)
+                result = self.invoke(self.source, mode, '-o', self.source.parent / 'accepted.out')
+                self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_contextual_function_callbacks_remain_supported(self):
+        self.source.write_text('import thread; fn worker(n: int): int { return n; } native main { thread_spawn(worker, 1); }')
+        result = self.invoke(self.source, '--check')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        (self.source.parent / 'helper.fg').write_text('extern fn js_start(callback: int): int; fn start(callback: int): int { return js_start(callback); } fn callback(value: int): int { return value; }')
+        self.source.write_text('import helper; native main { helper.start(helper.callback); }')
+        result = self.invoke(self.source, '--emit-js', '-o', self.source.parent / 'callback.js')
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_owned_transfer_state_and_unsupported_moves_are_rejected(self):
+        cases = [
+            ('native main { let n: int = 7; let result: int = move n; }', 'unsupported ownership'),
+            ('native main { own let n: int = 7; }', 'initialized strings'),
+            ('native main { own let s: string; }', 'initialized strings'),
+            ('native main { let s: string = "borrowed"; send 0, Drop, move s; }', 'named owned string'),
+            ('native main { send 0, Drop, move "literal"; }', 'named owned string'),
+            ('native main { send 0, Drop, "literal"; }', 'integer value'),
+            ('native main { send "invalid", Drop, 1; }', 'process handle'),
+            ('native main { own let s: string = "literal"; send s, Drop, move s; }', 'process handle'),
+            ('fn target(): int { return 0; } native main { send target, Drop, 1; }', 'process handle'),
+            ('native main { send 1.5, Drop, 1; }', 'process handle'),
+            ('native main { send true, Drop, 1; }', 'process handle'),
+            ('native main { own let s: string = "literal"; send 0, Drop, move s; println(s); }', 'moved owned value'),
+            ('native main { own let s: string = "literal"; if (1) { send 0, Drop, move s; } println(s); }', 'moved owned value'),
+            ('native main { own let s: string = "literal"; match 1 { 1 => { send 0, Drop, move s; } _ => {} } println(s); }', 'moved owned value'),
+            ('native main { own let s: string = "literal"; while (1) { send 0, Drop, move s; } }', 'moved owned value'),
+            ('native main { own let s: string = "literal"; while (1) { if (1) { send 0, Drop, move s; break; } } println(s); }', 'moved owned value'),
+            ('native main { own let s: string = "literal"; while (1) { match 1 { 1 => { send 0, Drop, move s; break; } _ => { break; } } } println(s); }', 'moved owned value'),
+            ('native main { own let s: string = "literal"; while (1) { if (1) { send 0, Drop, move s; continue; } } }', 'moved owned value'),
+            ('native main { own let s: string = "literal"; for (let i: int = 0; i < 2; i = i + 1) { send 0, Drop, move s; } }', 'moved owned value'),
+        ]
+        for source, diagnostic in cases:
+            for mode in ['--check', '--emit-c', '--emit-js']:
+                with self.subTest(source=source, mode=mode):
+                    self.source.write_text(source)
+                    output = self.source.parent / 'preserved.out'
+                    output.write_text('existing output')
+                    result = self.invoke(self.source, mode, '-o', output)
+                    self.assertEqual(result.returncode, 1, result.stderr)
+                    self.assertIn(diagnostic, result.stderr)
+                    self.assertEqual(output.read_text(), 'existing output')
+        # Each iteration constructs a fresh owned handle. A consumed outer handle
+        # is also reusable after an explicit reinitialization at the loop head.
+        for source in ['native main { let destination: int = 0; send destination, Drop, 1; }',
+                       'extern fn destination(): ptr; native main { send destination(), Drop, 1; }',
+                       'native main { while (1) { own let s: string = "fresh"; send 0, Drop, move s; break; } }',
+                       'native main { own let s: string = "first"; while (1) { s = "fresh"; send 0, Drop, move s; } }']:
+            self.source.write_text(source)
+            result = self.invoke(self.source, '--check')
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_unsupported_javascript_preserves_existing_output(self):
+        cases = [
+            'native main { own let value: string = "literal"; }',
+            'native main { own let value: string = "literal"; send 0, Drop, move value; }',
+            'native main { send 0, Drop, 7; }',
+            'process main { coroutine worker() { yield; } spawn worker(); }',
+        ]
+        for source in cases:
+            with self.subTest(source=source):
+                self.source.write_text(source)
+                checked = self.invoke(self.source, '--check')
+                self.assertEqual(checked.returncode, 0, checked.stderr)
+                output = self.source.parent / 'existing.js'
+                output.write_bytes(b'const priorOutput = "keep me";\n')
+                result = self.invoke(self.source, '--emit-js', '-o', output)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn('JavaScript backend', result.stderr)
+                self.assertEqual(output.read_bytes(), b'const priorOutput = "keep me";\n')
+
     def test_semantic_initialization_and_shadowing(self):
         self.run_program('''native main {
             let x: int;

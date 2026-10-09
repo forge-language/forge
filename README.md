@@ -80,13 +80,19 @@ The compiler emits temporary C and invokes a C compiler for native binaries.
 `--emit-c` keeps C output; `--cc`, `--forge-root`, `--lib-dir` and `-I` select
 explicit toolchain and module locations. `--check` validates a source without
 producing a binary, and `--symbols-json` emits editor symbol information.
-Stage0 checks visible function argument/return types, lexical names and local
-initialization before optimization and either backend. Standard-library and
-binary-library signatures, complete return-path analysis, ownership aliases and
-lifetimes remain outside this check. Initialization analysis is conservative:
-both `if` branches must initialize a value; loops and `match` do not establish
-initialization afterward. The separate `forge-fg` compiler does not yet share
-this stage0 semantic pass.
+Stage0 checks visible function argument/return types, lexical names, local
+initialization and reachable non-void function fallthrough before optimization
+and either backend. Initialization joins account for early returns and exhaustive
+`match` arms; loop analysis remains conservative. Function references are distinct
+from scalar values, with limited opaque callback ABI compatibility.
+`send target, Tag, move text` requires an initialized `own` string binding and
+consumes that binding. Native lowering copies the literal or arena string into a
+heap payload owned by the mailbox, including rejected sends. Borrowed aliases
+remain valid; this boundary copy is not zero-copy ownership or lifetime checking.
+General `move` expressions, standard-library and binary-library signatures,
+ownership aliases and lifetimes remain unsupported by this check. Integer process
+handles still rely on the runtime/FFI contract. The separate `forge-fg` compiler
+does not yet share this stage0 semantic pass.
 
 The language includes functions, pattern matching, constants, pipe expressions,
 libraries, processes, coroutines, messages and ownership syntax. Examples under
