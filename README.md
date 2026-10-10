@@ -97,6 +97,9 @@ does not yet share this stage0 semantic pass.
 The language includes functions, pattern matching, constants, pipe expressions,
 libraries, processes, coroutines, messages and ownership syntax. Examples under
 `examples/` are executable language fixtures, not bundled editor/platform projects.
+Stage0's [integer arithmetic contract](docs/integer-arithmetic.md) defines
+wrapping int64 addition/subtraction/multiplication and guarded division/remainder
+consistently across native execution, JavaScript and constant folding.
 
 ## Self-hosting
 

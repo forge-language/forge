@@ -62,3 +62,35 @@ workload 재측정이 필요하다. 숫자 계산의 near-parity만으로 추가
 3. 같은 작업량·완료 확인·워커 조건의 Rust 동시성 및 HTTP 기준을 추가한다.
 4. clean pinned SDK와 다른 장비에서 반복한다. 개선 한계가 확인되면 실패한
    시도와 제약을 이 문서에 추가하고, 실용 목표의 불가능 여부를 다시 판단한다.
+
+## 2026-10-10 후속 검증
+
+stage0의 native add/sub/mul, 상수 folding을 기존 JS와 같은 modular int64
+계약으로 수정했다. 잘못된 정수 division/remainder는 명시적으로 실패한다.
+O0/O3 UBSan, native/JS Python oracle 대조, 부동소수점·라이브러리·코루틴
+회귀를 포함한 8개 산술 테스트를 통과했다. stage2는 이 계약을 아직 공유하지
+않는다. [산술 계약](integer-arithmetic.md)에 범위를 명시한다.
+
+문자열 view의 경계 검사를 유지하면서 호출자에 inline 경로를 노출했다.
+새로 컴파일한 scan/builder의 Rust 대비 처리량은 각각 0.9662/0.6373이다.
+compiler/runtime/stdlib archive 해시는 동일하나 개선 전후 실험 날짜가 다르므로
+인과적 paired improvement 신뢰구간으로 사용하지 않는다.
+[상세 비교](https://github.com/forge-language/forge-benchmarks/blob/main/docs/string-view-inline-2026-10-10.md).
+
+네이티브 OS thread creation/join 비교도 추가했다. 동일 총 64,000,000회 LCG
+연산을 1/2/4개 물리 코어에 분배한 16쌍 측정에서 paired 처리량 중앙값은
+1.0055/1.0104/1.0304이며 95% 구간은 1.0036–1.0105,
+0.9915–1.0533, 0.8783–1.1715다. 모든 reference와 완료 수 검사를 통과했지만
+110% 목표를 입증한 행은 없다. 이 측정은 원래 CPU baseline의 불변 SDK를
+사용했으며 최신 산술 수정의 결과가 아니다. coroutine/mailbox 또는 HTTP
+비교로 일반화하지 않는다.
+[전체 조건과 원시 결과](https://github.com/forge-language/forge-benchmarks/blob/main/docs/native-thread-rust-forge-2026-10-10.md).
+
+Builder byte append의 checked inline 경로를 같은 세션에서 18회씩 세 가지
+구현의 순서를 균형 있게 교차해 측정했다. 기존 view-only Forge 대비
+1.5059배 (95% 구간 1.4897–1.5090), Rust 대비 0.9571배
+(0.9489–0.9606)다. 다른 네 workload는 실질적인 개선을 입증하지 않았다.
+[원시 결과와 조건](https://github.com/forge-language/forge-benchmarks/blob/main/docs/builder-byte-inline-2026-10-10.md).
+
+현재는 실용 목표 미달이며 불가능 여부는 미확정이다. 최신 SDK의 재측정,
+동등한 coroutine/queue·HTTP 비교와 다른 호스트 반복이 남아 있다.

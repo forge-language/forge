@@ -25,18 +25,18 @@ static void int_case(BinOp op, int64_t a, int64_t b, bool folds, int64_t result)
 
 int main(void) {
     int_case(BIN_ADD, 2, 3, true, 5);
-    int_case(BIN_ADD, INT64_MAX, 1, false, 0);
-    int_case(BIN_ADD, INT64_MIN, -1, false, 0);
+    int_case(BIN_ADD, INT64_MAX, 1, true, INT64_MIN);
+    int_case(BIN_ADD, INT64_MIN, -1, true, INT64_MAX);
     int_case(BIN_ADD, INT64_MIN, INT64_MAX, true, -1);
-    int_case(BIN_SUB, INT64_MIN, 1, false, 0);
-    int_case(BIN_SUB, INT64_MAX, -1, false, 0);
+    int_case(BIN_SUB, INT64_MIN, 1, true, INT64_MAX);
+    int_case(BIN_SUB, INT64_MAX, -1, true, INT64_MIN);
     int_case(BIN_SUB, -1, INT64_MIN, true, INT64_MAX);
-    int_case(BIN_SUB, 0, INT64_MIN, false, 0);
-    int_case(BIN_MUL, INT64_MAX, 2, false, 0);
-    int_case(BIN_MUL, INT64_MIN, -1, false, 0);
-    int_case(BIN_MUL, -1, INT64_MIN, false, 0);
-    int_case(BIN_MUL, INT64_MIN, 2, false, 0);
-    int_case(BIN_MUL, -3037000500LL, -3037000500LL, false, 0);
+    int_case(BIN_SUB, 0, INT64_MIN, true, INT64_MIN);
+    int_case(BIN_MUL, INT64_MAX, 2, true, -2);
+    int_case(BIN_MUL, INT64_MIN, -1, true, INT64_MIN);
+    int_case(BIN_MUL, -1, INT64_MIN, true, INT64_MIN);
+    int_case(BIN_MUL, INT64_MIN, 2, true, 0);
+    int_case(BIN_MUL, -3037000500LL, -3037000500LL, true, -9223372036709301616LL);
     int_case(BIN_MUL, -3037000499LL, -3037000499LL, true, 9223372030926249001LL);
     int_case(BIN_MUL, INT64_MIN, 0, true, 0);
     int_case(BIN_DIV, INT64_MIN, -1, false, 0);

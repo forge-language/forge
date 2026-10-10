@@ -101,3 +101,24 @@ Rust 옵션은 공식 rustc 문서를 기준으로 opt-level/LTO/codegen-units/o
 3개 native 하위 에이전트로 진행한다. OMO용 `opencode` 실행은 현재 설정의
 `openai/gpt-5.6-sol` 모델을 찾지 못해 실패했다. 해당 호출을 성공한 OMO
 작업으로 계산하지 않으며 계정·provider 전역 설정을 바꾸지 않았다.
+
+### 2026-10-10 계속 진행
+
+- 이전 공개 compiler `979f860`의 GitHub compiler CI와 container CI 모두 통과.
+  문자열 view의 ABI를 유지한 inline 경로는 stdlib `e919bbe`로 공개됐으며
+  stdlib CI도 통과했다.
+- native/JS/folding의 wrapping int64 계약, guarded division/remainder를
+  통합했다. 산술 oracle/UBSan 8개 suite와 optimizer 회귀 통과. 기존 parser의
+  unary `-0.0`가 positive zero가 되는 문제는 별도 미해결 항목으로 확인했다.
+- 소스 override 없이 공개 runtime `ddeba40`/stdlib `bd89481`를 새로 fetch한
+  Release 빌드에서 17개 CTest, selfhost fixed point, 설치 SDK의 FG/C 소비자
+  3개를 통과했다. 정식 compiler 공개 및 CI 확인은 후속 기록으로 구분한다.
+- 문자열 view inline 결과와 네이티브 OS thread 비교를 추가했다.
+  [목표 검토 문서](rust110-feasibility.md)에 원시 결과·범위·미달을 기록했다.
+- TypeScript LSP의 blocking compiler 실행을 async/취소/버전·설정 generation
+  검사로 바꿨다. 네이티브 FG LSP는 아직 동기식이며 이 차이를 문서화한다.
+  18개 protocol·shutdown 회귀와 패키징 검토를 통과했으며 `f22383b`로 공개 후 CI도 통과했다.
+- Builder byte append의 checked inline fast path는 stdlib `bd89481`로 공개 후 CI를 통과했다.
+  같은 세션의 18회 교차 측정에서 기존 view-only 경로 대비 1.5059배
+  (95% 구간 1.4897–1.5090), Rust 대비 0.9571배로 목표에는 미달했다.
+  exported ABI, 경계 검사, snapshot 계약을 유지하고 inline caller의 ASan/UBSan 회귀를 통과했다.

@@ -1,27 +1,17 @@
 #include "optimize.h"
 
 #include <math.h>
+#include <string.h>
 
-/* The C backend uses signed 64-bit arithmetic. Never execute an overflowing
- * operation in the compiler; leave it for the backend's runtime semantics. */
+/* Fold exactly the modular int64 arithmetic used by both backends. Unsigned
+ * arithmetic is defined modulo 2^64; copy the bits without a signed overflow or
+ * an implementation-defined unsigned-to-signed conversion. */
 static bool fold_int(BinOp op, int64_t a, int64_t b, int64_t *out) {
+    uint64_t bits;
     switch (op) {
-    case BIN_ADD:
-        if ((b > 0 && a > INT64_MAX - b) || (b < 0 && a < INT64_MIN - b)) return false;
-        *out = a + b;
-        return true;
-    case BIN_SUB:
-        if ((b < 0 && a > INT64_MAX + b) || (b > 0 && a < INT64_MIN + b)) return false;
-        *out = a - b;
-        return true;
-    case BIN_MUL:
-        if (a > 0) {
-            if ((b > 0 && a > INT64_MAX / b) || (b < 0 && b < INT64_MIN / a)) return false;
-        } else if (a < 0) {
-            if ((b > 0 && a < INT64_MIN / b) || (b < 0 && a < INT64_MAX / b)) return false;
-        }
-        *out = a * b;
-        return true;
+    case BIN_ADD: bits = (uint64_t)a + (uint64_t)b; break;
+    case BIN_SUB: bits = (uint64_t)a - (uint64_t)b; break;
+    case BIN_MUL: bits = (uint64_t)a * (uint64_t)b; break;
     case BIN_DIV:
     case BIN_MOD:
         if (b == 0 || (a == INT64_MIN && b == -1)) return false;
@@ -30,6 +20,8 @@ static bool fold_int(BinOp op, int64_t a, int64_t b, int64_t *out) {
     default:
         return false;
     }
+    memcpy(out, &bits, sizeof(bits));
+    return true;
 }
 
 /* Reuse the binary node when folding rather than allocating a replacement for

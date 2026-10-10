@@ -528,11 +528,28 @@ static void emit_expr_inner(Codegen *cg, Expr *e) {
         case BIN_AND: op = "&&"; break;
         case BIN_OR: op = "||"; break;
         }
-        fputc('(', cg->out);
-        emit_expr(cg, e->as.binary.left);
-        fprintf(cg->out, " %s ", op);
-        emit_expr(cg, e->as.binary.right);
-        fputc(')', cg->out);
+        const char *helper = NULL;
+        switch (e->as.binary.op) {
+        case BIN_ADD: helper = "FORGE_ADD"; break;
+        case BIN_SUB: helper = "FORGE_SUB"; break;
+        case BIN_MUL: helper = "FORGE_MUL"; break;
+        case BIN_DIV: helper = "FORGE_DIV"; break;
+        case BIN_MOD: helper = "FORGE_MOD"; break;
+        default: break;
+        }
+        if (helper) {
+            fprintf(cg->out, "%s(", helper);
+            emit_expr(cg, e->as.binary.left);
+            fputs(", ", cg->out);
+            emit_expr(cg, e->as.binary.right);
+            fputc(')', cg->out);
+        } else {
+            fputc('(', cg->out);
+            emit_expr(cg, e->as.binary.left);
+            fprintf(cg->out, " %s ", op);
+            emit_expr(cg, e->as.binary.right);
+            fputc(')', cg->out);
+        }
         break;
     }
     case EXPR_CALL: {
@@ -1264,8 +1281,11 @@ static void emit_consts(Program *prog, FILE *out) {
         ExprKind k = c->value ? c->value->kind : EXPR_IDENT;
         switch (k) {
         case EXPR_INT:
-            fprintf(out, "static const int64_t forge_const_%.*s = %lld;\n",
-                    (int)c->name.len, c->name.data, (long long)c->value->as.int_val);
+            fprintf(out, "static const int64_t forge_const_%.*s = ",
+                    (int)c->name.len, c->name.data);
+            if (c->value->as.int_val == INT64_MIN) fputs("INT64_MIN", out);
+            else fprintf(out, "INT64_C(%lld)", (long long)c->value->as.int_val);
+            fputs(";\n", out);
             break;
         case EXPR_FLOAT:
             fprintf(out, "static const double forge_const_%.*s = %.17g;\n",
@@ -1360,6 +1380,33 @@ static NativeDecl *find_native(Program *prog, ForgeStr name) {
     return NULL;
 }
 
+/* Dispatch from actual C operand types: imported calls and identifiers need
+ * not have resolved AST types here. _Generic does not evaluate its controlling
+ * expressions; each operand is evaluated once, as a function argument. */
+static void emit_arithmetic_helpers(FILE *out) {
+    fputs("static inline int64_t __forge_i64_bits(uint64_t bits) {\n"
+          "    int64_t value; memcpy(&value, &bits, sizeof(value)); return value;\n"
+          "}\n"
+          "static inline int64_t __forge_add_i64(int64_t a, int64_t b) { return __forge_i64_bits((uint64_t)a + (uint64_t)b); }\n"
+          "static inline int64_t __forge_sub_i64(int64_t a, int64_t b) { return __forge_i64_bits((uint64_t)a - (uint64_t)b); }\n"
+          "static inline int64_t __forge_mul_i64(int64_t a, int64_t b) { return __forge_i64_bits((uint64_t)a * (uint64_t)b); }\n"
+          "static inline void __forge_check_div_i64(int64_t a, int64_t b) {\n"
+          "    if (b == 0 || (a == INT64_MIN && b == -1)) { fputs(\"Forge integer division\\n\", stderr); exit(EXIT_FAILURE); }\n"
+          "}\n"
+          "static inline int64_t __forge_div_i64(int64_t a, int64_t b) { __forge_check_div_i64(a, b); return a / b; }\n"
+          "static inline int64_t __forge_mod_i64(int64_t a, int64_t b) { __forge_check_div_i64(a, b); return a % b; }\n\n", out);
+    const char *names[] = { "ADD", "SUB", "MUL", "DIV" };
+    const char *lower[] = { "add", "sub", "mul", "div" };
+    const char *ops[] = { "+", "-", "*", "/" };
+    for (size_t i = 0; i < 4; i++) {
+        fprintf(out, "static inline double __forge_%s_f64(double a, double b) { return a %s b; }\n", lower[i], ops[i]);
+        fprintf(out, "#define FORGE_%s(a, b) _Generic((a), float: __forge_%s_f64, double: __forge_%s_f64, default: _Generic((b), float: __forge_%s_f64, double: __forge_%s_f64, default: __forge_%s_i64))((a), (b))\n", names[i], lower[i], lower[i], lower[i], lower[i], lower[i]);
+    }
+    /* An external header can reveal a float return type that the semantic
+     * checker could not resolve. Preserve C's rejection of float remainder. */
+    fputs("#define FORGE_MOD(a, b) ({ _Static_assert(_Generic((a), float: 0, double: 0, default: _Generic((b), float: 0, double: 0, default: 1)), \"Forge remainder requires integer operands\"); __forge_mod_i64((a), (b)); })\n\n", out);
+}
+
 static void emit_owned_send_helper(FILE *out) {
     fputs("static inline void __forge_send_owned_string(fr_process_t *dst, int tag, const char **source) {\n"
           "    char *payload = fr_own_clone(*source);\n"
@@ -1414,6 +1461,7 @@ void codegen_emit_library(Program *prog, FILE *out_c, FILE *out_h, const char *r
     fputs("#include \"forge/io.h\"\n#include <stdint.h>\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n", out_c);
     fputs("#include \"forge/ownership.h\"\n", out_c);
     emit_owned_send_helper(out_c);
+    emit_arithmetic_helpers(out_c);
     for (size_t i = 0; i < lib->import_count; i++) {
         const char *hdr = forge_std_header(lib->imports[i]);
         if (hdr) fprintf(out_c, "#include \"%s\"\n", hdr);
@@ -1454,6 +1502,7 @@ void codegen_emit(Program *prog, FILE *out, const char *runtime_include) {
     fputs("#include \"forge/os.h\"\n", out);
     fputs("#include \"forge/ownership.h\"\n", out);
     emit_owned_send_helper(out);
+    emit_arithmetic_helpers(out);
     fputs("#include \"forge/event.h\"\n", out);
     emit_import_headers(prog, out);
     emit_print_auto_macro(out);
