@@ -58,6 +58,7 @@ static const ForgeStdFn MATH_FNS[] = {
 
 static const ForgeStdFn TIME_FNS[] = {
     {"time_now_ms", "fr_time_now_ms"},
+    {"time_monotonic_ms", "fr_time_monotonic_ms"},
     {"sleep_ms", "fr_sleep_ms"},
 };
 
@@ -157,6 +158,17 @@ static const ForgeStdFn PROCESS_FNS[] = {
     {"proc_run", "fr_proc_run"},
     {"proc_run_forge", "fr_proc_run_forge"},
     {"proc_output", "fr_proc_output"},
+    {"proc_start_forge", "fr_proc_start_forge"},
+    {"proc_watch_termination", "fr_proc_watch_termination"},
+    {"proc_termination_requested", "fr_proc_termination_requested"},
+    {"proc_poll", "fr_proc_poll"},
+    {"proc_cancel", "fr_proc_cancel"},
+    {"proc_status", "fr_proc_status"},
+    {"proc_signal", "fr_proc_signal"},
+    {"proc_error_kind", "fr_proc_error_kind"},
+    {"proc_stdout", "fr_proc_stdout"},
+    {"proc_stderr", "fr_proc_stderr"},
+    {"proc_release", "fr_proc_release"},
 };
 
 static const ForgeStdFn DOCSTORE_FNS[] = {
@@ -167,6 +179,8 @@ static const ForgeStdFn DOCSTORE_FNS[] = {
 
 static const ForgeStdFn LSPRPC_FNS[] = {
     {"lsp_read", "fr_lsp_read_message"},
+    {"lsp_poll", "fr_lsp_poll"},
+    {"lsp_message", "fr_lsp_message"},
     {"lsp_write", "fr_lsp_write_message"},
 };
 
@@ -206,7 +220,7 @@ static const ForgeModule MODULES[] = {
     { .name = { "io", 2 }, .header = "forge/io.h", .fns = IO_FNS, .fn_count = 17 },
     { .name = { "strings", 7 }, .header = "forge/string.h", .fns = STRING_FNS, .fn_count = sizeof(STRING_FNS) / sizeof(STRING_FNS[0]) },
     { .name = { "math", 4 }, .header = "forge/math.h", .fns = MATH_FNS, .fn_count = 6 },
-    { .name = { "time", 4 }, .header = "forge/time.h", .fns = TIME_FNS, .fn_count = 2 },
+    { .name = { "time", 4 }, .header = "forge/time.h", .fns = TIME_FNS, .fn_count = sizeof(TIME_FNS) / sizeof(TIME_FNS[0]) },
     { .name = { "fs", 2 }, .header = "forge/fs.h", .fns = FS_FNS, .fn_count = 13 },
     { .name = { "os", 2 }, .header = "forge/os.h", .fns = OS_FNS, .fn_count = 11 },
     { .name = { "tcp", 3 }, .header = "forge/tcp.h", .fns = TCP_FNS, .fn_count = 7 },
@@ -216,9 +230,9 @@ static const ForgeModule MODULES[] = {
     { .name = { "json", 4 }, .header = "forge/json.h", .fns = JSON_FNS, .fn_count = 9 },
     { .name = { "gpu", 3 }, .header = "forge/gpu.h", .fns = GPU_FNS, .fn_count = 15 },
     { .name = { "thread", 6 }, .header = "forge/threading.h", .fns = THREAD_FNS, .fn_count = 11 },
-    { .name = { "proc", 4 }, .header = "forge/process.h", .fns = PROCESS_FNS, .fn_count = 3 },
+    { .name = { "proc", 4 }, .header = "forge/process.h", .fns = PROCESS_FNS, .fn_count = sizeof(PROCESS_FNS) / sizeof(PROCESS_FNS[0]) },
     { .name = { "docstore", 8 }, .header = "forge/docstore.h", .fns = DOCSTORE_FNS, .fn_count = 3 },
-    { .name = { "lsprpc", 6 }, .header = "forge/lsprpc.h", .fns = LSPRPC_FNS, .fn_count = 2 },
+    { .name = { "lsprpc", 6 }, .header = "forge/lsprpc.h", .fns = LSPRPC_FNS, .fn_count = sizeof(LSPRPC_FNS) / sizeof(LSPRPC_FNS[0]) },
 };
 
 const ForgeModule *forge_std_module(ForgeStr name) {

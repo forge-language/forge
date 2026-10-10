@@ -11,3 +11,9 @@ repositories. They use an installed `forge-lsp` on PATH or an explicit server pa
 
 Compiler integration uses `forge <file> --check` and `--symbols-json`. The build SDK
 root is `build/`, and an installed SDK uses its install prefix for headers/libraries.
+
+The native Forge event loop checks edited buffers asynchronously on POSIX,
+with version/configuration guards, cancellation and a shared four-child limit.
+Both servers consume stage0's UTF-16 diagnostic ranges; imported-file errors
+retain the original file in their messages. See the language-server repository
+for protocol coverage, SDK requirements and platform limits.

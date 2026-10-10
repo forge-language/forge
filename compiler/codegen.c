@@ -305,13 +305,17 @@ static ForgeType cg_lookup_local(Codegen *cg, ForgeStr name) {
 /* Sorted for bsearch: the C names of the stdlib functions that return a
  * string. Keep in strcmp order. */
 static const char *const STDLIB_STRING_FNS[] = {
-    "fr_fs_list_dir", "fr_fs_read",
+    "fr_doc_get",
+    "fr_fs_list_dir", "fr_fs_read", "fr_fs_temp_path",
     "fr_gpu_backend", "fr_gpu_device_name",
     "fr_http_get", "fr_http_post",
     "fr_http_req_body", "fr_http_req_method", "fr_http_req_path",
     "fr_io_prompt", "fr_io_read_fd", "fr_io_read_line", "fr_io_read_stdin",
+    "fr_json_array_item", "fr_json_get_path_raw", "fr_json_get_path_string",
     "fr_json_get_string", "fr_json_stringify_int", "fr_json_stringify_str",
+    "fr_lsp_message", "fr_lsp_read_message",
     "fr_os_argv", "fr_os_executable_path", "fr_os_getenv", "fr_os_temp_file",
+    "fr_proc_output", "fr_proc_stderr", "fr_proc_stdout",
     "fr_str_append", "fr_str_append_str", "fr_str_builder_finish", "fr_str_concat", "fr_str_from_int",
     "fr_str_sub", "fr_str_trim", "fr_str_view_sub",
     "fr_tcp_recv",

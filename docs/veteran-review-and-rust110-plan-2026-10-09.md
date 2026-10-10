@@ -137,3 +137,31 @@ Rust 옵션은 공식 rustc 문서를 기준으로 opt-level/LTO/codegen-units/o
 - 로컬 override SDK에서 새 OS/framing primitives를 포함한 20개 CTest 통과.
   native FG event-loop, process-group cancellation 및 JSON Unicode 처리는
   검증 중이며 이 checkpoint의 공개 compiler 의존성은 검증된 `bd89481`을 유지한다.
+
+### 네이티브 비동기 LSP 통합
+
+- stdlib `8b896aa`에 POSIX 비동기 프로세스·별도 stdout/stderr·프로세스 그룹
+  취소/회수, 단조 시계와 부분 입력을 받는 bounded LSP framing을 공개했다.
+  JSON 문자열은 Unicode escape와 surrogate pair를 UTF-8로 복원한다.
+  NUL을 포함한 헤더/본문, 중복 Content-Length는 거절한다.
+- native/main.fg가 문서 버전·재열기 epoch·설정 generation, 150ms debounce,
+  4개 child 제한, 공유 symbol 요청, 취소·timeout·종료 정리를 관리한다.
+  C bridge에는 문서나 LSP method 처리를 넣지 않았다. POSIX 구현은 Linux에서
+  검증했으며 Windows에서는 TypeScript 서버를 사용한다.
+- 등록된 native async protocol 14개와 실제 compiler 진단 4개를 통과했다.
+  한글/보충 Unicode 뒤의 UTF-16 범위, parse 위치, colon/Unicode 경로의
+  imported 오류를 한 개 진단으로 전달한다. 문자열 API 출력 타입 등록,
+  URI/control 문자 JSON roundtrip, compiler signal 오류도 수정했다.
+- compiler/runtime 21개 CTest와 selfhost 고정점, 별도 runtime/stdlib
+  ASan/UBSan 10개 suite 및 instrumented native LSP의 위 18개 protocol
+  검사를 통과했다. TypeScript 21개 테스트도 통과했다.
+- 동일 SDK로 만든 serial/native event-loop의 controlled 1.2초 compiler
+  지연에서 hover 중앙값은 5개 표본씩 1202.36ms/0.410ms였다. 전체 원시
+  표본·바이너리 hash·재현 script는 language-server 보고서에 있다.
+  이것은 편집기 응답성 관측이며 Rust 110% 또는 compiler 처리량 증거가 아니다.
+- P0 전체 ownership, stage0/stage2 의미 검사 동등성, Rust 대표 suite의
+  전체 110% 목표는 여전히 미완료다.
+- stdlib의 해당 공개 commit은 GitHub CI를 통과했다. source override 없는
+  새 Release SDK에서도 21개 CTest와 selfhost 고정점을 통과했고, 그 SDK를
+  설치한 뒤 native LSP 4개 suite 및 설치한 doctor의 실제 FG compile/link/run,
+  initialize/shutdown 검사를 통과했다.

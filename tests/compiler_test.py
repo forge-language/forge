@@ -71,6 +71,18 @@ class CompilerRegressionTests(unittest.TestCase):
                     self.assertIn(diagnostic, result.stderr)
                     self.assertEqual(output.read_text(), 'preserve existing output')
 
+    def test_native_service_string_results_print_as_strings(self):
+        self.run_program('''import proc; import lsprpc; import docstore; import json;
+        native main {
+            doc_set("key", "stored");
+            println(doc_get("key"));
+            println(json_get_path_str("{\\"value\\":\\"decoded\\"}", "value"));
+            println(json_get_path("{\\"value\\":42}", "value"));
+            println(json_array_at("[\\"item\\"]", 0));
+            println(proc_stdout(-1)); println(proc_stderr(-1));
+            println(proc_output()); println(lsp_message());
+        }''', 'stored\ndecoded\n42\n"item"\n\n\n\n\n')
+
     def test_scalar_function_references_and_fallthrough_are_rejected(self):
         cases = [
             ('fn f(): int { return 1; } native main { let n: int = f; }', 'type mismatch'),

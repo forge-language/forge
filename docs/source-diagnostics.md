@@ -30,7 +30,7 @@ This format covers stage0 parse and semantic diagnostics. Driver, module-loading
 lexical and backend failures can still use legacy output. Stage2 does not yet
 share this diagnostic implementation.
 
-The TypeScript language server consumes the default location line while keeping
+Both language servers consume the default location line while keeping
 compatibility with older compilers. Imported-module locations appear in the
 message rather than applying their coordinates to the open document.
 
