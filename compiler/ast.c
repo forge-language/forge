@@ -61,6 +61,9 @@ Expr *expr_ident(ForgeStr name) {
 
 Expr *expr_binary(BinOp op, Expr *l, Expr *r) {
     Expr *e = expr_new(EXPR_BINARY);
+    if (l && r && l->span.file == r->span.file) {
+        e->span = (SourceSpan){l->span.file, l->span.start, r->span.end};
+    }
     e->as.binary.op = op;
     e->as.binary.left = l;
     e->as.binary.right = r;
@@ -126,7 +129,7 @@ Expr *expr_field(Expr *base, ForgeStr field) {
 }
 
 Block block_new(void) {
-    return (Block){ NULL, NULL };
+    return (Block){0};
 }
 
 void block_append(Block *b, Stmt *s) {
@@ -342,7 +345,16 @@ static void free_stmts(Stmt *s) {
     }
 }
 
+static void free_params(Param *p) {
+    while (p) { Param *next = p->next; free(p); p = next; }
+}
+
 void program_free(Program *p) {
+    for (size_t i = 0; i < p->source_count; i++) {
+        free(p->source_files[i]->path);
+        free(p->source_files[i]);
+    }
+    free(p->source_files);
     free(p->imports);
     free(p->path_imports);
     for (size_t i = 0; i < p->module_count; i++) {
@@ -350,6 +362,7 @@ void program_free(Program *p) {
         free(p->modules[i].source);
         for (size_t j = 0; j < p->modules[i].fn_count; j++) {
             free_stmts(p->modules[i].functions[j].body.first);
+            free_params(p->modules[i].functions[j].params);
         }
         free(p->modules[i].functions);
     }
@@ -358,6 +371,7 @@ void program_free(Program *p) {
         free(p->library.imports);
         for (size_t i = 0; i < p->library.fn_count; i++) {
             free_stmts(p->library.functions[i].body.first);
+            free_params(p->library.functions[i].params);
         }
         free(p->library.functions);
     }
@@ -366,6 +380,7 @@ void program_free(Program *p) {
         free_stmts(pd->body.first);
         for (size_t j = 0; j < pd->coro_count; j++) {
             free_stmts(pd->coros[j].body.first);
+            free_params(pd->coros[j].params);
         }
         free(pd->coros);
         if (pd->has_receive) {
@@ -390,6 +405,7 @@ void program_free(Program *p) {
     free(p->enums);
     for (size_t i = 0; i < p->fn_count; i++) {
         if (!p->functions[i].is_extern) free_stmts(p->functions[i].body.first);
+        free_params(p->functions[i].params);
     }
     free(p->functions);
     for (size_t i = 0; i < p->supervisor_count; i++) {

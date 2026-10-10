@@ -11,7 +11,8 @@ static bool is_ident(char c) {
 }
 
 static Token make_token(Lexer *lx, TokenKind kind, ForgeStr lexeme) {
-  Token t = { kind, lexeme, 0, 0.0, lx->line, lx->col };
+  Token t = { .kind=kind, .lexeme=lexeme, .line=lx->line, .col=lx->col,
+              .start=lx->token_start, .end=lx->pos };
   return t;
 }
 
@@ -75,6 +76,8 @@ void lexer_init(Lexer *lx, const char *src, size_t len) {
     lx->line = 1;
     lx->col = 1;
     lx->has_current = false;
+    lx->token_start = 0;
+    lx->last = (Token){0};
 }
 
 static Token read_number(Lexer *lx) {
@@ -196,12 +199,9 @@ static Token read_ident(Lexer *lx) {
     return t;
 }
 
-Token lexer_next(Lexer *lx) {
-    if (lx->has_current) {
-        lx->has_current = false;
-        return lx->current;
-    }
+static Token lexer_next_raw(Lexer *lx) {
     skip_ws(lx);
+    lx->token_start = lx->pos;
     if (lx->pos >= lx->len) return make_token(lx, TOK_EOF, forge_str(""));
 
     char c = lx->src[lx->pos];
@@ -306,9 +306,17 @@ Token lexer_next(Lexer *lx) {
     exit(1);
 }
 
+Token lexer_next(Lexer *lx) {
+    Token t;
+    if (lx->has_current) { lx->has_current = false; t = lx->current; }
+    else t = lexer_next_raw(lx);
+    lx->last = t;
+    return t;
+}
+
 Token lexer_peek(Lexer *lx) {
     if (!lx->has_current) {
-        lx->current = lexer_next(lx);
+        lx->current = lexer_next_raw(lx);
         lx->has_current = true;
     }
     return lx->current;

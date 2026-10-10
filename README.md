@@ -100,6 +100,8 @@ libraries, processes, coroutines, messages and ownership syntax. Examples under
 Stage0's [integer arithmetic contract](docs/integer-arithmetic.md) defines
 wrapping int64 addition/subtraction/multiplication and guarded division/remainder
 consistently across native execution, JavaScript and constant folding.
+Stage0 [source diagnostics](docs/source-diagnostics.md) include exact file ranges
+and an optional JSON format for parse and semantic errors.
 
 ## Self-hosting
 

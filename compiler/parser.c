@@ -4,12 +4,21 @@
 
 typedef struct {
     Lexer *lx;
+    SourceFile *source;
     int expr_depth;
 } Parser;
 
+static SourceSpan token_span(Parser *p, Token t) {
+    return (SourceSpan){p->source, t.start, t.end};
+}
+static SourceSpan parsed_span(Parser *p, Token start) {
+    return (SourceSpan){p->source, start.start, p->lx->last.end};
+}
 static void parser_error(Parser *p, const char *msg) {
     Token t = lexer_peek(p->lx);
-    fprintf(stderr, "forge: parse error at %d:%d: %s\n", t.line, t.col, msg);
+    char legacy[512];
+    snprintf(legacy, sizeof(legacy), "forge: parse error at %d:%d: %s", t.line, t.col, msg);
+    forge_source_diagnostic(token_span(p,t), "parse", msg, legacy);
     exit(1);
 }
 
@@ -68,10 +77,13 @@ static Expr *parse_or(Parser *p);
 static Block *parse_block(Parser *p);
 static Stmt *parse_stmt(Parser *p);
 
-static Stmt *parse_assign(Parser *p, ForgeStr name) {
+static Stmt *parse_assign(Parser *p, Token name_token) {
+    ForgeStr name = token_str(name_token);
     if (lexer_match(p->lx, TOK_EQ)) {
-        return stmt_assign(name, parse_expr(p));
+        Stmt *s = stmt_assign(name, parse_expr(p));
+        s->span = parsed_span(p,name_token); s->focus = token_span(p,name_token); return s;
     }
+    Token t = lexer_peek(p->lx);
     TokenKind k = lexer_peek(p->lx).kind;
     BinOp op;
     switch (k) {
@@ -86,7 +98,11 @@ static Stmt *parse_assign(Parser *p, ForgeStr name) {
     }
     lexer_next(p->lx);
     Expr *rhs = parse_expr(p);
-    return stmt_assign(name, expr_binary(op, expr_ident(name), rhs));
+    Expr *left = expr_ident(name);
+    left->span = left->focus = token_span(p,name_token);
+    Expr *value = expr_binary(op,left,rhs); value->focus = token_span(p,t);
+    Stmt *s = stmt_assign(name,value);
+    s->span = parsed_span(p,name_token); s->focus = token_span(p,name_token); return s;
 }
 
 static Expr *parse_postfix(Parser *p, Expr *e) {
@@ -94,11 +110,17 @@ static Expr *parse_postfix(Parser *p, Expr *e) {
         if (lexer_match(p->lx, TOK_DOT)) {
             Token field = lexer_peek(p->lx);
             expect(p, TOK_IDENT);
+            SourceSpan base = e->span;
             e = expr_field(e, token_str(field));
+            e->span = (SourceSpan){base.file, base.start, p->lx->last.end};
+            e->focus = token_span(p,field);
         } else if (lexer_match(p->lx, TOK_LBRACKET)) {
             Expr *idx = parse_expr(p);
             expect(p, TOK_RBRACKET);
+            SourceSpan base = e->span;
             e = expr_index(e, idx);
+            e->span = (SourceSpan){base.file, base.start, p->lx->last.end};
+            e->focus = idx->span;
         } else {
             break;
         }
@@ -110,7 +132,17 @@ static Expr *parse_postfix(Parser *p, Expr *e) {
  * of an expression: a qualified call/field access (a.b / a.b(...)), a direct
  * call (a(...)), or a bare identifier. Shared by parse_primary and by
  * parse_stmt's expression-statement path so both see identical grammar. */
-static Expr *parse_ident_start(Parser *p, ForgeStr name) {
+static Expr *parse_ident_start_inner(Parser *p, ForgeStr name);
+static Expr *parse_ident_start(Parser *p, Token token) {
+    Expr *e = parse_ident_start_inner(p, token_str(token));
+    e->span = parsed_span(p,token);
+    if (!e->focus.file) e->focus = token_span(p,token);
+    if (e->kind == EXPR_FIELD && e->as.field.base) {
+        e->as.field.base->span = e->as.field.base->focus = token_span(p,token);
+    }
+    return e;
+}
+static Expr *parse_ident_start_inner(Parser *p, ForgeStr name) {
     if (lexer_match(p->lx, TOK_DOT)) {
         Token fn = lexer_peek(p->lx);
         expect(p, TOK_IDENT);
@@ -127,9 +159,11 @@ static Expr *parse_ident_start(Parser *p, ForgeStr name) {
                 } while (lexer_match(p->lx, TOK_COMMA));
                 expect(p, TOK_RPAREN);
             }
-            return expr_qual_call(name, token_str(fn), args, n);
+            Expr *e = expr_qual_call(name, token_str(fn), args, n);
+            e->focus = token_span(p,fn); return e;
         }
-        return expr_field(expr_ident(name), token_str(fn));
+        Expr *e = expr_field(expr_ident(name), token_str(fn));
+        e->focus = token_span(p,fn); return e;
     }
     if (lexer_match(p->lx, TOK_LPAREN)) {
         Expr **args = NULL;
@@ -149,7 +183,15 @@ static Expr *parse_ident_start(Parser *p, ForgeStr name) {
     return expr_ident(name);
 }
 
+static Expr *parse_primary_inner(Parser *p);
 static Expr *parse_primary(Parser *p) {
+    Token start = lexer_peek(p->lx);
+    Expr *e = parse_primary_inner(p);
+    if (!e->focus.file) e->focus = token_span(p,start);
+    e->span = parsed_span(p,start);
+    return e;
+}
+static Expr *parse_primary_inner(Parser *p) {
     Token t = lexer_peek(p->lx);
     switch (t.kind) {
     case TOK_INT:
@@ -168,9 +210,8 @@ static Expr *parse_primary(Parser *p) {
         lexer_next(p->lx);
         return expr_string(token_str(t));
     case TOK_IDENT: {
-        ForgeStr name = token_str(t);
         lexer_next(p->lx);
-        return parse_ident_start(p, name);
+        return parse_ident_start(p, t);
     }
     case TOK_KW_RECV:
         lexer_next(p->lx);
@@ -193,6 +234,7 @@ static Expr *parse_unary(Parser *p) {
     if (++p->expr_depth > FORGE_MAX_EXPR_DEPTH) {
         forge_die("expression nesting too deep");
     }
+    Token start = lexer_peek(p->lx);
     Expr *e;
     if (lexer_match(p->lx, TOK_KW_MOVE)) {
         e = parse_postfix(p, expr_move(parse_unary(p)));
@@ -203,6 +245,9 @@ static Expr *parse_unary(Parser *p) {
     } else {
         e = parse_postfix(p, parse_primary(p));
     }
+    if (start.kind == TOK_KW_MOVE || start.kind == TOK_MINUS || start.kind == TOK_BANG) {
+        e->span = parsed_span(p,start); e->focus = token_span(p,start);
+    }
     p->expr_depth--;
     return e;
 }
@@ -211,11 +256,18 @@ static Expr *parse_unary(Parser *p) {
  * left operand. This lets callers that had to hand-parse a leading operand
  * (e.g. parse_stmt's ident-led expression-statements) rejoin the normal
  * expression grammar instead of re-implementing a subset of it. */
+static Expr *parse_binary(Parser *p, Token token, BinOp op, Expr *left, Expr *right) {
+    Expr *e = expr_binary(op,left,right);
+    e->focus = token_span(p,token);
+    return e;
+}
+
 static Expr *parse_mul_from(Parser *p, Expr *left) {
     for (;;) {
-        if (lexer_match(p->lx, TOK_STAR)) left = expr_binary(BIN_MUL, left, parse_unary(p));
-        else if (lexer_match(p->lx, TOK_SLASH)) left = expr_binary(BIN_DIV, left, parse_unary(p));
-        else if (lexer_match(p->lx, TOK_PERCENT)) left = expr_binary(BIN_MOD, left, parse_unary(p));
+        Token token = lexer_peek(p->lx);
+        if (lexer_match(p->lx, TOK_STAR)) left = parse_binary(p, token, BIN_MUL, left, parse_unary(p));
+        else if (lexer_match(p->lx, TOK_SLASH)) left = parse_binary(p, token, BIN_DIV, left, parse_unary(p));
+        else if (lexer_match(p->lx, TOK_PERCENT)) left = parse_binary(p, token, BIN_MOD, left, parse_unary(p));
         else break;
     }
     return left;
@@ -228,8 +280,9 @@ static Expr *parse_mul(Parser *p) {
 static Expr *parse_add_from(Parser *p, Expr *left) {
     left = parse_mul_from(p, left);
     for (;;) {
-        if (lexer_match(p->lx, TOK_PLUS)) left = expr_binary(BIN_ADD, left, parse_mul(p));
-        else if (lexer_match(p->lx, TOK_MINUS)) left = expr_binary(BIN_SUB, left, parse_mul(p));
+        Token token = lexer_peek(p->lx);
+        if (lexer_match(p->lx, TOK_PLUS)) left = parse_binary(p, token, BIN_ADD, left, parse_mul(p));
+        else if (lexer_match(p->lx, TOK_MINUS)) left = parse_binary(p, token, BIN_SUB, left, parse_mul(p));
         else break;
     }
     return left;
@@ -242,12 +295,13 @@ static Expr *parse_add(Parser *p) {
 static Expr *parse_cmp_from(Parser *p, Expr *left) {
     left = parse_add_from(p, left);
     for (;;) {
-        if (lexer_match(p->lx, TOK_EQEQ)) left = expr_binary(BIN_EQ, left, parse_add(p));
-        else if (lexer_match(p->lx, TOK_NE)) left = expr_binary(BIN_NE, left, parse_add(p));
-        else if (lexer_match(p->lx, TOK_LT)) left = expr_binary(BIN_LT, left, parse_add(p));
-        else if (lexer_match(p->lx, TOK_LE)) left = expr_binary(BIN_LE, left, parse_add(p));
-        else if (lexer_match(p->lx, TOK_GT)) left = expr_binary(BIN_GT, left, parse_add(p));
-        else if (lexer_match(p->lx, TOK_GE)) left = expr_binary(BIN_GE, left, parse_add(p));
+        Token token = lexer_peek(p->lx);
+        if (lexer_match(p->lx, TOK_EQEQ)) left = parse_binary(p, token, BIN_EQ, left, parse_add(p));
+        else if (lexer_match(p->lx, TOK_NE)) left = parse_binary(p, token, BIN_NE, left, parse_add(p));
+        else if (lexer_match(p->lx, TOK_LT)) left = parse_binary(p, token, BIN_LT, left, parse_add(p));
+        else if (lexer_match(p->lx, TOK_LE)) left = parse_binary(p, token, BIN_LE, left, parse_add(p));
+        else if (lexer_match(p->lx, TOK_GT)) left = parse_binary(p, token, BIN_GT, left, parse_add(p));
+        else if (lexer_match(p->lx, TOK_GE)) left = parse_binary(p, token, BIN_GE, left, parse_add(p));
         else break;
     }
     return left;
@@ -259,8 +313,9 @@ static Expr *parse_cmp(Parser *p) {
 
 static Expr *parse_and_from(Parser *p, Expr *left) {
     left = parse_cmp_from(p, left);
-    while (lexer_match(p->lx, TOK_ANDAND)) {
-        left = expr_binary(BIN_AND, left, parse_cmp(p));
+    while (lexer_peek(p->lx).kind == TOK_ANDAND) {
+        Token token = lexer_next(p->lx);
+        left = parse_binary(p, token, BIN_AND, left, parse_cmp(p));
     }
     return left;
 }
@@ -271,8 +326,9 @@ static Expr *parse_and(Parser *p) {
 
 static Expr *parse_or_from(Parser *p, Expr *left) {
     left = parse_and_from(p, left);
-    while (lexer_match(p->lx, TOK_OROR)) {
-        left = expr_binary(BIN_OR, left, parse_and(p));
+    while (lexer_peek(p->lx).kind == TOK_OROR) {
+        Token token = lexer_next(p->lx);
+        left = parse_binary(p, token, BIN_OR, left, parse_and(p));
     }
     return left;
 }
@@ -291,6 +347,7 @@ static Expr *pipe_rhs_to_call(Expr *left, Expr *right, Parser *p) {
         free(right->as.call.args);
         right->as.call.args = args;
         right->as.call.arg_count = n;
+        right->span.start = left->span.start;
         return right;
     }
     if (right->kind == EXPR_QUAL_CALL) {
@@ -302,10 +359,13 @@ static Expr *pipe_rhs_to_call(Expr *left, Expr *right, Parser *p) {
         free(right->as.qual_call.args);
         right->as.qual_call.args = args;
         right->as.qual_call.arg_count = n;
+        right->span.start = left->span.start;
         return right;
     }
     if (right->kind == EXPR_IDENT) {
-        return expr_call(right->as.ident, &left, 1);
+        Expr *e = expr_call(right->as.ident, &left, 1);
+        e->span = (SourceSpan){left->span.file,left->span.start,right->span.end};
+        e->focus = right->focus; return e;
     }
     parser_error(p, "pipe right-hand side must be a function call");
     return left;
@@ -333,15 +393,31 @@ static Expr *parse_expr(Parser *p) {
 }
 
 static Block *parse_block(Parser *p) {
+    Token start = lexer_peek(p->lx);
     expect(p, TOK_LBRACE);
     Block *b = (Block *)calloc(1, sizeof(Block));
     while (!lexer_match(p->lx, TOK_RBRACE)) {
         block_append(b, parse_stmt(p));
     }
+    b->span = parsed_span(p,start);
+    b->closing = token_span(p,p->lx->last);
     return b;
 }
 
+static Stmt *parsed_let(Parser *p, Token name, bool mut, bool owned, ForgeType ty, Expr *init) {
+    Stmt *s = stmt_let(mut,owned,token_str(name),ty,init);
+    s->focus = token_span(p,name); s->span = parsed_span(p,name); return s;
+}
+
+static Stmt *parse_stmt_inner(Parser *p);
 static Stmt *parse_stmt(Parser *p) {
+    Token start = lexer_peek(p->lx);
+    Stmt *s = parse_stmt_inner(p);
+    s->span = parsed_span(p,start);
+    if (!s->focus.file) s->focus = token_span(p,start);
+    return s;
+}
+static Stmt *parse_stmt_inner(Parser *p) {
     if (lexer_match(p->lx, TOK_KW_BREAK)) {
         expect(p, TOK_SEMI);
         return stmt_break();
@@ -359,7 +435,7 @@ static Stmt *parse_stmt(Parser *p) {
         Expr *init = NULL;
         if (lexer_match(p->lx, TOK_EQ)) init = parse_expr(p);
         expect(p, TOK_SEMI);
-        return stmt_let(false, true, token_str(name), ty, init);
+        return parsed_let(p,name,false,true,ty,init);
     }
     if (lexer_match(p->lx, TOK_KW_LET) || lexer_match(p->lx, TOK_KW_MUT)) {
         bool mut = false;
@@ -374,7 +450,7 @@ static Stmt *parse_stmt(Parser *p) {
         Expr *init = NULL;
         if (lexer_match(p->lx, TOK_EQ)) init = parse_expr(p);
         expect(p, TOK_SEMI);
-        return stmt_let(mut, false, token_str(name), ty, init);
+        return parsed_let(p,name,mut,false,ty,init);
     }
     if (lexer_match(p->lx, TOK_KW_RETURN)) {
         Expr *e = NULL;
@@ -450,11 +526,11 @@ static Stmt *parse_stmt(Parser *p) {
             if (lexer_match(p->lx, TOK_COLON)) ty = parse_type(p);
             Expr *init_expr = NULL;
             if (lexer_match(p->lx, TOK_EQ)) init_expr = parse_expr(p);
-            init = stmt_let(mut, owned, token_str(name), ty, init_expr);
+            init = parsed_let(p,name,mut,owned,ty,init_expr);
         } else if (lexer_peek(p->lx).kind == TOK_IDENT) {
             Token name = lexer_peek(p->lx);
             lexer_next(p->lx);
-            init = parse_assign(p, token_str(name));
+            init = parse_assign(p, name);
         }
         expect(p, TOK_SEMI);
         Expr *cond = parse_expr(p);
@@ -463,7 +539,7 @@ static Stmt *parse_stmt(Parser *p) {
         if (lexer_peek(p->lx).kind == TOK_IDENT) {
             Token name = lexer_peek(p->lx);
             lexer_next(p->lx);
-            step = parse_assign(p, token_str(name));
+            step = parse_assign(p, name);
         }
         expect(p, TOK_RPAREN);
         Block *body = parse_block(p);
@@ -486,7 +562,8 @@ static Stmt *parse_stmt(Parser *p) {
             expect(p, TOK_RPAREN);
         }
         expect(p, TOK_SEMI);
-        return stmt_spawn(token_str(name), args, n);
+        Stmt *s = stmt_spawn(token_str(name),args,n);
+        s->focus = token_span(p,name); return s;
     }
     if (lexer_match(p->lx, TOK_KW_SEND)) {
         Expr *target = parse_expr(p);
@@ -522,7 +599,7 @@ static Stmt *parse_stmt(Parser *p) {
         TokenKind next = lexer_peek(p->lx).kind;
         if (next == TOK_EQ || next == TOK_PLUSEQ || next == TOK_MINUSEQ ||
             next == TOK_STAREQ || next == TOK_SLASHEQ || next == TOK_PERCENTEQ) {
-            Stmt *s = parse_assign(p, token_str(name));
+            Stmt *s = parse_assign(p, name);
             expect(p, TOK_SEMI);
             return s;
         }
@@ -542,6 +619,7 @@ static Param *parse_params(Parser *p) {
         expect(p, TOK_COLON);
         ForgeType ty = parse_type(p);
         Param *param = (Param *)calloc(1, sizeof(Param));
+        param->span = token_span(p,name);
         param->name = token_str(name);
         param->type = ty;
         if (!head) head = tail = param;
@@ -558,7 +636,7 @@ static FnDecl parse_fn_body(Parser *p, bool is_extern) {
     Param *params = parse_params(p);
     ForgeType ret = forge_type_void();
     if (lexer_match(p->lx, TOK_COLON)) ret = parse_type(p);
-    FnDecl fn = { token_str(name), params, ret, block_new(), is_extern };
+    FnDecl fn = { .name=token_str(name), .params=params, .ret_type=ret, .body=block_new(), .is_extern=is_extern, .span=token_span(p,name) };
     if (is_extern) {
         expect(p, TOK_SEMI);
     } else {
@@ -768,9 +846,17 @@ static NativeDecl parse_native(Parser *p) {
     return nd;
 }
 
-Program parse_program(Lexer *lx) {
-    Parser p = { lx, 0 };
+Program parse_program_named(Lexer *lx, const char *path) {
+    SourceFile *source = calloc(1,sizeof(*source));
+    if (!source) forge_die("out of memory");
+    source->path = forge_strdup(forge_str(path ? path : "<input>"));
+    if (!source->path) forge_die("out of memory");
+    source->text = lx->src; source->length = lx->len;
+    Parser p = { .lx = lx, .source = source };
     Program prog = {0};
+    prog.source_files = malloc(sizeof(*prog.source_files));
+    if (!prog.source_files) forge_die("out of memory");
+    prog.source_files[0] = source; prog.source_count = 1;
     size_t path_import_capacity = 0, import_capacity = 0;
     size_t struct_capacity = 0, enum_capacity = 0, native_capacity = 0;
     size_t fn_capacity = 0, process_capacity = 0, const_capacity = 0;
@@ -842,3 +928,5 @@ Program parse_program(Lexer *lx) {
     }
     return prog;
 }
+
+Program parse_program(Lexer *lx) { return parse_program_named(lx,"<input>"); }

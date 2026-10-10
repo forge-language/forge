@@ -45,6 +45,7 @@ typedef struct Block Block;
 typedef struct Param Param;
 
 struct Expr {
+    SourceSpan span, focus;
     ExprKind kind;
     ForgeType type;
     union {
@@ -82,6 +83,7 @@ struct Expr {
 };
 
 struct Stmt {
+    SourceSpan span, focus;
     enum {
         STMT_LET,
         STMT_EXPR,
@@ -152,6 +154,7 @@ struct Stmt {
 struct Block {
     Stmt *first;
     Stmt *last;
+    SourceSpan span, closing;
 };
 
 typedef struct MatchArm {
@@ -167,6 +170,7 @@ typedef struct ConstDecl {
 } ConstDecl;
 
 struct Param {
+    SourceSpan span;
     ForgeStr name;
     ForgeType type;
     Param *next;
@@ -200,6 +204,7 @@ typedef struct {
     ForgeType ret_type;
     Block body;
     bool is_extern;
+    SourceSpan span;
 } FnDecl;
 
 typedef struct {
@@ -248,6 +253,8 @@ typedef struct {
 } FileModule;
 
 typedef struct {
+    SourceFile **source_files;
+    size_t source_count;
     ForgeStr *imports;
     size_t import_count;
     ForgeStr *path_imports;

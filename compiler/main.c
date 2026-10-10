@@ -15,6 +15,7 @@
 #include "module_loader.h"
 #include "driver.h"
 #include "symbols.h"
+#include "source.h"
 
 static char *read_file(const char *path, size_t *out_len) {
     FILE *f = fopen(path, "rb");
@@ -52,6 +53,7 @@ static void usage(const char *prog) {
     fprintf(stderr, "  --cc PATH          C compiler for native output (default: CC, clang, gcc, or cc)\n");
     fprintf(stderr, "  --check            Parse and check visible types; exit 0 on success (for LSP / CI)\n");
     fprintf(stderr, "  --symbols-json     Print document symbols as JSON to stdout\n");
+    fprintf(stderr, "  --diagnostics-json Emit parse/semantic errors as JSON lines on stderr\n");
     fprintf(stderr, "  --keep-temp        Keep intermediate object files\n");
 }
 
@@ -117,6 +119,7 @@ int main(int argc, char **argv) {
     bool lib_mode = false;
     bool check_only = false;
     bool symbols_json = false;
+    bool diagnostics_json = false;
     bool explicit_lib_dir = false;
     const char *input = NULL;
     const char *output = NULL;
@@ -165,6 +168,8 @@ int main(int argc, char **argv) {
             check_only = true;
         } else if (strcmp(argv[i], "--symbols-json") == 0) {
             symbols_json = true;
+        } else if (strcmp(argv[i], "--diagnostics-json") == 0) {
+            diagnostics_json = true;
         } else if (strcmp(argv[i], "--keep-temp") == 0) {
             cfg.keep_intermediate = true;
         } else if (strcmp(argv[i], "-I") == 0) {
@@ -205,11 +210,12 @@ int main(int argc, char **argv) {
     }
 
     size_t len = 0;
+    forge_set_diagnostics_json(diagnostics_json);
     char *src = read_file(input, &len);
 
     Lexer lx;
     lexer_init(&lx, src, len);
-    Program prog = parse_program(&lx);
+    Program prog = parse_program_named(&lx, input);
 
     ForgeModuleConfig mcfg = {
         .entry_path = input,

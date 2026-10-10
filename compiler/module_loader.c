@@ -164,6 +164,13 @@ static void *extend_decls(void *data, size_t count, size_t extra, size_t size) {
 }
 
 static void merge_program_decls(Program *dst, Program *src) {
+    dst->source_files = extend_decls(dst->source_files,dst->source_count,
+                                     src->source_count,sizeof(*dst->source_files));
+    if (src->source_count) memcpy(dst->source_files + dst->source_count, src->source_files,
+                                  src->source_count * sizeof(*dst->source_files));
+    dst->source_count += src->source_count;
+    free(src->source_files); src->source_files = NULL; src->source_count = 0;
+
     if (src->const_count) {
         dst->consts = extend_decls(dst->consts, dst->const_count,
                                   src->const_count, sizeof(ConstDecl));
@@ -289,7 +296,7 @@ static void load_module_file(ModuleResolver *r, Program *prog, ForgeStr name, Fo
 
     Lexer lx;
     lexer_init(&lx, src, len);
-    Program mod = parse_program(&lx);
+    Program mod = parse_program_named(&lx,resolved);
 
     load_parsed_module(r, prog, name, resolved, &mod, src);
     program_free(&mod);

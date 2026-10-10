@@ -44,6 +44,7 @@ typedef struct {
     double float_val;
     int line;
     int col;
+    size_t start, end;
 } Token;
 
 typedef struct {
@@ -52,6 +53,8 @@ typedef struct {
     size_t len;
     int line;
     int col;
+    size_t token_start;
+    Token last;
     Token current;
     bool has_current;
 } Lexer;

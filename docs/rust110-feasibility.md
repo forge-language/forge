@@ -94,3 +94,20 @@ Builder byte append의 checked inline 경로를 같은 세션에서 18회씩 세
 
 현재는 실용 목표 미달이며 불가능 여부는 미확정이다. 최신 SDK의 재측정,
 동등한 coroutine/queue·HTTP 비교와 다른 호스트 반복이 남아 있다.
+
+## 코루틴의 전체 실행 수명 비교
+
+동일 물리 코어 집합의 1/2/4개 작업 스레드에서 Forge와 Tokio 1.53.0을
+비교했다. 관찰 버퍼·런타임 생성, 작업 생성, 모든 작업 완료, 종료와 완료
+검사를 타이머에 포함했다. 18개 소규모 reference 검사, 288회 prewarm 및
+288회 측정에서 각 작업 ID의 결과와 완료 수가 독립 Python reference와
+일치했다. 스케줄러 중심 및 reduction budget을 넘는 사례의 처리량 구간은
+해당 구성에서 1.10을 넘었다. 그러나 CPU 혼합 사례의 paired 중앙값은
+1.0715/1.0466/1.0013으로 전체 목표 달성을 입증하지 못했다.
+
+Forge는 reduction budget 안에서 yield 이후 계속 실행할 수 있으며 Tokio의
+`yield_now`는 별도 정책을 가진다. Forge는 작업을 먼저 큐에 넣고 작업 스레드를
+시작하며 Tokio는 스레드 생성 후 작업을 넣는다. 따라서 논리 yield 횟수가 같아도
+동일 context switch 횟수를 측정한 결과가 아니다. mailbox·HTTP·I/O 및 다른
+호스트에 일반화하지 않는다.
+[전체 조건과 원시 결과](https://github.com/forge-language/forge-benchmarks/blob/main/docs/coroutine-rust-forge-2026-10-10.md).

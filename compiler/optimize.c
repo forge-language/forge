@@ -93,12 +93,14 @@ static Expr *simplify_binary(Expr *e) {
     if (l->type.kind == TY_INT && r->type.kind == TY_INT) {
         if ((op == BIN_ADD && l->kind == EXPR_INT && l->as.int_val == 0) ||
             (op == BIN_MUL && l->kind == EXPR_INT && l->as.int_val == 1)) {
+            r->span = e->span;
             free(l);
             free(e);
             return r;
         }
         if (((op == BIN_ADD || op == BIN_SUB) && r->kind == EXPR_INT && r->as.int_val == 0) ||
             (op == BIN_MUL && r->kind == EXPR_INT && r->as.int_val == 1)) {
+            l->span = e->span;
             free(r);
             free(e);
             return l;
@@ -161,9 +163,9 @@ static void optimize_block(Block *b) {
             optimize_block(s->as.while_stmt.body);
             break;
         case STMT_FOR:
-            if (s->as.for_stmt.init) optimize_block(&(Block){ s->as.for_stmt.init, s->as.for_stmt.init });
+            if (s->as.for_stmt.init) optimize_block(&(Block){ .first=s->as.for_stmt.init, .last=s->as.for_stmt.init });
             s->as.for_stmt.cond = optimize_expr(s->as.for_stmt.cond);
-            if (s->as.for_stmt.step) optimize_block(&(Block){ s->as.for_stmt.step, s->as.for_stmt.step });
+            if (s->as.for_stmt.step) optimize_block(&(Block){ .first=s->as.for_stmt.step, .last=s->as.for_stmt.step });
             optimize_block(s->as.for_stmt.body);
             break;
         case STMT_SPAWN:

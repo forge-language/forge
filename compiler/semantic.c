@@ -17,10 +17,16 @@ typedef struct {
     bool coroutine;
 } Check;
 
-static void error(ForgeStr name, const char *reason) {
-    fprintf(stderr, "forge: semantic: %s '%.*s'\n", reason, (int)name.len, name.data);
-    exit(1);
+static void error_at(SourceSpan span, ForgeStr name, const char *reason) {
+    size_t cap = name.len + strlen(reason) + 32;
+    char *message = malloc(cap), *legacy = malloc(cap + 32);
+    if (!message || !legacy) forge_die("out of memory");
+    snprintf(message,cap,"%s '%.*s'",reason,(int)name.len,name.data);
+    snprintf(legacy,cap+32,"forge: semantic: %s",message);
+    forge_source_diagnostic(span,"semantic",message,legacy);
+    free(message); free(legacy); exit(1);
 }
+#define error(name, reason) error_at(location, name, reason)
 static ForgeType unknown(void) { ForgeType t = { .kind = UNKNOWN }; return t; }
 static bool numeric(ForgeType t) {
     return t.kind == UNKNOWN || t.kind == TY_INT || t.kind == TY_FLOAT || t.kind == TY_BOOL;
@@ -34,7 +40,7 @@ static bool compatible(ForgeType to, ForgeType from) {
     return to.kind == from.kind &&
         (to.kind != TY_STRUCT || forge_str_eq(to.struct_name, from.struct_name));
 }
-static void require(ForgeType to, ForgeType from, ForgeStr name) {
+static void require(ForgeType to, ForgeType from, ForgeStr name, SourceSpan location) {
     if (!compatible(to, from)) error(name, "type mismatch for");
 }
 static Local *local(Check *c, ForgeStr name) {
@@ -140,7 +146,7 @@ static bool callback_forwarded(Check *c, Block *body, ForgeStr parameter, unsign
     return false;
 }
 static void arguments(Check *c, ForgeStr name, Param *params, Expr **args, size_t count,
-                      FnDecl *callee, ForgeStr module) {
+                      FnDecl *callee, ForgeStr module, SourceSpan location) {
     size_t expected = 0;
     for (Param *p = params; p; p = p->next) ++expected;
     if (count != expected) error(name, "wrong argument count for");
@@ -153,10 +159,10 @@ static void arguments(Check *c, ForgeStr name, Param *params, Expr **args, size_
             c->module=saved;
             if (callback) continue;
         }
-        require(params->type,value,name);
+        require(params->type,value,name,args[i]->span);
     }
 }
-static ForgeType call(Check *c, ForgeStr module, ForgeStr name, Expr **args, size_t count) {
+static ForgeType call(Check *c, ForgeStr module, ForgeStr name, Expr **args, size_t count, SourceSpan location) {
     if (!module.len && (forge_str_eq(name, forge_str("thread_spawn")) ||
                         forge_str_eq(name, forge_str("thread_spawn_indexed")))) {
         if (count != 2) error(name, "wrong argument count for");
@@ -173,7 +179,7 @@ static ForgeType call(Check *c, ForgeStr module, ForgeStr name, Expr **args, siz
         }
         size_t required = forge_str_eq(name, forge_str("thread_spawn")) ? 1 : 2;
         if (arity != required) error(name, "wrong callback argument count for");
-        require(forge_type_int(), expression(c, args[1]), name);
+        require(forge_type_int(), expression(c, args[1]), name, args[1]->span);
         return forge_type_int();
     }
     FnDecl *fn = NULL;
@@ -186,7 +192,7 @@ static ForgeType call(Check *c, ForgeStr module, ForgeStr name, Expr **args, siz
         if (!fn && !module.len) fn = resolve(c, forge_str(""), name);
     }
     if (fn) {
-        arguments(c, name, fn->params, args, count, fn, module);
+        arguments(c, name, fn->params, args, count, fn, module, location);
         return fn->ret_type;
     }
     bool builtin = !module.len && (forge_str_eq(name, forge_str("println")) ||
@@ -207,6 +213,7 @@ static ForgeType call(Check *c, ForgeStr module, ForgeStr name, Expr **args, siz
     return builtin ? forge_type_void() : unknown();
 }
 static ForgeType expression(Check *c, Expr *e) {
+    SourceSpan location = e ? (e->focus.file ? e->focus : e->span) : (SourceSpan){0};
     if (!e) return forge_type_void();
     if (++c->depth > 2000) forge_die("semantic expression nesting limit exceeded");
     ForgeType t = unknown();
@@ -230,9 +237,9 @@ static ForgeType expression(Check *c, Expr *e) {
         error(e->as.ident, "unknown value"); break;
     }
     case EXPR_CALL:
-        t = call(c, forge_str(""), e->as.call.name, e->as.call.args, e->as.call.arg_count); break;
+        t = call(c, forge_str(""), e->as.call.name, e->as.call.args, e->as.call.arg_count, location); break;
     case EXPR_QUAL_CALL:
-        t = call(c, e->as.qual_call.module, e->as.qual_call.name, e->as.qual_call.args, e->as.qual_call.arg_count); break;
+        t = call(c, e->as.qual_call.module, e->as.qual_call.name, e->as.qual_call.args, e->as.qual_call.arg_count, location); break;
     case EXPR_BINARY: {
         ForgeType a = expression(c, e->as.binary.left), b = expression(c, e->as.binary.right);
         if (!numeric(a) || !numeric(b)) error(forge_str("operator"), "non-numeric operand for");
@@ -248,7 +255,7 @@ static ForgeType expression(Check *c, Expr *e) {
         t = forge_type_int(); break;
     case EXPR_INDEX: {
         ForgeType base = expression(c, e->as.index.base);
-        require(forge_type_int(), expression(c, e->as.index.index), forge_str("index"));
+        require(forge_type_int(), expression(c, e->as.index.index), forge_str("index"), e->as.index.index->span);
         if (base.kind != TY_STRING && base.kind != TY_PTR && base.kind != UNKNOWN)
             error(forge_str("index"), "invalid base for");
         t = forge_type_int(); break;
@@ -289,12 +296,14 @@ static void restore(Check *c, bool *state, size_t count) {
     for (size_t i = 0; i < count; ++i) c->locals[i].initialized = state[i];
 }
 static void condition(Check *c, Expr *e) {
+    SourceSpan location = e ? e->span : (SourceSpan){0};
     if (e && !numeric(expression(c, e))) error(forge_str("condition"), "non-numeric");
 }
 static void statement(Check *c, Stmt *s) {
+    SourceSpan location = s->focus.file ? s->focus : s->span;
     switch (s->kind) {
     case STMT_LET:
-        if (s->as.let.init) require(s->as.let.type, expression(c, s->as.let.init), s->as.let.name);
+        if (s->as.let.init) require(s->as.let.type, expression(c, s->as.let.init), s->as.let.name, s->as.let.init->span);
         if (s->as.let.owned_ && (s->as.let.type.kind!=TY_STRING || !s->as.let.init))
             error(s->as.let.name,"owned bindings require initialized strings for");
         declare(c, s->as.let.name, s->as.let.type, s->as.let.init != NULL);
@@ -302,11 +311,11 @@ static void statement(Check *c, Stmt *s) {
     case STMT_ASSIGN: {
         Local *l = local(c, s->as.assign.name);
         if (!l) error(s->as.assign.name, "assignment to unknown value");
-        require(l->type, expression(c, s->as.assign.value), s->as.assign.name);
+        require(l->type, expression(c, s->as.assign.value), s->as.assign.name, s->as.assign.value->span);
         l->initialized = true; break;
     }
     case STMT_EXPR: expression(c, s->as.expr); break;
-    case STMT_RETURN: require(c->result, expression(c, s->as.ret), forge_str("return")); break;
+    case STMT_RETURN: require(c->result, expression(c, s->as.ret), forge_str("return"), s->as.ret ? s->as.ret->span : location); break;
     case STMT_IF: {
         condition(c, s->as.if_stmt.cond);
         size_t n = c->count;
@@ -370,12 +379,12 @@ static void statement(Check *c, Stmt *s) {
         if (c->process) for (size_t i = 0; i < c->process->coro_count; ++i)
             if (forge_str_eq(c->process->coros[i].name, s->as.spawn.coro_name)) coro = &c->process->coros[i];
         if (!coro) error(s->as.spawn.coro_name, "unknown coroutine");
-        arguments(c, s->as.spawn.coro_name, coro->params, s->as.spawn.args, s->as.spawn.arg_count, NULL, forge_str("")); break;
+        arguments(c, s->as.spawn.coro_name, coro->params, s->as.spawn.args, s->as.spawn.arg_count, NULL, forge_str(""), location); break;
     }
     case STMT_SEND: {
         ForgeType target=expression(c,s->as.send.target);
         if (target.kind!=TY_INT && target.kind!=TY_PTR && target.kind!=UNKNOWN)
-            error(forge_str("send"),"send target requires an integer or pointer process handle for");
+            error_at(s->as.send.target->span,forge_str("send"),"send target requires an integer or pointer process handle for");
         ForgeType value=expression(c,s->as.send.value);
         if (s->as.send.move_) {
             if (s->as.send.value->kind!=EXPR_IDENT)
@@ -385,7 +394,7 @@ static void statement(Check *c, Stmt *s) {
                 error(forge_str("send"),"send-move requires a named owned string for");
             binding->initialized=false;
         } else if (value.kind!=TY_INT && value.kind!=TY_BOOL && value.kind!=UNKNOWN)
-            error(forge_str("send"),"ordinary send requires an integer value for");
+            error_at(s->as.send.value->span,forge_str("send"),"ordinary send requires an integer value for");
         break;
     }
     case STMT_YIELD: case STMT_AWAIT:
@@ -393,7 +402,7 @@ static void statement(Check *c, Stmt *s) {
         if (s->kind == STMT_AWAIT) expression(c, s->as.await_expr);
         break;
     case STMT_MATCH: {
-        require(forge_type_int(), expression(c, s->as.match_stmt.scrutinee), forge_str("match"));
+        require(forge_type_int(), expression(c, s->as.match_stmt.scrutinee), forge_str("match"), s->as.match_stmt.scrutinee->span);
         size_t n = c->count; bool *before = snapshot(c);
         bool *joined=malloc((n+1)*sizeof(bool));
         if (!joined) forge_die("out of memory");
@@ -482,7 +491,7 @@ static void functions(Check *c, FnDecl *fns, size_t count) {
         if (!fns[i].is_extern) {
             body(c, fns[i].params, &fns[i].body, fns[i].ret_type);
             if (fns[i].ret_type.kind!=TY_VOID && (flow_block(&fns[i].body,0)&FLOW_NEXT))
-                error(fns[i].name,"reachable end of non-void function");
+                error_at(fns[i].body.closing,fns[i].name,"reachable end of non-void function");
         }
 }
 void forge_check_program(Program *p) {

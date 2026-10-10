@@ -7,6 +7,7 @@
 #include <ctype.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include "source.h"
 
 #define FORGE_VERSION "0.3.0"
 

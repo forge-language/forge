@@ -43,7 +43,7 @@ foreach(component IN ITEMS runtime stdlib)
     endforeach()
 endforeach()
 set(FORGE_CC_ARGS --cc "${CMAKE_C_COMPILER}")
-add_executable(forge compiler/main.c compiler/lexer.c compiler/parser.c
+add_executable(forge compiler/main.c compiler/source.c compiler/lexer.c compiler/parser.c
     compiler/ast.c compiler/semantic.c compiler/codegen.c compiler/codegen_js.c compiler/mod_registry.c
     compiler/module_loader.c compiler/symbols.c compiler/optimize.c compiler/driver.c)
 target_include_directories(forge PRIVATE compiler "${FORGE_ROOT_DIR}/include")
@@ -128,7 +128,7 @@ install(FILES LICENSE DESTINATION ${CMAKE_INSTALL_DATADIR}/forge)
 
 if(BUILD_TESTING)
     add_executable(optimizer_test tests/optimizer_test.c compiler/ast.c compiler/optimize.c)
-    add_executable(parser_test tests/parser_test.c compiler/parser.c compiler/lexer.c compiler/ast.c)
+    add_executable(parser_test tests/parser_test.c compiler/parser.c compiler/lexer.c compiler/ast.c compiler/source.c)
     foreach(name IN ITEMS optimizer parser)
         target_include_directories(${name}_test PRIVATE compiler)
         if(MSVC)
@@ -142,8 +142,8 @@ if(BUILD_TESTING)
     if(Python3_Interpreter_FOUND)
         add_test(NAME module_merge_regressions COMMAND "${Python3_EXECUTABLE}"
             "${CMAKE_CURRENT_SOURCE_DIR}/tests/module_merge_test.py" "$<TARGET_FILE:forge>")
-        foreach(name IN ITEMS compiler driver selfhost org_integration ownership arithmetic)
-            if((name STREQUAL "ownership" OR name STREQUAL "arithmetic") AND NOT UNIX)
+        foreach(name IN ITEMS compiler driver selfhost org_integration ownership arithmetic diagnostics)
+            if((name STREQUAL "ownership" OR name STREQUAL "arithmetic" OR name STREQUAL "diagnostics") AND NOT UNIX)
                 continue()
             endif()
             if(name STREQUAL "org_integration" AND NOT UNIX)

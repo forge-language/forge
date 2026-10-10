@@ -112,7 +112,7 @@ Rust 옵션은 공식 rustc 문서를 기준으로 opt-level/LTO/codegen-units/o
   unary `-0.0`가 positive zero가 되는 문제는 별도 미해결 항목으로 확인했다.
 - 소스 override 없이 공개 runtime `ddeba40`/stdlib `bd89481`를 새로 fetch한
   Release 빌드에서 17개 CTest, selfhost fixed point, 설치 SDK의 FG/C 소비자
-  3개를 통과했다. 정식 compiler 공개 및 CI 확인은 후속 기록으로 구분한다.
+  3개를 통과했다. compiler `78faaf1` 공개 후 compiler/container CI도 모두 통과했다.
 - 문자열 view inline 결과와 네이티브 OS thread 비교를 추가했다.
   [목표 검토 문서](rust110-feasibility.md)에 원시 결과·범위·미달을 기록했다.
 - TypeScript LSP의 blocking compiler 실행을 async/취소/버전·설정 generation
@@ -122,3 +122,18 @@ Rust 옵션은 공식 rustc 문서를 기준으로 opt-level/LTO/codegen-units/o
   같은 세션의 18회 교차 측정에서 기존 view-only 경로 대비 1.5059배
   (95% 구간 1.4897–1.5090), Rust 대비 0.9571배로 목표에는 미달했다.
   exported ABI, 경계 검사, snapshot 계약을 유지하고 inline caller의 ASan/UBSan 회귀를 통과했다.
+
+### 정확한 소스 진단 checkpoint
+
+- stage0 AST에 원본 byte span을 유지하고 parse/semantic 오류를 파일별 UTF-16
+  범위로 전달한다. imported/transitive 선언과 decoded 문자열의 원본 위치를
+  포함한 16개 진단 회귀를 통과했다. 기본 메시지의 첫 줄과 이전 compiler
+  호환성을 유지하며 선택적 `--diagnostics-json`을 추가했다.
+- 정상 종료의 AST parameter 누락 해제를 수정했다. 가져온 함수·extern 선언이
+  있는 check/symbols/C 출력의 ASan/UBSan/LSan 및 declaration cleanup 회귀 통과.
+  오류 즉시 종료의 전체 자원 정리나 모든 compiler 경로 검증을 의미하지 않는다.
+- TypeScript LSP는 `2381fbe`에서 위치 정보를 중복 없이 반영하고 imported 오류는
+  원본 파일을 메시지로 전달한다. 21개 테스트와 CI 통과.
+- 로컬 override SDK에서 새 OS/framing primitives를 포함한 20개 CTest 통과.
+  native FG event-loop, process-group cancellation 및 JSON Unicode 처리는
+  검증 중이며 이 checkpoint의 공개 compiler 의존성은 검증된 `bd89481`을 유지한다.
