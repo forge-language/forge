@@ -821,9 +821,10 @@ static void emit_coro_body(Codegen *cg, CoroDecl *coro, const char *state_var, i
     while (s) {
         if (s->kind == STMT_YIELD) {
             int resume = ++(*step);
-            cg_line(cg, "    fr_coro_set_step(__coro, %d);", resume);
-            cg_line(cg, "    return fr_yield(__coro);");
-            cg_line(cg, "case %d:", resume);
+            cg_line(cg, "    if (fr_coro_inline_yield(__coro, %d)) return FR_CORO_YIELDED;", resume);
+            cg_line(cg, "    goto __forge_coro_resume_%d;", resume);
+            cg_line(cg, "case %d:;", resume);
+            cg_line(cg, "__forge_coro_resume_%d:;", resume);
             s = s->next;
             continue;
         }
