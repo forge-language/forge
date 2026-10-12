@@ -176,15 +176,19 @@ and a possible builder regression (0.9642, 0.9146–0.9999). The candidate was
 discarded. Both Forge rows remained below Rust in this run (0.9416 and 0.8699).
 [Conditions and raw samples](https://github.com/forge-language/forge-benchmarks/blob/main/docs/builder-length-publication-2026-10-12.md).
 
-## 2026-10-12 current CPU suite recheck
+## 2026-10-12 current SDK CPU recheck
 
-Thirty paired samples of the current frozen compiler and SDK against one Rust
-control confirmed 1.012/1.011 throughput for LCG/primes, 0.948/0.968 for
-scan/builder, and 13.557 for the specifically lowered immutable-append case.
-Only that narrow immutable-append workload exceeds 1.10; the four other rows
-remain below target. Every checksum matched the independent reference. This is
-one host and one run, and does not establish language-wide 110% performance.
-[Conditions and raw samples](https://github.com/forge-language/forge-benchmarks/blob/main/docs/cpu-current-2026-10-12.md).
+A fresh 120-pair run of the current Forge compiler/runtime/stdlib against
+source-matched Rust controls used the same frozen workload dimensions, balanced
+execution order, per-input warmups and independent Python output oracle. All
+checksums matched. Forge/Rust throughput was LCG 1.0068 [1.0018–1.0085],
+primes 1.0113 [1.0092–1.0130], scan 2.2701 [2.2645–2.2765], builder 1.3071
+[1.2014–1.3713], and immutable append 17.4990 [10.9507–18.0257]. Three of
+these five rows support 1.10 in this run; LCG and primes remain below. The
+builder and immutable intervals are wide, and results cover one host and this
+fixture suite only. Earlier reports used different source variants and
+archives, so their medians are not pooled with this run. [Conditions, artifact
+hashes and raw samples](https://github.com/forge-language/forge-benchmarks/blob/main/docs/cpu-current-rerun-2026-10-12.md).
 
 ## 2026-10-12 weighted-scan recurrence
 
