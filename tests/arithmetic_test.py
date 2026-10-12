@@ -105,6 +105,7 @@ class ArithmeticTests(unittest.TestCase):
         edge = (1 << 32) - 1
         pairs = [(0, 1), (edge, 1), (edge, 3), (edge, edge),
                  (edge + 1, 3), (edge, edge + 1), (edge + 1, edge),
+                 (-(1 << 31), -1), (-(1 << 31), 3), ((1 << 31) - 1, 3),
                  (-1, 3), (-edge, 3), (edge, -3), (-edge, -3),
                  (MIN, 1), (MIN, 3), (MAX, -1), (MAX, edge), (MAX, MIN)]
         rng = random.Random(20261012)
