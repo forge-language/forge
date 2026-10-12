@@ -153,3 +153,8 @@ timeout과 단계별 시간, 즉시 저장되는 요청 결과를 제공한다. 
 다음 후보인 증명된 native/library loop increment 간소화는 독립 코드
 검토를 마쳤지만 아직 빌드·경계 테스트·동일 조건 성능 측정 전이다.
 현재 목표는 미완료이며 활성 상태를 유지한다.
+
+
+## 2026-10-12 prepared HTTP capacity follow-up
+
+The bounded V2 observer passed 14/14 validation gates and 8/8 observer tests. A 4-worker loopback sweep covered concurrency 16–512, 32- and 4096-byte response bodies, and eight repetitions per configuration. All 320 prewarm/measurement samples passed exact response and EOF checks with zero failed request rows. The tested error-free bound is **at least 512 simultaneous client lanes** for both payload sizes; the absolute capacity was not established. Median successful throughput ranged from 2,958–4,240 requests/s (32-byte body) and 3,732–4,210 requests/s (4096-byte body) for Forge; Rust measured 3,720–4,326 and 3,950–4,254 requests/s, respectively. Paired variability is wide, so these measurements do not establish a language performance winner or the 1.10 target. This is a closed-loop local prepared-response, connection-per-request test with observer logging included, not a general user-capacity, keepalive, full-framework, TLS, routing, or database result. [Conditions and table](https://github.com/forge-language/forge-benchmarks/blob/main/docs/http-v2-capacity-2026-10-12.md), [raw report](https://github.com/forge-language/forge-benchmarks/blob/main/docs/http-v2-capacity-2026-10-12.json).
