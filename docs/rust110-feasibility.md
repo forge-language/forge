@@ -245,6 +245,18 @@ and 7964 req/s for Rust (0.562 and 0.717 MB/s). Four paired observations vary
 widely, so they do not establish a throughput winner or an absolute maximum.
 [4096-lane conditions and raw attempts](https://github.com/forge-language/forge-benchmarks/blob/main/docs/http-v2-capacity-4096-2026-10-12.md).
 
+## Linux accepted-socket syscall reduction candidate
+
+A Linux-only candidate kept the epoll listener nonblocking while accepting
+blocking client fds with `SOCK_CLOEXEC`, which removes two `fcntl` calls per
+connection. It passed 14 HTTP V2 correctness probes and the 10-test stdlib
+CTest suite. A 24-triplet comparison at two workers, 64 clients and a 32-byte
+body measured candidate/baseline throughput at 0.8323 [0.6969–1.3336] and
+candidate/Rust at 0.8205 [0.7258–0.9343]. All requests passed, but p99 latency
+reached about 208 ms and the baseline interval remained wide. The candidate
+did not support the 1.10 target and was reverted. [Conditions, decision and
+raw data](https://github.com/forge-language/forge-benchmarks/blob/main/docs/http-accept4-blocking-experiment-2026-10-12.md).
+
 ## Builder preallocation
 
 A separate 120-pair builder comparison isolated `str_builder()` from
