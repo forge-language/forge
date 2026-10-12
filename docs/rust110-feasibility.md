@@ -261,3 +261,13 @@ builder [0.921–1.031], and 1.003x for immutable append [0.956–1.141]. The
 normal SDK remains the default; the large immutable workload's interval is too
 wide to claim a difference.
 [Conditions and raw samples](https://github.com/forge-language/forge-benchmarks/blob/main/docs/sdk-lto-comparison-2026-10-12.md).
+
+## Rejected contiguous builder allocation
+
+A candidate that combined builder metadata and its capacity buffer in one
+arena allocation also removed zero-fill for the internal length-delimited
+buffer. It passed all 10 stdlib tests, but two same-source paired runs showed
+baseline/candidate Forge throughput of 1.0059x [0.9857–1.0479] at 120 pairs
+and 0.9958x [0.9823–1.0106] at 240 pairs. Because the direction changed and
+the larger interval includes no improvement, the candidate was reverted.
+[Conditions, raw samples and patch](https://github.com/forge-language/forge-benchmarks/blob/main/docs/builder-contiguous-allocation-2026-10-12.md).
