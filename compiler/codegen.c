@@ -1177,21 +1177,240 @@ static bool block_has_yield(Stmt *first) {
     return false;
 }
 
+typedef struct { int64_t low, high; } CgIntRange;
+
+static bool cg_range_add(int64_t a, int64_t b, int64_t *out) {
+    if ((b > 0 && a > INT64_MAX - b) || (b < 0 && a < INT64_MIN - b)) return false;
+    *out = a + b;
+    return true;
+}
+
+static bool cg_range_sub(int64_t a, int64_t b, int64_t *out) {
+    if ((b < 0 && a > INT64_MAX + b) || (b > 0 && a < INT64_MIN + b)) return false;
+    *out = a - b;
+    return true;
+}
+
+/* Only accept pure integer syntax. Besides preserving single evaluation, this
+ * excludes calls that could alias the string or reset its arena. */
+static bool cg_pure_int_expr(const Expr *e) {
+    if (!e) return false;
+    switch (e->kind) {
+    case EXPR_INT: case EXPR_IDENT: return true;
+    case EXPR_BINARY:
+        if (e->as.binary.op != BIN_ADD && e->as.binary.op != BIN_SUB &&
+            e->as.binary.op != BIN_MUL && e->as.binary.op != BIN_DIV &&
+            e->as.binary.op != BIN_MOD) return false;
+        return cg_pure_int_expr(e->as.binary.left) && cg_pure_int_expr(e->as.binary.right);
+    default: return false;
+    }
+}
+
+static bool cg_expr_mentions(const Expr *e, ForgeStr name) {
+    if (!e) return false;
+    switch (e->kind) {
+    case EXPR_IDENT: return forge_str_eq(e->as.ident, name);
+    case EXPR_BINARY:
+        return cg_expr_mentions(e->as.binary.left, name) ||
+               cg_expr_mentions(e->as.binary.right, name);
+    default: return false;
+    }
+}
+
+static bool cg_int_range(const Expr *e, CgIntRange *range) {
+    if (!e) return false;
+    if (e->kind == EXPR_INT) {
+        range->low = range->high = e->as.int_val;
+        return true;
+    }
+    if (e->kind != EXPR_BINARY) return false;
+    Expr *left = e->as.binary.left, *right = e->as.binary.right;
+    if (e->as.binary.op == BIN_MOD && right->kind == EXPR_INT && right->as.int_val != 0) {
+        int64_t divisor = right->as.int_val;
+        uint64_t magnitude = divisor < 0 ? (uint64_t)(-(divisor + 1)) + 1 : (uint64_t)divisor;
+        uint64_t bound = magnitude - 1;
+        if (bound > INT64_MAX) bound = INT64_MAX;
+        range->low = -(int64_t)bound;
+        range->high = (int64_t)bound;
+        return true;
+    }
+    CgIntRange a, b;
+    if (!cg_int_range(left, &a) || !cg_int_range(right, &b)) return false;
+    if (e->as.binary.op == BIN_ADD)
+        return cg_range_add(a.low, b.low, &range->low) &&
+               cg_range_add(a.high, b.high, &range->high);
+    if (e->as.binary.op == BIN_SUB)
+        return cg_range_sub(a.low, b.high, &range->low) &&
+               cg_range_sub(a.high, b.low, &range->high);
+    return false;
+}
+
+static bool cg_is_empty_string_let(const Stmt *s) {
+    return s && s->kind == STMT_LET && s->as.let.type.kind == TY_STRING &&
+           s->as.let.init && s->as.let.init->kind == EXPR_STRING &&
+           s->as.let.init->as.string_val.len == 0;
+}
+static bool cg_append_loop_matches(Codegen *cg, ForgeStr text, Stmt *loop) {
+    if (!loop || loop->kind != STMT_WHILE || !loop->as.while_stmt.body ||
+        !loop->as.while_stmt.cond || loop->as.while_stmt.cond->kind != EXPR_BINARY ||
+        loop->as.while_stmt.cond->as.binary.op != BIN_LT) return false;
+    Expr *cond = loop->as.while_stmt.cond;
+    Expr *index = cond->as.binary.left;
+    if (index->kind != EXPR_IDENT ||
+        forge_str_eq(index->as.ident, text) || !cg_pure_int_expr(cond->as.binary.right)) return false;
+
+    Stmt *append = loop->as.while_stmt.body->first;
+    Stmt *step = append ? append->next : NULL;
+    if (!append || append->kind != STMT_ASSIGN || !step || step->kind != STMT_ASSIGN || step->next ||
+        !forge_str_eq(append->as.assign.name, text) ||
+        !forge_str_eq(step->as.assign.name, index->as.ident)) return false;
+    Expr *call = append->as.assign.value;
+    if (!call || call->kind != EXPR_CALL || call->as.call.arg_count != 2 ||
+        !forge_str_eq(call->as.call.args[0]->kind == EXPR_IDENT ?
+                      call->as.call.args[0]->as.ident : (ForgeStr){0}, text)) return false;
+    const char *mapped = forge_std_c_name(call->as.call.name, cg->imports, cg->import_count);
+    if (!mapped || strcmp(mapped, "fr_str_append") != 0) return false;
+    Expr *byte = call->as.call.args[1];
+    CgIntRange byte_range;
+    if (!cg_pure_int_expr(byte) || cg_expr_mentions(byte, text) ||
+        !cg_int_range(byte, &byte_range) || byte_range.low < 1 || byte_range.high > 127) return false;
+
+    Expr *increment = step->as.assign.value;
+    if (!increment || increment->kind != EXPR_BINARY || increment->as.binary.op != BIN_ADD)
+        return false;
+    Expr *a = increment->as.binary.left, *b = increment->as.binary.right;
+    bool forward = a->kind == EXPR_IDENT && forge_str_eq(a->as.ident, index->as.ident) &&
+                   b->kind == EXPR_INT && b->as.int_val == 1;
+    bool reverse = b->kind == EXPR_IDENT && forge_str_eq(b->as.ident, index->as.ident) &&
+                   a->kind == EXPR_INT && a->as.int_val == 1;
+    return (forward || reverse) && cg_pure_int_expr(increment);
+}
+
+static Stmt *cg_find_append_loop(Codegen *cg, Stmt *after_let, ForgeStr text) {
+    Stmt *s = after_let;
+    for (size_t count = 0; s && count < 8; count++) {
+        if (s->kind == STMT_WHILE)
+            return cg_append_loop_matches(cg, text, s) ? s : NULL;
+        if (s->kind != STMT_LET || s->as.let.type.kind != TY_INT ||
+            !cg_pure_int_expr(s->as.let.init) || cg_expr_mentions(s->as.let.init, text) ||
+            forge_str_eq(s->as.let.name, text)) return NULL;
+        s = s->next;
+    }
+    return NULL;
+}
+
+static void emit_local_let(Codegen *cg, Stmt *s) {
+    cg_push_local(cg, s->as.let.name, s->as.let.type);
+    cg_indent(cg);
+    c_type_name(cg->out, s->as.let.type);
+    fprintf(cg->out, " %.*s", (int)s->as.let.name.len, s->as.let.name.data);
+    if (s->as.let.init) {
+        fputs(" = ", cg->out);
+        emit_expr(cg, s->as.let.init);
+    }
+    fputs(";\n", cg->out);
+}
+
+static void emit_append_loop_legacy(Codegen *cg, Stmt *loop,
+                                    const char *proc_var, bool in_coro) {
+    cg_line(cg, "while (");
+    emit_expr(cg, loop->as.while_stmt.cond);
+    fputs(") {\n", cg->out);
+    cg->indent++;
+    emit_block_stmts(cg, loop->as.while_stmt.body->first, proc_var, in_coro);
+    cg->indent--;
+    cg_line(cg, "}");
+}
+
+static void emit_append_loop_builder(Codegen *cg, Stmt *loop, ForgeStr text,
+                                     const char *proc_var, bool in_coro) {
+    Stmt *append = loop->as.while_stmt.body->first;
+    Stmt *step = append->next;
+    int id = ++cg->label_seq;
+    char builder[64], byte[64], has_work[64], did_append[64];
+    do {
+        snprintf(builder, sizeof(builder), "__forge_append_builder_%d", id++);
+        snprintf(byte, sizeof(byte), "__forge_append_byte_%d", id);
+        snprintf(has_work, sizeof(has_work), "__forge_append_work_%d", id);
+        snprintf(did_append, sizeof(did_append), "__forge_append_did_%d", id);
+    } while (cg_is_local(cg, forge_str(builder)) || cg_is_local(cg, forge_str(byte)) ||
+             cg_is_local(cg, forge_str(has_work)) || cg_is_local(cg, forge_str(did_append)));
+
+    Stmt *saved_increment = cg->safe_increment;
+    cg->safe_increment = prove_loop_increment(cg, loop->as.while_stmt.cond,
+                                               loop->as.while_stmt.body, step);
+    cg_line(cg, "{");
+    cg->indent++;
+    cg_line(cg, "int %s = (", has_work);
+    emit_expr(cg, loop->as.while_stmt.cond);
+    fputs(") != 0;\n", cg->out);
+    cg_line(cg, "int64_t %s = %s ? fr_str_builder() : 0;", builder, has_work);
+    cg_line(cg, "if (%s) {", builder);
+    cg->indent++;
+    cg_line(cg, "int %s = 0;", did_append);
+    cg_line(cg, "while (");
+    emit_expr(cg, loop->as.while_stmt.cond);
+    fputs(") {\n", cg->out);
+    cg->indent++;
+    cg_line(cg, "int64_t %s = ", byte);
+    emit_expr(cg, append->as.assign.value->as.call.args[1]);
+    fputs(";\n", cg->out);
+    cg_line(cg, "if (fr_str_builder_char(%s, %s) == 0) {", builder, byte);
+    cg->indent++;
+    cg_line(cg, "if (%s) %.*s = fr_str_append(fr_detail_str_builder_current(%s), %s);",
+            did_append, (int)text.len, text.data, builder, byte);
+    cg_line(cg, "else %.*s = fr_str_append(%.*s, %s);",
+            (int)text.len, text.data, (int)text.len, text.data, byte);
+    cg_indent(cg);
+    fprintf(cg->out, "%.*s = ", (int)step->as.assign.name.len, step->as.assign.name.data);
+    emit_assignment_rhs(cg, step);
+    fputs(";\n", cg->out);
+    cg_line(cg, "%s = 0;", builder);
+    cg_line(cg, "break;");
+    cg->indent--;
+    cg_line(cg, "}");
+    cg_line(cg, "%s = 1;", did_append);
+    cg_indent(cg);
+    fprintf(cg->out, "%.*s = ", (int)step->as.assign.name.len, step->as.assign.name.data);
+    emit_assignment_rhs(cg, step);
+    fputs(";\n", cg->out);
+    cg->indent--;
+    cg_line(cg, "}");
+    cg_line(cg, "if (%s && %s) %.*s = fr_str_builder_finish(%s);",
+            builder, did_append, (int)text.len, text.data, builder);
+    cg_line(cg, "if (!%s) {", builder);
+    cg->indent++;
+    emit_append_loop_legacy(cg, loop, proc_var, in_coro);
+    cg->indent--;
+    cg_line(cg, "}");
+    cg->indent--;
+    cg_line(cg, "} else {");
+    cg->indent++;
+    emit_append_loop_legacy(cg, loop, proc_var, in_coro);
+    cg->indent--;
+    cg_line(cg, "}");
+    cg->indent--;
+    cg_line(cg, "}");
+    cg->safe_increment = saved_increment;
+}
+
 static void emit_stmts(Codegen *cg, Stmt *s, const char *proc_var, bool in_coro) {
     cg_enter(cg);
     while (s) {
         switch (s->kind) {
-        case STMT_LET:
-            cg_push_local(cg, s->as.let.name, s->as.let.type);
-            cg_indent(cg);
-            c_type_name(cg->out, s->as.let.type);
-            fprintf(cg->out, " %.*s", (int)s->as.let.name.len, s->as.let.name.data);
-            if (s->as.let.init) {
-                fputs(" = ", cg->out);
-                emit_expr(cg, s->as.let.init);
+        case STMT_LET: {
+            Stmt *append_loop = NULL;
+            if (!in_coro && !cg->state_prefix && cg_is_empty_string_let(s))
+                append_loop = cg_find_append_loop(cg, s->next, s->as.let.name);
+            emit_local_let(cg, s);
+            if (append_loop) {
+                for (Stmt *pre = s->next; pre != append_loop; pre = pre->next)
+                    emit_local_let(cg, pre);
+                emit_append_loop_builder(cg, append_loop, s->as.let.name, proc_var, in_coro);
+                s = append_loop;
             }
-            fputs(";\n", cg->out);
             break;
+        }
         case STMT_EXPR:
             cg_indent(cg);
             emit_expr(cg, s->as.expr);
