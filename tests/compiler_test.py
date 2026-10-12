@@ -37,13 +37,32 @@ class CompilerRegressionTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 1, result.stderr)
                 self.assertIn('statement nesting too deep', result.stderr)
 
-    def compile_program(self, source):
+    def compile_program(self, source, cc=config.cc):
         self.source.write_text(source)
         binary = Path(self.temp.name) / 'test'
-        result = self.invoke(self.source, '-o', binary, '--cc', config.cc,
+        result = self.invoke(self.source, '-o', binary, '--cc', cc,
                              '--forge-root', config.root, '--lib-dir', config.lib_dir)
         self.assertEqual(result.returncode, 0, result.stderr)
         return binary
+
+    def test_append_loop_lowering_builds_with_abi_only_string_header(self):
+        wrapper = Path(self.temp.name) / 'cc-no-inline'
+        wrapper.write_text(
+            '#!/usr/bin/env python3\n'
+            'import os, sys\n'
+            f'cc = {config.cc!r}\n'
+            'os.execv(cc, [cc, "-DFORGE_STRING_NO_INLINE", *sys.argv[1:]])\n')
+        wrapper.chmod(0o755)
+        binary = self.compile_program('''import strings;
+            native main {
+                let text: string = "";
+                let i: int = 0;
+                while (i < 3) { text = str_append(text, 65 + i); i = i + 1; }
+                println(text);
+            }''', str(wrapper))
+        result = subprocess.run([str(binary)], text=True, capture_output=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, 'ABC\n')
 
     def run_program(self, source, expected):
         binary = self.compile_program(source)
