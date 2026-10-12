@@ -240,3 +240,14 @@ workload. At 4096 lanes, median successful throughput was 6243 req/s for Forge
 and 7964 req/s for Rust (0.562 and 0.717 MB/s). Four paired observations vary
 widely, so they do not establish a throughput winner or an absolute maximum.
 [4096-lane conditions and raw attempts](https://github.com/forge-language/forge-benchmarks/blob/main/docs/http-v2-capacity-4096-2026-10-12.md).
+
+## Builder preallocation
+
+A separate 120-pair builder comparison isolated `str_builder()` from
+`str_builder_with_capacity(n)`, with identical compiler/SDK artifacts and a
+Rust control that already uses `String::with_capacity(n)`. Forge preallocation
+improved throughput 1.0246x over its default-capacity builder (95% interval
+1.0066–1.0679). Candidate Forge/Rust was 1.0929x [1.0158–1.1999]; the
+source-matched alternative control gave 1.0996x [1.0246–1.2158]. This supports
+a modest workload-specific gain but does not establish 110% of Rust.
+[Conditions and samples](https://github.com/forge-language/forge-benchmarks/blob/main/docs/builder-capacity-reservation-2026-10-12.md).
