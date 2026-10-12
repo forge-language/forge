@@ -112,6 +112,18 @@ class ArithmeticTests(unittest.TestCase):
             source += f'println(positive_mod7({literal(value)}));'
         self.execute(source + 'return 0;}', '\n'.join(expected) + '\n')
 
+    def test_positive_constant_division_int64_boundaries(self):
+        # Positive literal divisors cannot trigger Forge's divide-by-zero or
+        # INT64_MIN/-1 trap, so native codegen may emit division directly.
+        values = [MIN, MIN + 1, -15, -7, -1, 0, 1, 7, 15, MAX]
+        source = 'fn quotient7(a:int):int{return a/7;} native main {'
+        expected = []
+        for value in values:
+            quotient = abs(value) // 7 * (-1 if value < 0 else 1)
+            expected.append(str(quotient))
+            source += f'println(quotient7({literal(value)}));'
+        self.execute(source + 'return 0;}', '\n'.join(expected) + '\n')
+
     def test_mersenne_modmul_guard_preserves_wrapping_fallback(self):
         # The native backend may use a Mersenne fold only for a nonnegative
         # in-range multiplicand whose product is proven not to overflow.

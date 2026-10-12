@@ -612,17 +612,17 @@ static void emit_expr_inner(Codegen *cg, Expr *e) {
         }
         if (helper) {
             Expr *right = e->as.binary.right;
-            bool direct_positive_remainder =
-                e->as.binary.op == BIN_MOD &&
+            bool direct_positive_division =
+                (e->as.binary.op == BIN_MOD || e->as.binary.op == BIN_DIV) &&
                 cg_expr_known_int(cg, e->as.binary.left) &&
                 right->kind == EXPR_INT && right->as.int_val > 0;
-            if (direct_positive_remainder) {
+            if (direct_positive_division) {
                 /* A positive divisor cannot trigger Forge's zero or
-                 * INT64_MIN/-1 remainder traps. Let C lower this constant
-                 * remainder while keeping every other case checked. */
+                 * INT64_MIN/-1 division traps. Let C lower this constant
+                 * operation while keeping every other case checked. */
                 fputc('(', cg->out);
                 emit_expr(cg, e->as.binary.left);
-                fputs(" % ", cg->out);
+                fputs(e->as.binary.op == BIN_MOD ? " % " : " / ", cg->out);
                 emit_expr(cg, right);
                 fputc(')', cg->out);
             } else {
