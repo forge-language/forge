@@ -138,6 +138,31 @@ class ArithmeticTests(unittest.TestCase):
         self.execute(functions + 'native main {' + calls + 'return 0;}',
                      '\n'.join(expected) + '\n')
 
+    def test_mersenne_affine_modmul_guard_preserves_wrapping_fallback(self):
+        # Affine congruential updates can use the fold only when the full
+        # multiply-add is positive and representable. All other inputs retain
+        # the language's wrapping arithmetic and signed remainder.
+        rng = random.Random(20261014)
+        cases = [(31, 48271, 1), (31, 48271, 1000), (7, 3, 5), (62, 1, 3)]
+        functions = ''
+        calls = ''
+        expected = []
+        for index, (shift, multiplier, addend) in enumerate(cases):
+            modulus = (1 << shift) - 1
+            name = f'mersenne_affine_step_{index}'
+            functions += (f'fn {name}(value:int):int{{'
+                          f'return (value*{multiplier}+{addend})%{modulus};}} ')
+            values = [MIN, MIN + 1, -modulus, -1, 0, 1, modulus - 1,
+                      modulus, modulus + 1, MAX]
+            values += [rng.randrange(MIN, MAX + 1) for _ in range(24)]
+            for value in values:
+                expression = wrap(value * multiplier + addend)
+                quotient = abs(expression) // modulus * (-1 if expression < 0 else 1)
+                expected.append(str(expression - quotient * modulus))
+                calls += f'println({name}({literal(value)}));'
+        self.execute(functions + 'native main {' + calls + 'return 0;}',
+                     '\n'.join(expected) + '\n')
+
     def test_dynamic_division_width_boundaries_and_once_evaluation(self):
         # External calls keep operands dynamic even at -O3. Exercise both
         # sides of the unsigned-32 fast path and the full signed fallback.
