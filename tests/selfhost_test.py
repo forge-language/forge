@@ -210,6 +210,179 @@ native main {
         self.assertEqual(result.returncode, 0, result.stderr)
         self.run_binary(self.directory / 'flow', '10\na"b\n')
 
+    def test_semantic_errors_preserve_outputs_before_emission_or_native_compilation(self):
+        cases = [
+            ('native main { println(missing); }', 'unknown value'),
+            ('native main { missing(); }', 'unknown function'),
+            ('native main { let x: int = "wrong"; }', 'initializer type mismatch'),
+            ('native main { let x: string = 1; }', 'initializer type mismatch'),
+            ('native main { let x: int = x; }', 'unknown value'),
+            ('native main { let x: int = 0; x = "wrong"; }', 'assignment type mismatch'),
+            ('native main { x = 1; }', 'assignment to unknown value'),
+            ('native main { { let x: int = 1; } println(x); }', 'unknown value'),
+            ('native main { if (1) { let x: int = 1; } else { println(x); } }', 'unknown value'),
+            ('native main { for(let i: int = 0; i < 1; i = i + 1) {} println(i); }', 'unknown value'),
+            ('native main { for(let i: int = 0; i < 1; i = x) { let x: int = 1; } }', 'unknown value'),
+            ('native main { match 1 { 1 => { let x: int = 0; } _ => println(x); } }', 'unknown value'),
+            ('native main { return "wrong"; }', 'return type mismatch'),
+            ('process main { return 1; }', 'return type mismatch'),
+            ('native main { break; }', 'outside loop'),
+            ('native main { if (0) { continue; } }', 'outside loop'),
+            ('native main { println("a" + 1); }', 'non-numeric operand'),
+            ('native main { println("a" == "a"); }', 'non-numeric operand'),
+            ('native main { println(!"a"); }', 'non-numeric unary operand'),
+            ('native main { if ("a") {} }', 'non-numeric condition'),
+            ('native main { while ("a") {} }', 'non-numeric condition'),
+            ('native main { match "a" { _ => {} } }', 'integer value'),
+            ('native main { if (0) { missing(); } }', 'unknown function'),
+            ('native main { let x: int = missing() * 0; }', 'unknown function'),
+            ('native main { return 0; println(missing); }', 'unknown value'),
+            ('fn f(x: int): int { return x; }\nnative main { f(); }', 'argument count'),
+            ('fn f(): int { return 1; }\nnative main { f(1); }', 'argument count'),
+            ('fn f(x: int): int { return x; }\nnative main { f("a"); }', 'argument type mismatch'),
+            ('fn f(): int { return "a"; }\nnative main {}', 'return type mismatch'),
+            ('fn f(): int { return; }\nnative main {}', 'return type mismatch'),
+            ('fn f(): void { return 1; }\nnative main {}', 'return type mismatch'),
+            ('fn f(): void {}\nnative main { let x: int = f(); }', 'initializer type mismatch'),
+            ('fn f(): void {}\nnative main { println(f()); }', 'scalar value'),
+            ('fn f(): int { return 1; }\nnative main { let x: int = f; }', 'initializer type mismatch'),
+            ('fn f(): int { return 1; }\nnative main { println(f + 1); }', 'non-numeric operand'),
+            ('const VALUE = missing;\nnative main {}', 'unknown value'),
+            ('const VALUE = local;\nnative main { let local: int = 1; println(VALUE); }', 'unknown value'),
+            ('fn f(): int { println("return"); }\nnative main {}', 'reachable end'),
+            ('fn f(flag: int): int { if (flag) { return 1; } }\nnative main {}', 'reachable end'),
+            ('fn f(): int { while (false) { return 1; } }\nnative main {}', 'reachable end'),
+            ('fn f(): int { while (true) { break; } }\nnative main {}', 'reachable end'),
+            ('fn f(flag: int): int { while (flag) { return 1; } }\nnative main {}', 'reachable end'),
+            ('fn f(n: int): int { match n { 1 => return 1; } }\nnative main {}', 'reachable end'),
+            ('fn f(n: int): int { match n { 1 => return 1; _ => {} } }\nnative main {}', 'reachable end'),
+            ('fn f(): int { while (true) { match 0 { _ => break; } } }\nnative main {}', 'reachable end'),
+        ]
+        wrapper = self.directory / 'unexpected compiler'
+        record = self.directory / 'compiler-called'
+        wrapper.write_text('#!' + sys.executable + '\n'
+                           'from pathlib import Path\n'
+                           'Path(' + repr(str(record)) + ').touch()\n')
+        wrapper.chmod(0o755)
+        for source, diagnostic in cases:
+            self.source.write_text(source + '\n')
+            if config.stage0:
+                stage0 = subprocess.run([config.stage0, str(self.source), '--check'],
+                                        text=True, capture_output=True, timeout=10)
+                self.assertEqual(stage0.returncode, 1, (source, stage0.stderr))
+                self.assertIn('forge: semantic:', stage0.stderr)
+            for flags in [['--emit-c'], [], ['legacy']]:
+                with self.subTest(source=source, flags=flags):
+                    output = self.directory / ('rejected.c' if flags == ['legacy'] else 'rejected.out')
+                    output.write_bytes(b'preserve existing output\x00\xff')
+                    mode = [] if flags == ['legacy'] else flags
+                    result = self.invoke(self.source, *mode, '-o', output,
+                                         *self.native_flags(), '--cc', wrapper)
+                    self.assertEqual(result.returncode, 1, result.stderr)
+                    self.assertIn('forge-fg: semantic:', result.stderr)
+                    self.assertIn(diagnostic, result.stderr)
+                    self.assertEqual(output.read_bytes(), b'preserve existing output\x00\xff')
+                    self.assertFalse(record.exists())
+            output.unlink()
+            result = self.invoke(self.source, '--emit-c', '-o', output)
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertFalse(output.exists())
+
+    def test_subset_semantics_reject_malformed_declarations_expressions_and_builtins(self):
+        cases = [
+            'native main { let x: void = 1; }',
+            'fn f(x: void): int { return 1; }\nnative main {}',
+            'fn f(x: int, x: int): int { return x; }\nnative main {}',
+            'fn f(x: int,): int { return x; }\nnative main {}',
+            'fn f(x int): int { return x; }\nnative main {}',
+            'fn f(): int { return 1; }\nfn f(): int { return 2; }\nnative main {}',
+            'native main { let x: int = 1; let x: int = 2; }',
+            'native main { let true: bool = false; }',
+            'native main { let str_len: int = 0; }',
+            'const X = 1;\nconst X = 2;\nnative main {}',
+            'const X = Y;\nconst Y = X;\nnative main {}',
+            'fn f(): void {}\nconst X = f();\nnative main {}',
+            'const X = 1;\nnative main { let X: int = 2; }',
+            'fn f(X: int): int { return X; }\nconst X = 1;\nnative main {}',
+            'native main { let x: int = ; }',
+            'native main { println(1 + ); }',
+            'native main { println(1 2); }',
+            'native main { return 0 }',
+            'native main { break 1; }',
+            'native main { println(str_len("a")); }',
+            'import strings; native main { str_len(); }',
+            'import strings; native main { str_len(1); }',
+            'import strings; native main { str_concat("a", 1); }',
+            'import strings; native main { str_view_sub(1, "a", 2); }',
+            'import fs; native main { fs_write("a"); }',
+            'import os; native main { os_command_arg("a", "b"); }',
+            'import io; native main { read_fd(1, "a"); }',
+            'native main { print_int("a"); }',
+            'native main { print_str(1); }',
+            'native main { println(print_int(1)); }',
+            'native main { let x: string = "a"; x += "b"; }',
+        ]
+        for source in cases:
+            with self.subTest(source=source):
+                self.source.write_text(source + '\n')
+                output = self.directory / 'malformed.c'
+                result = self.invoke(self.source, '--emit-c', '-o', output)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn('forge-fg: semantic:', result.stderr)
+                self.assertFalse(output.exists())
+
+    def test_return_paths_forward_constants_and_nested_loop_exits(self):
+        self.compare_native_compilers('''const VALUE = 3;
+fn choose(flag: bool): string {
+    if (flag) { return "yes"; } else { return "no"; }
+}
+fn select(n: int): int {
+    match n { 0 => return 4; _ => if (n) { return 5; } else { return 6; } }
+}
+fn literal(): int { if ((true // literal with a comment
+    )) { return 7; } }
+fn endless(): int { while (true) { while (true) { break; } continue; } }
+fn loop_return(): int { while (1) { return 8; } }
+fn for_return(): int { for (let i: int = 0; true; i = i + 1) { return 10; } }
+fn for_endless(): int { for (let i: int = 0; true; i = i + 1) { continue; } }
+fn block(): bool { { return 9; } }
+fn finish(): void { return; }
+native main {
+    let local: string = "local";
+    let x: int = true;
+    let y: bool = 2;
+    x += y; x *= 2;
+    println(VALUE, local, choose(y), select(0), select(2), literal(), loop_return(), block(), x);
+    println(for_return());
+    finish();
+    return 0;
+}
+''', '3localyes457896\n10\n')
+
+    def test_constant_aliases_resolve_against_global_scope(self):
+        # Stage0's C backend currently requires constants to fold to literals;
+        # forge-fg emits macros and supports aliases, including forward aliases.
+        self.source.write_text('const ALIAS = VALUE;\nconst VALUE = 3;\n'
+                               'native main { println(ALIAS); return 0; }\n')
+        output = self.directory / 'aliases'
+        result = self.invoke(self.source, '-o', output, *self.native_flags())
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.run_binary(output, '3\n')
+
+    def test_semantic_nesting_limits_reject_without_creating_output(self):
+        sources = [
+            'native main { println(' + '!' * 260 + 'true); }',
+            'native main {' + '{' * 150 + 'println(1);' + '}' * 150 + '}',
+        ]
+        for source in sources:
+            with self.subTest(source=source):
+                self.source.write_text(source)
+                output = self.directory / 'deep.c'
+                result = self.invoke(self.source, '--emit-c', '-o', output)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn('nesting limit', result.stderr)
+                self.assertFalse(output.exists())
+
     def test_expression_comments_preserve_native_semantics(self):
         self.compare_native_compilers('''fn sum(n: int): int {
     return n // ignored: } ) ; unsupported bool

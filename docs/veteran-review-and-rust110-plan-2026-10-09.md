@@ -79,7 +79,8 @@ Rust 옵션은 공식 rustc 문서를 기준으로 opt-level/LTO/codegen-units/o
   전체 runtime은 별도 Release 및 ASan/UBSan 3개 suite를 통과했다.
 - stage2 추가 반례는 unknown name, 잘못된 initializer, 잘못된 인수 개수,
   반환 누락을 C 출력까지 허용한다. 고정점이 semantic parity를 뜻하지 않는다는
-  기존 문서 설명은 유지한다. 이 parity 작업은 아직 미완료다.
+  기존 문서 설명은 유지한다. 이 시점의 parity 작업은 미완료였으며,
+  아래 자가 호스팅 의미 검사 checkpoint에서 지원 부분집합 검사를 추가했다.
 
 ### 성능 및 배포 근거
 
@@ -165,3 +166,27 @@ Rust 옵션은 공식 rustc 문서를 기준으로 opt-level/LTO/codegen-units/o
   새 Release SDK에서도 21개 CTest와 selfhost 고정점을 통과했고, 그 SDK를
   설치한 뒤 native LSP 4개 suite 및 설치한 doctor의 실제 FG compile/link/run,
   initialize/shutdown 검사를 통과했다.
+
+### 자가 호스팅 의미 검사 checkpoint
+
+- `bootstrap/compiler.fg`에 FG로 구현한 의미 검사를 추가했다. 스코프별 이름,
+  초기화·대입·반환 타입, 사용자 함수 및 매핑된 SDK 함수의 인수 개수·타입,
+  연산자·조건·정수 match와 loop control을 C 출력 전에 검사한다. 사용자
+  함수의 전방 호출·상호 재귀와 int/bool 호환성을 유지한다.
+- next/return/break/continue 경로를 분석하여 비-void 함수의 도달 가능한
+  반환 누락을 거절한다. 함수 본문의 `return` 문자열 탐색과 암묵적 기본
+  반환값 생성을 제거했다. 리터럴 조건, 중첩 반복문, 마지막 wildcard가
+  있는 match를 분석하며 도달하지 않는 문장도 의미 검사를 수행한다.
+- stage0가 의미 오류로 거부하는 45개 입력을 stage2의 명시적 C 출력,
+  `.c` 출력 추론, native build에서 비교했다. 기존 출력 바이트를 보존하고
+  C compiler wrapper를 호출하지 않으며 새 출력도 생성하지 않는 것을
+  확인했다. 잘못된 선언·내장 함수 호출·순환 상수·과도한 중첩과 유효한
+  반환 경로·상수 별칭을 포함한 selfhost 테스트 38개가 통과했다.
+- 로컬 runtime/stdlib override SDK에서 `cmake --build build --parallel 4`,
+  `cmake --build build --target forge-selfhost-verify --parallel 4`,
+  `ctest --test-dir build --output-on-failure --parallel 4`를 실행했다.
+  21개 CTest suite와 stage3/stage4 생성 C의 바이트 고정점이 통과했다.
+- 이 검사는 지원 부분집합을 대상으로 하는 별도 구현이다. SDK 서명 검사는
+  현재 stage0보다 엄격하고, 상수는 C 매크로로 생성되며 이름 가리기를
+  거절한다. 전체 소유권, 코루틴, 임의 모듈, stage0의 정수 산술 계약,
+  위치 기반 JSON 진단과 전체 의미 동등성은 여전히 미완료다.
