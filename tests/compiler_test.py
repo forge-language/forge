@@ -244,6 +244,18 @@ class CompilerRegressionTests(unittest.TestCase):
     def test_string_views_and_builder_snapshots(self):
         self.run_program('import strings;native main{let v: int=str_view("한글");println(str_view_len(v));println(str_view_at(v,0));println(str_view_at(v,9));let b: int=str_builder();str_builder_append(b,"one");let first: string=str_builder_finish(b);str_builder_char(b,65);println(first);println(str_builder_finish(b));println(str_builder_char(b,0));return 0;}', '6\n237\n-1\none\noneA\n0\n')
 
+    def test_cached_length_immutable_view_append(self):
+        self.run_program('''import strings; native main {
+            let old: int = str_view("A");
+            let high: int = str_view_append_byte(old, 255);
+            let nul: int = str_view_append_byte(high, 0);
+            let next: int = str_view_append_byte(nul, 66);
+            println(str_view_len(old)); println(str_view_len(high));
+            println(str_view_at(high, 1)); println(str_view_len(nul));
+            println(str_view_len(next)); println(str_view_at(next, 2));
+            println(str_view_append_byte(0, 65)); return 0;
+        }''', '1\n2\n255\n2\n3\n66\n0\n')
+
     def test_local_type_and_constant_resolution_follow_lexical_scopes(self):
         self.run_program('''const LABEL = "constant";
 fn show(value: string): void {

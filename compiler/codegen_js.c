@@ -85,6 +85,7 @@ static int supported_standard(const char *name_) {
                                     "fr_str_view_at",
                                     "fr_str_view_sub",
                                     "fr_str_view_matches",
+                                    "fr_str_view_append_byte",
                                     "fr_str_builder",
                                     "fr_str_builder_append",
                                     "fr_str_builder_append_view",
@@ -420,6 +421,7 @@ void codegen_emit_js(Program *prog, FILE *out) {
       "fr_str_view_at:(h,n)=>{const v=view(h);return !v||v.kind!=='view'||n<0n||n>=BigInt(v.data.length)?-1n:BigInt(v.data[Number(n)]);},\n"
       "fr_str_view_sub:(h,a,n)=>{const v=view(h),r=range(v,a,n);return r?decode(v.data.subarray(r[0],r[0]+r[1])):null;},\n"
       "fr_str_view_matches:(h,a,s)=>{const v=view(h);if(!v||v.kind!=='view'||s==null||a<0n||a>BigInt(v.data.length))return 0n;const d=cbytes(s),from=Number(a);if(d.length>v.data.length-from)return 0n;for(let j=0;j<d.length;j++)if(v.data[from+j]!==d[j])return 0n;return 1n;},\n"
+      "fr_str_view_append_byte:(h,c)=>{const v=view(h);if(!v||v.kind!=='view')return 0n;return store({kind:'view',data:cbytes(decode(v.data)+String.fromCharCode(Number(c)))});},\n"
       "fr_str_builder:()=>store({kind:'builder',data:new Uint8Array(0),len:0}),fr_str_builder_append:(h,s)=>appendBytes(h,cbytes(s)),\n"
       "fr_str_builder_append_view:(h,vh,a,n)=>{const v=view(vh),r=range(v,a,n);return r?appendBytes(h,v.data.subarray(r[0],r[0]+r[1])):0n;},\n"
       "fr_str_builder_char:(h,c)=>{const b=builder(h);if(!b||c<=0n||c>255n)return 0n;reserve(b,b.len+1);b.data[b.len++]=Number(c);return h;},\n"

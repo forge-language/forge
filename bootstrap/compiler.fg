@@ -1213,7 +1213,7 @@ fn semantic_local(env: string, name: string, ty: int): string {
 // derived from the public SDK headers. Imports control module availability.
 fn semantic_builtins(module: string): string {
     if (str_eq(module, "strings")) {
-        return "str_len:s:i;str_concat:ss:s;str_eq:ss:i;str_sub:sii:s;str_contains:ss:i;str_trim:s:s;str_char_at:si:i;str_append:si:s;str_append_str:ss:s;str_from_int:i:s;str_reset_arena::v;str_view:s:i;str_view_len:i:i;str_view_at:ii:i;str_view_sub:iii:s;str_view_matches:iis:i;str_builder::i;str_builder_append:is:i;str_builder_append_view:iiii:i;str_builder_char:ii:i;str_builder_finish:i:s;";
+        return "str_len:s:i;str_concat:ss:s;str_eq:ss:i;str_sub:sii:s;str_contains:ss:i;str_trim:s:s;str_char_at:si:i;str_append:si:s;str_append_str:ss:s;str_from_int:i:s;str_reset_arena::v;str_view:s:i;str_view_len:i:i;str_view_at:ii:i;str_view_sub:iii:s;str_view_matches:iis:i;str_view_append_byte:ii:i;str_builder::i;str_builder_append:is:i;str_builder_append_view:iiii:i;str_builder_char:ii:i;str_builder_finish:i:s;";
     }
     if (str_eq(module, "fs")) {
         return "fs_read:s:s;fs_write:ss:i;fs_append:ss:i;fs_exists:s:i;fs_remove:s:i;fs_size:s:i;fs_is_file:s:i;fs_is_dir:s:i;fs_mkdir:s:i;fs_rename:ss:i;fs_copy:ss:i;fs_list_dir:s:s;";
