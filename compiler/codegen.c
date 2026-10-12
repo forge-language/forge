@@ -1499,7 +1499,8 @@ static bool cg_is_empty_string_let(const Stmt *s) {
            s->as.let.init && s->as.let.init->kind == EXPR_STRING &&
            s->as.let.init->as.string_val.len == 0;
 }
-static bool cg_append_loop_matches(Codegen *cg, ForgeStr text, Stmt *loop) {
+static bool cg_append_loop_matches(Codegen *cg, ForgeStr text, Stmt *loop,
+                                   const char *append_name) {
     if (!loop || loop->kind != STMT_WHILE || !loop->as.while_stmt.body ||
         !loop->as.while_stmt.cond || loop->as.while_stmt.cond->kind != EXPR_BINARY ||
         loop->as.while_stmt.cond->as.binary.op != BIN_LT) return false;
@@ -1518,7 +1519,7 @@ static bool cg_append_loop_matches(Codegen *cg, ForgeStr text, Stmt *loop) {
         !forge_str_eq(call->as.call.args[0]->kind == EXPR_IDENT ?
                       call->as.call.args[0]->as.ident : (ForgeStr){0}, text)) return false;
     const char *mapped = forge_std_c_name(call->as.call.name, cg->imports, cg->import_count);
-    if (!mapped || strcmp(mapped, "fr_str_append") != 0) return false;
+    if (!mapped || strcmp(mapped, append_name) != 0) return false;
     Expr *byte = call->as.call.args[1];
     CgIntRange byte_range;
     if (!cg_pure_int_expr(byte) || cg_expr_mentions(byte, text) ||
@@ -1539,13 +1540,79 @@ static Stmt *cg_find_append_loop(Codegen *cg, Stmt *after_let, ForgeStr text) {
     Stmt *s = after_let;
     for (size_t count = 0; s && count < 8; count++) {
         if (s->kind == STMT_WHILE)
-            return cg_append_loop_matches(cg, text, s) ? s : NULL;
+            return cg_append_loop_matches(cg, text, s, "fr_str_append") ? s : NULL;
         if (s->kind != STMT_LET || s->as.let.type.kind != TY_INT ||
             !cg_pure_int_expr(s->as.let.init) || cg_expr_mentions(s->as.let.init, text) ||
             forge_str_eq(s->as.let.name, text)) return NULL;
         s = s->next;
     }
     return NULL;
+}
+
+/* The view handle remains the original empty view until materialization. It
+ * must never be read during construction, including in the guard or prelude.
+ * Only explicit integer locals and literals participate in this proof. Prelude
+ * lets have not yet been emitted, so resolve their names separately. Reject
+ * shadowing rather than guessing binding identity from name-only AST nodes. */
+static bool cg_view_append_int_expr(Codegen *cg, Expr *e, Stmt *first,
+                                    Stmt *end, ForgeStr view, unsigned depth) {
+    if (!e || depth > 64 || !cg->loop_scan_left) return false;
+    cg->loop_scan_left--;
+    if (e->kind == EXPR_INT) return true;
+    if (e->kind == EXPR_IDENT) {
+        if (forge_str_eq(e->as.ident, view)) return false;
+        for (Stmt *s = first; s != end; s = s->next)
+            if (forge_str_eq(s->as.let.name, e->as.ident)) return true;
+        return cg_is_local(cg, e->as.ident) &&
+               cg_lookup_local(cg, e->as.ident).kind == TY_INT;
+    }
+    if (e->kind != EXPR_BINARY || e->as.binary.op > BIN_MOD) return false;
+    return cg_view_append_int_expr(cg, e->as.binary.left, first, end, view, depth + 1) &&
+           cg_view_append_int_expr(cg, e->as.binary.right, first, end, view, depth + 1);
+}
+
+static Stmt *cg_find_view_append_loop(Codegen *cg, Stmt *binding) {
+    Expr *init = binding->as.let.init;
+    ForgeStr view = binding->as.let.name;
+    if (!cg->prove_loop_increments || cg->state_prefix ||
+        binding->as.let.type.kind != TY_INT || cg_is_local(cg, view) ||
+        !cg_view_accessor_call(cg, init, "fr_str_view", 1) ||
+        init->as.call.args[0]->kind != EXPR_STRING ||
+        init->as.call.args[0]->as.string_val.len != 0) return NULL;
+
+    Stmt *first = binding->next, *loop = first;
+    for (unsigned count = 0; loop && count < 8; count++, loop = loop->next) {
+        if (loop->kind == STMT_WHILE) break;
+        if (loop->kind != STMT_LET || loop->as.let.type.kind != TY_INT ||
+            forge_str_eq(loop->as.let.name, view) || cg_is_local(cg, loop->as.let.name) ||
+            !cg_view_append_int_expr(cg, loop->as.let.init, first, loop, view, 0) ||
+            cg_expr_mentions(loop->as.let.init, loop->as.let.name)) return NULL;
+        for (Stmt *pre = first; pre != loop; pre = pre->next)
+            if (forge_str_eq(pre->as.let.name, loop->as.let.name)) return NULL;
+    }
+    if (!loop || loop->kind != STMT_WHILE) return NULL;
+    Expr *cond = loop->as.while_stmt.cond;
+    if (!cond || cond->kind != EXPR_BINARY || cond->as.binary.op != BIN_LT ||
+        cond->as.binary.left->kind != EXPR_IDENT ||
+        (cond->as.binary.right->kind != EXPR_IDENT &&
+         cond->as.binary.right->kind != EXPR_INT) ||
+        !cg_view_append_int_expr(cg, cond->as.binary.right, first, loop, view, 0) ||
+        forge_str_eq(cond->as.binary.left->as.ident,
+                     cond->as.binary.right->kind == EXPR_IDENT ?
+                     cond->as.binary.right->as.ident : (ForgeStr){0})) return NULL;
+    ForgeStr index = cond->as.binary.left->as.ident;
+    bool zero_based = false;
+    for (Stmt *pre = first; pre != loop; pre = pre->next)
+        if (forge_str_eq(pre->as.let.name, index))
+            zero_based = pre->as.let.init->kind == EXPR_INT &&
+                         pre->as.let.init->as.int_val == 0;
+    Stmt *append = loop->as.while_stmt.body ? loop->as.while_stmt.body->first : NULL;
+    if (!zero_based || !append || append->kind != STMT_ASSIGN) return NULL;
+    Expr *call = append->as.assign.value;
+    if (!cg_view_accessor_call(cg, call, "fr_str_view_append_byte", 2) ||
+        !cg_view_append_int_expr(cg, call->as.call.args[1], first, loop, view, 0)) return NULL;
+    /* Bound depth before the shared syntax/range matcher recurses. */
+    return cg_append_loop_matches(cg, view, loop, "fr_str_view_append_byte") ? loop : NULL;
 }
 
 static void emit_local_let(Codegen *cg, Stmt *s) {
@@ -1643,6 +1710,68 @@ static void emit_append_loop_builder(Codegen *cg, Stmt *loop, ForgeStr text,
     cg->safe_increment = saved_increment;
 }
 
+static void emit_view_append_loop_builder(Codegen *cg, Stmt *loop, ForgeStr view) {
+    Stmt *append = loop->as.while_stmt.body->first, *step = append->next;
+    ForgeStr index = step->as.assign.name;
+    char builder[64], byte[64], snapshot[64];
+    do {
+        int id = ++cg->label_seq;
+        snprintf(builder, sizeof(builder), "__forge_view_builder_%d", id);
+        snprintf(byte, sizeof(byte), "__forge_view_byte_%d", id);
+        snprintf(snapshot, sizeof(snapshot), "__forge_view_snapshot_%d", id);
+    } while (cg_is_local(cg, forge_str(builder)) || cg_is_local(cg, forge_str(byte)) ||
+             cg_is_local(cg, forge_str(snapshot)));
+    Stmt *saved_increment = cg->safe_increment;
+    cg->safe_increment = prove_loop_increment(cg, loop->as.while_stmt.cond,
+                                               loop->as.while_stmt.body, step);
+    cg_line(cg, "{");
+    cg->indent++;
+    cg_line(cg, "int64_t %s = 0;", builder);
+    cg_line(cg, "while (");
+    emit_expr(cg, loop->as.while_stmt.cond);
+    fputs(") {\n", cg->out);
+    cg->indent++;
+    /* Even a zero source view evaluates its byte argument, including traps.
+     * Lazily allocate only after that evaluation and the first true guard. */
+    cg_line(cg, "int64_t %s = ", byte);
+    emit_expr(cg, append->as.assign.value->as.call.args[1]);
+    fputs(";\n", cg->out);
+    cg_line(cg, "if (%.*s) {", (int)view.len, view.data);
+    cg->indent++;
+    cg_line(cg, "if (!%s) %s = fr_str_builder();", builder, builder);
+    /* Here the original prefix length equals the zero-based index. Match the
+     * immutable operation's size limit, including its view metadata, on 32-bit
+     * platforms too. Allocation failure is sticky; never use string recovery. */
+    cg_line(cg, "if (!%s || (uint64_t)%.*s > SIZE_MAX - sizeof(fr_detail_str_view) - 2 ||",
+            builder, (int)index.len, index.data);
+    cg_line(cg, "    !fr_str_builder_char(%s, %s)) {", builder, byte);
+    cg->indent++;
+    cg_line(cg, "%.*s = 0;", (int)view.len, view.data);
+    cg_line(cg, "%s = 0;", builder);
+    cg->indent--;
+    cg_line(cg, "}");
+    cg->indent--;
+    cg_line(cg, "}");
+    cg_indent(cg);
+    fprintf(cg->out, "%.*s = ", (int)index.len, index.data);
+    emit_assignment_rhs(cg, step);
+    fputs(";\n", cg->out);
+    cg->indent--;
+    cg_line(cg, "}");
+    /* No iteration means no builder and leaves the exact initial view intact.
+     * Detach before publishing: later consumers cannot see mutable storage. */
+    cg_line(cg, "if (%s) {", builder);
+    cg->indent++;
+    cg_line(cg, "const char *%s = fr_str_builder_finish_take(%s);", snapshot, builder);
+    cg_line(cg, "%.*s = %s ? fr_str_view(%s) : 0;",
+            (int)view.len, view.data, snapshot, snapshot);
+    cg->indent--;
+    cg_line(cg, "}");
+    cg->indent--;
+    cg_line(cg, "}");
+    cg->safe_increment = saved_increment;
+}
+
 static void emit_stmts(Codegen *cg, Stmt *s, const char *proc_var, bool in_coro) {
     cg_enter(cg);
     Stmt *block_first = s;
@@ -1650,10 +1779,16 @@ static void emit_stmts(Codegen *cg, Stmt *s, const char *proc_var, bool in_coro)
         switch (s->kind) {
         case STMT_LET: {
             Stmt *append_loop = NULL;
+            Stmt *view_append_loop = !in_coro ? cg_find_view_append_loop(cg, s) : NULL;
             if (!in_coro && !cg->state_prefix && cg_is_empty_string_let(s))
                 append_loop = cg_find_append_loop(cg, s->next, s->as.let.name);
             emit_local_let(cg, s);
-            if (append_loop) {
+            if (view_append_loop) {
+                for (Stmt *pre = s->next; pre != view_append_loop; pre = pre->next)
+                    emit_local_let(cg, pre);
+                emit_view_append_loop_builder(cg, view_append_loop, s->as.let.name);
+                s = view_append_loop;
+            } else if (append_loop) {
                 for (Stmt *pre = s->next; pre != append_loop; pre = pre->next)
                     emit_local_let(cg, pre);
                 emit_append_loop_builder(cg, append_loop, s->as.let.name, proc_var, in_coro);

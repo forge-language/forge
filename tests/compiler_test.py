@@ -368,6 +368,163 @@ native main {let view:int=str_view("ABC");println(weighted(view));return 0;}'''
             println(str_view_append_byte(0, 65)); return 0;
         }''', '1\n2\n255\n2\n3\n66\n0\n')
 
+    def view_append_c(self, source):
+        self.source.write_text(source)
+        output = Path(self.temp.name) / 'view.c'
+        result = self.invoke(self.source, '--emit-c', '-o', output)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return output.read_text()
+
+    def test_private_view_append_loop_lowering(self):
+        # Runtime dimensions and signed wrapping byte arithmetic mirror the
+        # construction shape, without timing or modifying benchmark fixtures.
+        source = '''import strings;
+fn make(n:int,seed:int):string {
+    let view:int=str_view("");let i:int=0;
+    while(i<n){view=str_view_append_byte(view,65+(i+seed)%26);i=1+i;}
+    return str_view_sub(view,0,str_view_len(view));
+}
+native main {
+    println(make(-1,0));println(make(0,0));println(make(3,0));
+    println(make(3,-2));println(make(3,9223372036854775807));
+    let view:int=str_view("");let i:int=0;
+    while(i<200){view=str_view_append_byte(view,65);i=i+1;}
+    println(str_view_len(view));println(str_view_at(view,199));
+    let saved:int=view;str_builder_char(str_builder(),66);
+    println(str_view_len(saved));return 0;
+}'''
+        generated = self.view_append_c(source)
+        self.assertIn('__forge_view_builder_', generated)
+        self.assertNotIn('fr_str_view_append_byte(', generated)
+        self.assertIn('fr_str_builder_finish_take(', generated)
+        # Signed remainder: 2**63-1 % 26 = 7, then wrapping gives -8, -7.
+        self.run_program(source, '\n\nABC\n?@A\nH9:\n200\n65\n200\n')
+        collision = '''import strings;native main {
+            let __forge_view_builder_1:int=3;let view:int=str_view("");
+            let i:int=0;while(i<__forge_view_builder_1){
+                view=str_view_append_byte(view,65);i=i+1;}
+            println(str_view_sub(view,0,3));return 0;}'''
+        self.assertNotIn('int64_t __forge_view_builder_1 = 0;', self.view_append_c(collision))
+        self.run_program(collision, 'AAA\n')
+
+    def test_private_view_append_rejects_unproven_construction(self):
+        base = '''import strings;extern fn opaque(value:int):int;
+native main {let view:int=str_view("");let i:int=0;
+while(i<3){view=str_view_append_byte(view,65);i=i+1;}
+println(str_view_len(view));return 0;}'''
+        cases = {
+            'nonempty': base.replace('str_view("")', 'str_view("A")'),
+            'null': base.replace('str_view("")', '0'),
+            'nul': base.replace('view,65)', 'view,0)'),
+            'high byte': base.replace('view,65)', 'view,255)'),
+            'narrowed nul': base.replace('view,65)', 'view,256)'),
+            'unknown byte': base.replace('view,65)', 'view,i)'),
+            'handle byte': base.replace('view,65)', 'view,65+view%26)'),
+            'handle bound': base.replace('i<3', 'i<view'),
+            'alias': base.replace('let i:int=0;', 'let alias:int=view;let i:int=0;'),
+            'escape before loop': base.replace('let i:int=0;', 'opaque(view);let i:int=0;'),
+            'escape in loop': base.replace('i=i+1;', 'opaque(view);i=i+1;'),
+            'observed prefix': base.replace('i=i+1;', 'println(str_view_len(view));i=i+1;'),
+            'reset before loop': base.replace('let i:int=0;', 'str_reset_arena();let i:int=0;'),
+            'reset in loop': base.replace('i=i+1;', 'str_reset_arena();i=i+1;'),
+            'effectful byte': base.replace('view,65)', 'view,65+opaque(i)%26)'),
+            'nonzero index': base.replace('let i:int=0;', 'let i:int=-1;'),
+            'computed bound': base.replace('i<3', 'i<i+1'),
+            'continue': base.replace('i=i+1;', 'i=i+1;continue;'),
+            'shadowed view': base.replace('i=i+1;', '{let view:int=0;}i=i+1;'),
+            'outer view binding': base.replace('native main {',
+                'native main {let view:int=0;{').replace('return 0;}', 'return 0;}}'),
+            'outer index binding': base.replace('native main {',
+                'native main {let i:int=2;{').replace('return 0;}', 'return 0;}}'),
+            'float bound': base.replace('native main {',
+                'native main {let n:float=3.0;').replace('i<3', 'i<n'),
+            'deep byte': base.replace('view,65)', 'view,65+(' + 'i+' * 70 + '0)%26)'),
+            'process': base.replace('native main', 'process main').replace('return 0;', ''),
+            'coroutine': base.replace('native main {', 'process main {coroutine work(){')
+                .replace('return 0;}', '}spawn work();}'),
+            'suspension': base.replace('native main {', 'process main {coroutine work(){')
+                .replace('i=i+1;', 'yield;i=i+1;').replace('return 0;}', '}spawn work();}'),
+        }
+        for label, source in cases.items():
+            with self.subTest(case=label):
+                generated = self.view_append_c(source)
+                self.assertNotIn('__forge_view_builder_', generated)
+                self.assertIn('fr_str_view_append_byte(', generated)
+        self.run_program(cases['nul'].replace('extern fn opaque(value:int):int;', ''), '0\n')
+        self.run_program(cases['high byte'].replace('extern fn opaque(value:int):int;', ''), '3\n')
+        self.run_program(cases['nonzero index'].replace('extern fn opaque(value:int):int;', ''), '4\n')
+
+    def test_private_view_append_failure_and_trap_contract_with_external_abi(self):
+        header = Path(self.temp.name) / 'faults.h'
+        header.write_text('''#define FORGE_STRING_NO_INLINE
+#include "forge/string.h"
+static int64_t fault_mode, view_calls, builder_calls, byte_calls, finish_calls;
+void test_mode(int64_t mode) {
+    fault_mode=mode;view_calls=builder_calls=byte_calls=finish_calls=0;
+}
+static int64_t test_view(const char *s) {
+    ++view_calls;
+    if ((fault_mode==1 && view_calls==1) || (fault_mode==5 && view_calls==2)) return 0;
+    return fr_str_view(s);
+}
+static int64_t test_builder(void) {
+    ++builder_calls;
+    return fault_mode==2 ? 0 : fr_str_builder();
+}
+static int64_t test_byte(int64_t b,int64_t ch) {
+    ++byte_calls;
+    if ((fault_mode==3 && byte_calls==3) || (fault_mode==6 && byte_calls==64)) return 0;
+    return fr_str_builder_char(b,ch);
+}
+static char *test_finish(int64_t b) {
+    ++finish_calls;
+    return fault_mode==4 ? 0 : fr_str_builder_finish_take(b);
+}
+int64_t test_counts(void) {return builder_calls*10000+byte_calls*100+finish_calls*10+view_calls;}
+#define fr_str_view(s) test_view(s)
+#define fr_str_builder() test_builder()
+#define fr_str_builder_char(b,ch) test_byte((b),(ch))
+#define fr_str_builder_finish_take(b) test_finish(b)
+''')
+        wrapper = Path(self.temp.name) / 'fault-cc'
+        wrapper.write_text('#!/usr/bin/env python3\nimport os,sys\n'
+                           f'cc={config.cc!r}\n'
+                           f'os.execv(cc,[cc,"-include",{str(header)!r},*sys.argv[1:]])\n')
+        wrapper.chmod(0o755)
+        source = '''import strings;
+extern fn test_mode(mode:int):void;extern fn test_counts():int;
+fn run(mode:int,n:int):void {
+    test_mode(mode);let view:int=str_view("");let i:int=0;
+    while(i<n){view=str_view_append_byte(view,65+i%26);i=i+1;}
+    println(str_view_len(view));println(i);println(test_counts());
+}
+native main {run(0,8);run(1,8);run(2,8);run(3,8);run(4,8);run(5,8);
+    run(0,0);run(1,0);run(0,200);run(6,200);return 0;}'''
+        self.assertIn('__forge_view_builder_', self.view_append_c(source))
+        binary = self.compile_program(source, str(wrapper))
+        result = subprocess.run([str(binary)], text=True, capture_output=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout,
+                         '8\n8\n10812\n0\n8\n1\n0\n8\n10001\n'
+                         '0\n8\n10301\n0\n8\n10811\n0\n8\n10812\n'
+                         '0\n0\n1\n0\n0\n1\n200\n200\n30012\n0\n200\n16401\n')
+        # Null and failed-growth paths must still evaluate subsequent pure
+        # arguments, so a later division by zero remains an observable trap.
+        expressions = ('65+(1/(3-i))%26',
+                       '65+((-9223372036854775807-1)/(i-3))%26',
+                       '65+((-9223372036854775807-1)%(i-3))%26')
+        for expression, mode in ((expr, mode) for expr in expressions for mode in (0, 1, 2, 3)):
+            trap = source[:source.index('native main')] + f'''native main {{
+                test_mode({mode});let view:int=str_view("");let i:int=0;
+                while(i<4){{view=str_view_append_byte(view,{expression});i=i+1;}}
+                println(str_view_len(view));return 0;}}'''
+            with self.subTest(expression=expression, mode=mode):
+                self.assertIn('__forge_view_builder_', self.view_append_c(trap))
+                binary = self.compile_program(trap, str(wrapper))
+                result = subprocess.run([str(binary)], text=True, capture_output=True, timeout=10)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('Forge integer', result.stderr)
+
     def test_local_type_and_constant_resolution_follow_lexical_scopes(self):
         self.run_program('''const LABEL = "constant";
 fn show(value: string): void {
