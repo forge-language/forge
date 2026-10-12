@@ -214,6 +214,29 @@ immutable NUL-terminated string and resets the builder for reuse. The original
 `str_builder_finish` snapshot behavior is unchanged. The compiler now uses the
 transfer operation only for its proven private dead-temporary append-loop
 lowering; JavaScript and the C ABI expose matching behavior. Native, ABI-only,
-and JavaScript tests verify snapshots survive builder reuse. This change has
-not yet been isolated in a paired performance run, so it is not counted as a
-measured speedup.
+and JavaScript tests verify snapshots survive builder reuse. A direct 80-pair
+builder comparison measured the explicit transfer API at 1.008x baseline Forge
+throughput, with a 95% interval of 0.946–1.030; this does not show a standalone
+speedup. [Conditions and samples](https://github.com/forge-language/forge-benchmarks/blob/main/docs/builder-finish-take-2026-10-12.md).
+
+A separate five-workload, 42-pair comparison used identical Forge/Rust source,
+clock, runtime, stdlib and headers with the compiler before and after the
+private append-loop lowering. It checked 99 edge cases, 630 prewarms and 630
+timed checksums against the independent oracle. Generated C confirms that the
+baseline retains repeated `fr_str_append` calls while the current compiler
+builds privately and finishes with `fr_str_builder_finish_take`. On immutable
+append, Forge moved from 0.232x Rust to 18.043x, and median time fell from
+402.397 ms to 5.235 ms. LCG, primes and scan remained effectively unchanged;
+builder's current estimate was 1.208x Rust but its interval crossed the 1.10
+threshold. This supports the narrow lowering on this host, not a broad
+language-wide target. [Full conditions, generated artifact hashes and samples](https://github.com/forge-language/forge-benchmarks/blob/main/docs/compiler-append-lowering-2026-10-12.md).
+
+## HTTP prepared-response capacity extension
+
+With four workers and 32-byte responses, both servers passed four complete
+repeats at 1024, 2048 and 4096 simultaneous loopback client lanes. The largest
+verified bound is **at least 4096 lanes** for this connection-per-request
+workload. At 4096 lanes, median successful throughput was 6243 req/s for Forge
+and 7964 req/s for Rust (0.562 and 0.717 MB/s). Four paired observations vary
+widely, so they do not establish a throughput winner or an absolute maximum.
+[4096-lane conditions and raw attempts](https://github.com/forge-language/forge-benchmarks/blob/main/docs/http-v2-capacity-4096-2026-10-12.md).
