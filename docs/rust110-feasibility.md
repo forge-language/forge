@@ -111,3 +111,45 @@ Forge는 reduction budget 안에서 yield 이후 계속 실행할 수 있으며 
 동일 context switch 횟수를 측정한 결과가 아니다. mailbox·HTTP·I/O 및 다른
 호스트에 일반화하지 않는다.
 [전체 조건과 원시 결과](https://github.com/forge-language/forge-benchmarks/blob/main/docs/coroutine-rust-forge-2026-10-10.md).
+
+## 2026-10-12 동일 세션 후속 실험
+
+로컬 검증 SDK의 wrapping-int64 baseline과 문자열 변경, 나눗셈 변경 및
+두 변경의 조합을 불변 바이너리로 보존하고 같은 Rust control과 20개
+위치 균형 paired group으로 비교했다. 문자열 builder의 내부 NUL 저장을
+최종 snapshot까지 미루고 checked append/view 경로를 inline한 후보는
+기존 Forge 대비 1.1060배 (95% 구간 1.0884–1.1088)였다. 기존 Rust의
+snapshot-copy control 대비 1.0037배였으며 1.10은 입증하지 못했다.
+LCG/소수/scan/immutable append는 1.0096/1.0111/0.9454/0.2300배였다.
+
+기존 Rust control을 바꾸지 않고 마지막 builder clone을 move로 바꾼
+더 강한 기준도 따로 측정했다. 별도 20개 paired group에서 개선 Forge는
+copy/move control 대비 각각 1.0006 (0.9909–1.0063),
+0.9986 (0.9814–1.0029)였다. builder를 유지하며 독립 사본을 만드는
+계약과 builder를 소비하는 계약의 차이를 공개하며 두 결과 모두 미달이다.
+
+동적 unsigned32 나눗셈과 branch-likelihood 후보는 부호·폭 6개 분포의
+추가 실험에서도 충분한 이득을 보이지 않았다. 작은 양수/음수/혼합 입력은
+더 느려졌으며 기본 컴파일러에서는 원래 checked int64 연산을 복구했다.
+새 동적 경계·trap·단일 평가 회귀는 유지한다. 실패 후보의 패치와 모든
+표본을 보존하여 성공한 실험으로 계산하지 않는다.
+
+새 prepared HTTP 비교 V1은 14번째 pair에서 실패하여 전체 비교 주장을
+만들지 못했다. 마지막 Rust 측정에서 12,000개 요청 중 2개가 TCP connect
+timeout으로 끝났다(각 약 134초). 연결 지연과 오류 행을 보존하고 제거하거나
+다시 실행하지 않았다. 원인 진단은 미확정이다. 다음 V2 관측기는 connect
+timeout과 단계별 시간, 즉시 저장되는 요청 결과를 제공한다. 추가로 동시
+접속량별 오류율·초당 완료 요청·지연시간을 기록해 시험 범위 내 수용량을
+보고할 예정이다. 전체 parser/routing/TLS/DB/코루틴 I/O 비교는 아니다.
+
+원시 자료와 진행 보고서는 로컬 `forge-benchmarks/docs/`의
+`rust110-progress-2026-10-12.md`,
+`compiler-string-optimization-2026-10-12.json`,
+`builder-copy-move-controls-2026-10-12.json`,
+`arithmetic-division-2026-10-12.json`에 있다. 새 공개 CI 또는 clean-fetch
+검증을 수행한 결과로 표현하지 않는다. OMO audit의 API 연결 실패도
+보존했으며 native 하위 에이전트 3개로 별도 병렬 작업을 진행했다.
+
+다음 후보인 증명된 native/library loop increment 간소화는 독립 코드
+검토를 마쳤지만 아직 빌드·경계 테스트·동일 조건 성능 측정 전이다.
+현재 목표는 미완료이며 활성 상태를 유지한다.

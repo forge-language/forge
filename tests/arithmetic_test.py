@@ -26,11 +26,13 @@ def wrap(value):
 
 class ArithmeticTests(unittest.TestCase):
     def execute(self, source, expected='', failure=False, bridge='', js_bridge='', js=True,
-                library_bridge=None):
+                library_bridge=None, modules=None):
         with tempfile.TemporaryDirectory() as directory:
             work = Path(directory)
             fg, c, binary = [work / name for name in ('test.fg', 'test.c', 'test')]
             fg.write_text(source)
+            for name, contents in (modules or {}).items():
+                (work / name).write_text(contents)
             args = [config.forge, str(fg), '--emit-c', '-o', str(c)]
             if library_bridge is not None:
                 args += ['--lib', '--header', str(work / 'arithmetic.h')]
@@ -97,6 +99,43 @@ class ArithmeticTests(unittest.TestCase):
                 expected += [str(value)] * 2
         self.execute(source + 'return 0;}', '\n'.join(expected) + '\n')
 
+    def test_dynamic_division_width_boundaries_and_once_evaluation(self):
+        # External calls keep operands dynamic even at -O3. Exercise both
+        # sides of the unsigned-32 fast path and the full signed fallback.
+        edge = (1 << 32) - 1
+        pairs = [(0, 1), (edge, 1), (edge, 3), (edge, edge),
+                 (edge + 1, 3), (edge, edge + 1), (edge + 1, edge),
+                 (-1, 3), (-edge, 3), (edge, -3), (-edge, -3),
+                 (MIN, 1), (MIN, 3), (MAX, -1), (MAX, edge), (MAX, MIN)]
+        rng = random.Random(20261012)
+        pairs += [(rng.randrange(0, edge + 1), rng.randrange(1, edge + 1))
+                  for _ in range(16)]
+        source = 'extern fn opaque(value:int):int; extern fn calls():int; native main {'
+        expected = []
+        for a, b in pairs:
+            quotient = abs(a) // abs(b) * (-1 if (a < 0) != (b < 0) else 1)
+            source += f'println(opaque({literal(a)})/opaque({literal(b)}));'
+            source += f'println(opaque({literal(a)})%opaque({literal(b)}));'
+            expected += [str(quotient), str(a - quotient*b)]
+        source += 'println(calls());return 0;}'
+        expected.append(str(4 * len(pairs)))
+        bridge = ('#include <stdint.h>\nstatic int64_t count; '
+                  'int64_t opaque(int64_t value){volatile int64_t result=value;count++;return result;} '
+                  'int64_t calls(void){return count;}\n')
+        js_bridge = ('let count=0n; globalThis.ForgeNative={'
+                     'opaque:(value)=>{count++;return value;},calls:()=>count};')
+        self.execute(source, '\n'.join(expected) + '\n', bridge=bridge, js_bridge=js_bridge)
+
+    def test_dynamic_division_traps_with_external_operands(self):
+        bridge = '#include <stdint.h>\nint64_t opaque(int64_t value){volatile int64_t result=value;return result;}\n'
+        js_bridge = 'globalThis.ForgeNative={opaque:(value)=>value};'
+        for op in ('/', '%'):
+            for a, b in [(0, 0), ((1 << 32) - 1, 0), (MIN, -1)]:
+                with self.subTest(op=op, a=a, b=b):
+                    source = ('extern fn opaque(value:int):int; native main {'
+                              f'println(opaque({literal(a)}){op}opaque({literal(b)}));return 0;}}')
+                    self.execute(source, failure=True, bridge=bridge, js_bridge=js_bridge)
+
     def test_invalid_division_and_remainder(self):
         for op in ('/', '%'):
             for a, b in [(1, 0), (MIN, -1)]:
@@ -128,6 +167,109 @@ native main {let x:int=9223372036854775807;x+=1;println(x);println(-x);
 let i:int=0;while(i<3){x-=1;i+=1;}println(x);x*=2;println(x);println(low);return 0;}''',
                      f'{MIN}\n{MIN}\n{MAX-2}\n-6\n{MIN}\n')
 
+    def test_guarded_unit_increments_at_signed_boundaries(self):
+        source = '''fn count(start:int,limit:int):int {
+let i:int=start; while(i<limit){i=i+1;} return i;}
+fn through_continue(start:int,limit:int):int {
+let i:int=start; for(i=start;i<limit;i+=1){continue;} return i;}
+fn skip_once(start:int,limit:int):int {
+let i:int=start;let gate:int=0;
+while(i<limit){if(gate==0){gate=1;continue;}i=1+i;}return i;}
+fn stop_early(start:int,limit:int):int {
+let i:int=start;while(i<limit){if(i==limit-1){break;}i+=1;}return i;}
+native main {'''
+        expected = []
+        for start, limit in [(MAX-2, MAX), (MIN, MIN+2), (0, -1), (-2, 1)]:
+            for name in ('count', 'through_continue', 'skip_once'):
+                source += f'println({name}({literal(start)},{literal(limit)}));'
+                expected.append(str(max(start, limit)))
+        source += f'println(stop_early({MAX-2},{MAX}));return 0;}}'
+        expected.append(str(MAX-1))
+        self.execute(source, '\n'.join(expected) + '\n')
+
+    def test_unproven_loop_updates_keep_wrapping(self):
+        # Every loop performs at most one overflowing iteration. A gate then
+        # exits after wrap, so an unsafe signed lowering fails UBSan/output.
+        cases = [
+            (MAX, 'i<=limit', 'i+=1;'),
+            (MAX-1, 'i<limit', 'i+=2;'),
+            (MAX-1, 'i<limit', 'i+=1;i+=1;'),
+            (MAX-1, 'i<limit', f'i={MAX};i+=1;'),
+            (MAX-1, 'i<limit', f'let j:int=0;while(j<1){{i={MAX};j+=1;}}i+=1;'),
+            (MAX-1, 'i<limit', f'for(let j:int=0;j<1;i={MAX}){{j+=1;}}i+=1;'),
+            (MAX-1, 'i<limit', f'for(i={MAX};0;i=i){{}}i+=1;'),
+            (MAX-1, 'i<limit', f'match gate {{1=>{{i={MAX};}}_=>{{}}}}i+=1;'),
+        ]
+        source = ''
+        for index, (start, condition, updates) in enumerate(cases):
+            source += (f'fn case{index}():int{{let i:int={start};let limit:int={MAX};'
+                       f'let gate:int=0;while({condition}){{if(gate!=0){{break;}}'
+                       f'gate=1;{updates}}}return i;}}')
+        source += 'native main {' + ''.join(f'println(case{index}());' for index in range(len(cases))) + 'return 0;}'
+        self.execute(source, (str(MIN) + '\n') * len(cases))
+
+    def test_for_body_mutation_and_shadowed_bounds(self):
+        source = f'''fn changed():int{{let i:int=0;let gate:int=0;
+for(i={MAX-1};i<{MAX};i+=1){{if(gate!=0){{break;}}gate=1;i={MAX};continue;}}
+return i;}}
+fn shadowed():int{{let i:int={MAX-1};let result:int=0;
+while(i<{MAX}){{{{let i:int={MAX};i+=1;result=i;}}i+=1;}}return result;}}
+fn floating():int{{let limit:int=1;let result:int=0;
+{{let limit:float=18446744073709551616.0;let i:int={MAX};let gate:int=0;
+while(i<limit){{if(gate!=0){{break;}}gate=1;i+=1;}}result=i;}}return result;}}
+native main{{println(changed());println(shadowed());println(floating());return 0;}}'''
+        self.execute(source, (str(MIN) + '\n') * 3)
+
+    def test_integer_bound_mutation_and_shadow(self):
+        source = f'''fn changed():int{{let i:int={MAX-2};let limit:int={MAX};
+while(i<limit){{limit=i+1;i+=1;}}return i;}}
+fn shadowed():int{{let i:int={MAX-2};let limit:int={MAX};let sum:int=0;
+while(i<limit){{{{let limit:int=i;sum=sum+limit;}}i+=1;}}return sum;}}
+native main{{println(changed());println(shadowed());return 0;}}'''
+        self.execute(source, f'{MAX-1}\n-5\n')
+
+    def test_imported_module_loop_boundaries(self):
+        module = f'''fn count(start:int,limit:int):int{{let i:int=start;
+while(i<limit){{i+=1;}}return i;}}
+fn wrapping():int{{let i:int={MAX};let limit:int={MAX};let gate:int=0;
+while(i<=limit){{if(gate!=0){{break;}}gate=1;i+=1;}}return i;}}'''
+        source = f'''import edge;
+native main{{println(edge.count({MAX-2},{MAX}));
+println(edge.count({literal(MIN)},{literal(MIN+2)}));println(edge.wrapping());return 0;}}'''
+        self.execute(source, f'{MAX}\n{MIN+2}\n{MIN}\n', modules={'edge.fg': module})
+
+    def test_nested_safe_loops_and_unbounded_add_afterwards(self):
+        source = f'''fn nested(start:int,limit:int):int{{let outer:int=start;let total:int=0;
+while(outer<limit){{let inner:int=start;
+while(inner<limit){{total+=1;inner+=1;}}outer+=1;}}return total;}}
+native main{{println(nested({MAX-2},{MAX}));
+println(nested({literal(MIN)},{literal(MIN+2)}));
+let i:int={MAX};i+=1;println(i);return 0;}}'''
+        self.execute(source, f'4\n4\n{MIN}\n')
+
+    def test_process_and_suspended_coroutine_loop_boundaries(self):
+        source = f'''process main {{
+coroutine work(){{let ci:int={MAX-1};let limit:int={MAX};
+while(ci<limit){{yield;ci+=1;}}println(ci);
+let cj:int={MAX};let gate:int=0;
+while(cj<=limit){{if(gate!=0){{break;}}gate=1;yield;cj+=1;}}println(cj);}}
+let pi:int={MAX-1};let bound:int={MAX};
+while(pi<bound){{pi+=1;}}println(pi);
+let pj:int={MAX};let gate:int=0;
+while(pj<=bound){{if(gate!=0){{break;}}gate=1;pj+=1;}}println(pj);
+spawn work();}}'''
+        self.execute(source, f'{MAX}\n{MIN}\n{MAX}\n{MIN}\n', js=False)
+
+    def test_coroutine_loop_control_after_suspension(self):
+        # Each resumed continue must skip the following assignment. Each
+        # resumed inner break must leave that loop rather than the outer loop
+        # or the coroutine's enclosing resume switch.
+        source = '''process main {coroutine work(){let outer:int=0;let sum:int=0;
+while(outer<3){let inner:int=0;
+while(inner<4){inner+=1;yield;if(inner==1){continue;}if(inner==3){break;}sum+=inner;}
+outer+=1;}println(sum);println(outer);}spawn work();}'''
+        self.execute(source, '6\n3\n', js=False)
+
     def test_bool_promotion_and_short_circuit(self):
         self.execute('fn invalid():int{return 1/0;} native main {let yes:bool=true;let no:bool=false;println(yes+yes);println(5-no);println(yes*7);if(no && invalid()){return 1;}if(yes || invalid()){println(1);}return 0;}', '2\n5\n7\n1\n')
 
@@ -136,12 +278,15 @@ let i:int=0;while(i<3){x-=1;i+=1;}println(x);x*=2;println(x);println(low);return
 
     def test_library_boundary(self):
         source = '''library arithmetic {export fn add(a:int,b:int):int{return a+b;}
-export fn mixed(a:int,b:float):float{return a+b;} export fn div(a:int,b:int):int{return a/b;}}'''
+export fn mixed(a:int,b:float):float{return a+b;} export fn div(a:int,b:int):int{return a/b;}
+export fn count(a:int,b:int):int{while(a<b){a+=1;}return a;}}'''
         bridge = '''#include "arithmetic.h"
 #include <stdint.h>
 #include <stdio.h>
 int main(void){if(frlib_arithmetic_add(INT64_MAX,1)!=INT64_MIN)return 1;
-if(frlib_arithmetic_mixed(1,0.5)!=1.5)return 2;if(frlib_arithmetic_div(-7,3)!=-2)return 3;return 0;}'''
+if(frlib_arithmetic_mixed(1,0.5)!=1.5)return 2;if(frlib_arithmetic_div(-7,3)!=-2)return 3;
+if(frlib_arithmetic_count(INT64_MAX-2,INT64_MAX)!=INT64_MAX)return 4;
+if(frlib_arithmetic_count(INT64_MIN,INT64_MIN+2)!=INT64_MIN+2)return 5;return 0;}'''
         self.execute(source, js=False, library_bridge=bridge)
 
 

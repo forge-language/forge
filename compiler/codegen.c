@@ -7,6 +7,7 @@
  * 60k-deep expression tree overflows the C stack long before it overflows
  * anything else. */
 #define CG_MAX_DEPTH 3000
+#define CG_LOOP_SCAN_BUDGET 65536
 
 /* One symbol-table slot. `module` is empty for top-level and library symbols,
  * and holds the module name for module-scoped ones. */
@@ -45,6 +46,9 @@ typedef struct {
     int continue_label;   /* >0: `continue` must jump to __forge_cont_N */
     Stmt **hoisted;       /* coroutine lets already initialised in the spawn stub */
     size_t hoisted_count;
+    bool prove_loop_increments; /* plain native/library functions only */
+    size_t loop_scan_left;      /* fail closed when nested scans exhaust it */
+    Stmt *safe_increment;       /* one guard-dominated assignment, never ADD globally */
 } Codegen;
 
 static void cg_enter(Codegen *cg) {
@@ -63,6 +67,9 @@ static void cg_begin_function(Codegen *cg) {
     cg->moved_count = 0;
     cg->continue_label = 0;
     cg->depth = 0;
+    cg->prove_loop_increments = false;
+    cg->loop_scan_left = CG_LOOP_SCAN_BUDGET;
+    cg->safe_increment = NULL;
 }
 
 static uint64_t cg_key_hash(ForgeStr module, ForgeStr name) {
@@ -81,8 +88,14 @@ static uint64_t cg_key_hash(ForgeStr module, ForgeStr name) {
 }
 
 static void cg_map_init(CgMap *m, size_t expected) {
+    size_t maximum = SIZE_MAX / sizeof(CgSlot);
+    if (expected > (maximum - 1) / 2) forge_die("too many codegen symbols");
+    size_t needed = expected * 2 + 1;
     size_t cap = 16;
-    while (cap < expected * 2 + 1) cap *= 2;
+    while (cap < needed) {
+        if (cap > maximum / 2) forge_die("too many codegen symbols");
+        cap *= 2;
+    }
     m->slots = (CgSlot *)calloc(cap, sizeof(CgSlot));
     if (!m->slots) forge_die("out of memory");
     m->cap = cap;
@@ -136,13 +149,8 @@ static void cg_mark_moved(Codegen *cg, ForgeStr name) {
     for (size_t i = 0; i < cg->moved_count; i++) {
         if (forge_str_eq(cg->moved_locals[i], name)) return;
     }
-    if (cg->moved_count == cg->moved_cap) {
-        size_t cap = cg->moved_cap ? cg->moved_cap * 2 : 8;
-        ForgeStr *grown = (ForgeStr *)realloc(cg->moved_locals, cap * sizeof(ForgeStr));
-        if (!grown) forge_die("out of memory");
-        cg->moved_locals = grown;
-        cg->moved_cap = cap;
-    }
+    cg->moved_locals = forge_array_reserve(cg->moved_locals, cg->moved_count,
+        &cg->moved_cap, sizeof(*cg->moved_locals), 8);
     cg->moved_locals[cg->moved_count++] = name;
 }
 
@@ -249,8 +257,14 @@ static void cg_build_symbols(Codegen *cg) {
     Program *prog = cg->prog;
     ForgeStr top = forge_str("");
     size_t n = prog->fn_count;
-    if (prog->library.present) n += prog->library.fn_count;
-    for (size_t i = 0; i < prog->module_count; i++) n += prog->modules[i].fn_count;
+    if (prog->library.present) {
+        if (prog->library.fn_count > SIZE_MAX - n) forge_die("too many codegen symbols");
+        n += prog->library.fn_count;
+    }
+    for (size_t i = 0; i < prog->module_count; i++) {
+        if (prog->modules[i].fn_count > SIZE_MAX - n) forge_die("too many codegen symbols");
+        n += prog->modules[i].fn_count;
+    }
     cg_map_init(&cg->fn_map, n);
     cg_map_init(&cg->const_map, prog->const_count);
 
@@ -278,14 +292,8 @@ static void cg_free_symbols(Codegen *cg) {
 }
 
 static void cg_push_local(Codegen *cg, ForgeStr name, ForgeType ty) {
-    if (cg->local_count == cg->local_cap) {
-        size_t cap = cg->local_cap ? cg->local_cap * 2 : 8;
-        struct ForgeLocal *grown =
-            (struct ForgeLocal *)realloc(cg->locals, cap * sizeof(struct ForgeLocal));
-        if (!grown) forge_die("out of memory");
-        cg->locals = grown;
-        cg->local_cap = cap;
-    }
+    cg->locals = forge_array_reserve(cg->locals, cg->local_count,
+        &cg->local_cap, sizeof(*cg->locals), 8);
     cg->locals[cg->local_count].name = name;
     cg->locals[cg->local_count].type = ty;
     cg->local_count++;
@@ -682,13 +690,7 @@ typedef struct {
 } StmtList;
 
 static void stmt_list_push(StmtList *l, Stmt *s) {
-    if (l->count == l->cap) {
-        size_t cap = l->cap ? l->cap * 2 : 8;
-        Stmt **grown = (Stmt **)realloc(l->items, cap * sizeof(Stmt *));
-        if (!grown) forge_die("out of memory");
-        l->items = grown;
-        l->cap = cap;
-    }
+    l->items = forge_array_reserve(l->items, l->count, &l->cap, sizeof(*l->items), 8);
     l->items[l->count++] = s;
 }
 
@@ -889,6 +891,14 @@ static void emit_coro_body(Codegen *cg, CoroDecl *coro, const char *state_var, i
             cg->indent--;
             cg_line(cg, "}");
             break;
+        case STMT_BREAK:
+            /* The resume switch surrounds the generated loop. C therefore
+             * targets the innermost loop, including after a yield resumes. */
+            cg_line(cg, "break;");
+            break;
+        case STMT_CONTINUE:
+            cg_line(cg, "continue;");
+            break;
         case STMT_SPAWN:
             cg_line(cg, "%.*s_spawn(%s->proc", (int)s->as.spawn.coro_name.len,
                     s->as.spawn.coro_name.data, state_var);
@@ -1054,13 +1064,107 @@ static bool for_step_inlinable(Stmt *step) {
     return true;
 }
 
+/* Expressions cannot assign primitive locals, and native scalar arguments are
+ * passed by value. Scan every statement path for writes and shadow bindings.
+ * Reject shadowing conservatively: Expr/Stmt store names, not binding IDs, and
+ * coroutine locals have different storage/resume rules from lexical C locals.
+ * A per-function visit budget bounds repeated scans of nested loop bodies. */
+static bool loop_body_preserves(Codegen *cg, Stmt *s, Stmt *increment,
+                                ForgeStr induction, ForgeStr bound, int depth) {
+    if (depth > CG_MAX_DEPTH) return false;
+    for (; s; s = s->next) {
+        if (!cg->loop_scan_left) return false;
+        cg->loop_scan_left--;
+        switch (s->kind) {
+        case STMT_LET:
+            if (forge_str_eq(s->as.let.name, induction) ||
+                (bound.len && forge_str_eq(s->as.let.name, bound))) return false;
+            break;
+        case STMT_ASSIGN:
+            if (s != increment &&
+                (forge_str_eq(s->as.assign.name, induction) ||
+                 (bound.len && forge_str_eq(s->as.assign.name, bound)))) return false;
+            break;
+        case STMT_IF:
+            if (!loop_body_preserves(cg, s->as.if_stmt.then_br->first, increment, induction, bound, depth + 1) ||
+                (s->as.if_stmt.else_br && !loop_body_preserves(cg, s->as.if_stmt.else_br->first, increment, induction, bound, depth + 1))) return false;
+            break;
+        case STMT_WHILE:
+            if (!loop_body_preserves(cg, s->as.while_stmt.body->first, increment, induction, bound, depth + 1)) return false;
+            break;
+        case STMT_FOR:
+            if (!loop_body_preserves(cg, s->as.for_stmt.init, increment, induction, bound, depth + 1) ||
+                !loop_body_preserves(cg, s->as.for_stmt.body->first, increment, induction, bound, depth + 1) ||
+                !loop_body_preserves(cg, s->as.for_stmt.step, increment, induction, bound, depth + 1)) return false;
+            break;
+        case STMT_BLOCK:
+            if (!loop_body_preserves(cg, s->as.block->first, increment, induction, bound, depth + 1)) return false;
+            break;
+        case STMT_MATCH:
+            for (MatchArm *arm = s->as.match_stmt.arms; arm; arm = arm->next) {
+                if (!cg->loop_scan_left) return false;
+                cg->loop_scan_left--;
+                if (!loop_body_preserves(cg, arm->body->first, increment, induction, bound, depth + 1)) return false;
+            }
+            break;
+        case STMT_YIELD:
+        case STMT_AWAIT:
+            return false;
+        default:
+            break;
+        }
+    }
+    return true;
+}
+
+static Stmt *prove_loop_increment(Codegen *cg, Expr *condition, Block *body,
+                                  Stmt *increment) {
+    if (!cg->prove_loop_increments || cg->state_prefix || !cg->loop_scan_left ||
+        !condition || condition->kind != EXPR_BINARY || condition->as.binary.op != BIN_LT ||
+        !increment || increment->kind != STMT_ASSIGN || increment->next) return NULL;
+    Expr *left = condition->as.binary.left, *right = condition->as.binary.right;
+    if (left->kind != EXPR_IDENT || !cg_is_local(cg, left->as.ident) ||
+        cg_lookup_local(cg, left->as.ident).kind != TY_INT ||
+        !forge_str_eq(increment->as.assign.name, left->as.ident)) return NULL;
+    ForgeStr bound = {0};
+    if (right->kind == EXPR_IDENT) {
+        if (!cg_is_local(cg, right->as.ident) || cg_lookup_local(cg, right->as.ident).kind != TY_INT) return NULL;
+        bound = right->as.ident;
+    } else if (right->kind != EXPR_INT) return NULL;
+    Expr *value = increment->as.assign.value;
+    if (!value || value->kind != EXPR_BINARY || value->as.binary.op != BIN_ADD) return NULL;
+    Expr *variable = value->as.binary.left, *one = value->as.binary.right;
+    if (variable->kind == EXPR_INT) { Expr *swap = variable; variable = one; one = swap; }
+    if (variable->kind != EXPR_IDENT || !forge_str_eq(variable->as.ident, left->as.ident) ||
+        one->kind != EXPR_INT || one->as.int_val != 1) return NULL;
+    if (!loop_body_preserves(cg, body->first, increment, left->as.ident, bound, 0)) return NULL;
+    /* On every path reaching this sole update, the integer guard established
+     * i < bound <= INT64_MAX, hence i <= INT64_MAX-1. Adding one cannot
+     * overflow or underflow, even when i initially is negative. Native while
+     * continue skips a tail update; native for continue executes its step. */
+    return increment;
+}
+
+static void emit_assignment_rhs(Codegen *cg, Stmt *s) {
+    if (s == cg->safe_increment) {
+        Expr *value = s->as.assign.value;
+        fputc('(', cg->out);
+        emit_expr(cg, value->as.binary.left);
+        fputs(" + ", cg->out);
+        emit_expr(cg, value->as.binary.right);
+        fputc(')', cg->out);
+    } else {
+        emit_expr(cg, s->as.assign.value);
+    }
+}
+
 static void emit_for_step_inline(Codegen *cg, Stmt *step) {
     for (Stmt *s = step; s; s = s->next) {
         if (s != step) fputs(", ", cg->out);
         if (s->kind == STMT_ASSIGN) {
             if (cg->state_prefix) fputs(cg->state_prefix, cg->out);
             fprintf(cg->out, "%.*s = ", (int)s->as.assign.name.len, s->as.assign.name.data);
-            emit_expr(cg, s->as.assign.value);
+            emit_assignment_rhs(cg, s);
         } else {
             emit_expr(cg, s->as.expr);
         }
@@ -1103,6 +1207,9 @@ static void emit_stmts(Codegen *cg, Stmt *s, const char *proc_var, bool in_coro)
             emit_if_stmt(cg, s, proc_var, in_coro);
             break;
         case STMT_WHILE: {
+            Stmt *saved_increment = cg->safe_increment;
+            cg->safe_increment = prove_loop_increment(cg, s->as.while_stmt.cond,
+                s->as.while_stmt.body, s->as.while_stmt.body->last);
             cg_line(cg, "while (");
             emit_expr(cg, s->as.while_stmt.cond);
             fputs(") {\n", cg->out);
@@ -1112,12 +1219,14 @@ static void emit_stmts(Codegen *cg, Stmt *s, const char *proc_var, bool in_coro)
             cg->continue_label = 0;
             emit_block_stmts(cg, s->as.while_stmt.body->first, proc_var, in_coro);
             cg->continue_label = saved_cont;
+            cg->safe_increment = saved_increment;
             cg->indent--;
             cg_indent(cg);
             fputs("}\n", cg->out);
             break;
         }
         case STMT_FOR: {
+            Stmt *saved_increment = cg->safe_increment;
             size_t saved_locals = cg->local_count;
             bool suspends = block_has_yield(s->as.for_stmt.body->first);
             bool inline_step = for_step_inlinable(s->as.for_stmt.step);
@@ -1126,6 +1235,8 @@ static void emit_stmts(Codegen *cg, Stmt *s, const char *proc_var, bool in_coro)
             fputs("{\n", cg->out);
             cg->indent++;
             if (s->as.for_stmt.init) emit_stmts(cg, s->as.for_stmt.init, proc_var, in_coro);
+            cg->safe_increment = prove_loop_increment(cg, s->as.for_stmt.cond,
+                s->as.for_stmt.body, s->as.for_stmt.step);
             if (!suspends && inline_step) {
                 /* Real C for-loop: `continue` then runs the step, as it must.
                  * The while-desugaring below skips it and spins forever. */
@@ -1167,6 +1278,7 @@ static void emit_stmts(Codegen *cg, Stmt *s, const char *proc_var, bool in_coro)
             cg_indent(cg);
             fputs("}\n", cg->out);
             cg->local_count = saved_locals;
+            cg->safe_increment = saved_increment;
             break;
         }
         case STMT_BREAK:
@@ -1219,7 +1331,7 @@ static void emit_stmts(Codegen *cg, Stmt *s, const char *proc_var, bool in_coro)
         case STMT_ASSIGN:
             cg_indent(cg);
             fprintf(cg->out, "%.*s = ", (int)s->as.assign.name.len, s->as.assign.name.data);
-            emit_expr(cg, s->as.assign.value);
+            emit_assignment_rhs(cg, s);
             fputs(";\n", cg->out);
             break;
         case STMT_MATCH: {
@@ -1428,6 +1540,7 @@ void codegen_emit_library(Program *prog, FILE *out_c, FILE *out_h, const char *r
     LibraryDecl *lib = &prog->library;
     /* Heap-allocated: a fixed buffer would silently truncate (and so collide)
      * on a long library name. */
+    if (lib->name.len > SIZE_MAX - 16) forge_die("library name too large");
     size_t guard_cap = lib->name.len + 16;
     char *guard = (char *)malloc(guard_cap);
     if (!guard) forge_die("out of memory");
@@ -1485,6 +1598,7 @@ void codegen_emit_library(Program *prog, FILE *out_c, FILE *out_h, const char *r
         fputs(" {\n", out_c);
         cg.indent = 1;
         cg_begin_function(&cg);
+        cg.prove_loop_increments = true;
         cg_push_params(&cg, fn->params);
         emit_stmts(&cg, fn->body.first, NULL, false);
         cg.indent = 0;
@@ -1573,6 +1687,7 @@ void codegen_emit(Program *prog, FILE *out, const char *runtime_include) {
         cg.indent = 1;
         cg_begin_function(&cg);
         cg.current_module = forge_str("");
+        cg.prove_loop_increments = true;
         cg_push_params(&cg, fn->params);
         emit_stmts(&cg, fn->body.first, NULL, false);
         cg.indent = 0;
@@ -1591,6 +1706,7 @@ void codegen_emit(Program *prog, FILE *out, const char *runtime_include) {
             cg.indent = 1;
             cg_begin_function(&cg);
             cg.current_module = mod->name;
+            cg.prove_loop_increments = true;
             cg_push_params(&cg, fn->params);
             emit_stmts(&cg, fn->body.first, NULL, false);
             cg.indent = 0;
@@ -1617,6 +1733,7 @@ void codegen_emit(Program *prog, FILE *out, const char *runtime_include) {
         fputs("int main(int argc, char **argv) {\n", out);
         cg.indent = 1;
         cg_begin_function(&cg);
+        cg.prove_loop_increments = true;
         cg_line(&cg, "fr_os_set_args(argc, argv);");
         emit_stmts(&cg, native_main->body.first, NULL, false);
         cg_line(&cg, "return 0;");
