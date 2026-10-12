@@ -263,6 +263,18 @@ class CompilerRegressionTests(unittest.TestCase):
     def test_string_views_and_builder_snapshots(self):
         self.run_program('import strings;native main{let v: int=str_view("한글");println(str_view_len(v));println(str_view_at(v,0));println(str_view_at(v,9));let b: int=str_builder();str_builder_append(b,"one");let first: string=str_builder_finish(b);str_builder_char(b,65);println(first);println(str_builder_finish(b));println(str_builder_char(b,0));return 0;}', '6\n237\n-1\none\noneA\n0\n')
 
+    def test_builder_finish_take_preserves_snapshot_and_allows_reuse(self):
+        self.run_program('''import strings; native main {
+            let b: int = str_builder_with_capacity(3);
+            str_builder_append(b, "one");
+            let first: string = str_builder_finish_take(b);
+            str_builder_char(b, 65);
+            println(first);
+            println(str_builder_finish(b));
+            println(str_builder_finish_take(b));
+            return 0;
+        }''', 'one\nA\nA\n')
+
     def test_cached_length_immutable_view_append(self):
         self.run_program('''import strings; native main {
             let old: int = str_view("A");

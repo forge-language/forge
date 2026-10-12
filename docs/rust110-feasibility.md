@@ -185,3 +185,35 @@ Only that narrow immutable-append workload exceeds 1.10; the four other rows
 remain below target. Every checksum matched the independent reference. This is
 one host and one run, and does not establish language-wide 110% performance.
 [Conditions and raw samples](https://github.com/forge-language/forge-benchmarks/blob/main/docs/cpu-current-2026-10-12.md).
+
+## 2026-10-12 weighted-scan recurrence
+
+The CPU kernel's repeated per-byte `% 13` weight was replaced by an equivalent
+bounded weight recurrence in both Forge and Rust. The comparison harness now
+allows distinct equivalent source variants only with a source-matched Rust
+control per candidate; all implementations must match the independent oracle
+for prewarm and timed inputs. The Python oracle now models truncating signed
+remainder across zero correctly, and the Forge CLI parser accepts negative
+seeds. Three unit tests and 1,188 signed-seed Forge/Rust differential runs
+passed for scan, builder and immutable append.
+
+In the final 40 position-balanced pairs over the five CPU workloads, recurrence
+Forge reached 1.938x source-matched Rust throughput on scan (95% interval
+1.917–1.953) and 16.257x on immutable append (13.422–18.098). Builder's point
+estimate was 1.124x with a wide interval (0.991–1.210), so this run does not
+establish 1.10 there. LCG and primes stayed near Rust at 1.007x and 1.011x.
+The recurrence expresses a more efficient algorithm in both benchmark
+implementations; it is not an automatic compiler optimization. Results are
+host-specific and do not complete the representative concurrency/HTTP and
+cross-machine audit. [Paired conditions and raw samples](https://github.com/forge-language/forge-benchmarks/blob/main/docs/cpu-weight-cycle-2026-10-12.md).
+
+## Builder buffer transfer API
+
+Added `str_builder_finish_take`, which returns the builder's arena buffer as an
+immutable NUL-terminated string and resets the builder for reuse. The original
+`str_builder_finish` snapshot behavior is unchanged. The compiler now uses the
+transfer operation only for its proven private dead-temporary append-loop
+lowering; JavaScript and the C ABI expose matching behavior. Native, ABI-only,
+and JavaScript tests verify snapshots survive builder reuse. This change has
+not yet been isolated in a paired performance run, so it is not counted as a
+measured speedup.

@@ -92,6 +92,7 @@ static int supported_standard(const char *name_) {
                                     "fr_str_builder_append_view",
                                     "fr_str_builder_char",
                                     "fr_str_builder_finish",
+                                    "fr_str_builder_finish_take",
 
                                     "fr_abs_i",
                                     "fr_abs_f",
@@ -429,7 +430,8 @@ void codegen_emit_js(Program *prog, FILE *out) {
       "fr_str_builder_append:(h,s)=>appendBytes(h,cbytes(s)),\n"
       "fr_str_builder_append_view:(h,vh,a,n)=>{const v=view(vh),r=range(v,a,n);return r?appendBytes(h,v.data.subarray(r[0],r[0]+r[1])):0n;},\n"
       "fr_str_builder_char:(h,c)=>{const b=builder(h);if(!b||c<=0n||c>255n)return 0n;reserve(b,b.len+1);b.data[b.len++]=Number(c);return h;},\n"
-      "fr_str_builder_finish:h=>{const b=builder(h);return b?decode(b.data.subarray(0,b.len)):null;},\n"
+      "fr_str_builder_finish:h=>{const b=builder(h);return b?decode(b.data.subarray(0,b.len)):null;},"
+      "fr_str_builder_finish_take:h=>{const b=builder(h);if(!b)return null;const s=decode(b.data.subarray(0,b.len));b.data=new Uint8Array(0);b.len=0;return s;},\n"
       "fr_abs_i:x=>x<0n?-x:x,fr_abs_f:Math.abs,fr_min_i:(a,b)=>a<b?a:b,fr_max_"
       "i:(a,b)=>a>b?a:b,fr_clamp_i:(x,a,b)=>x<a?a:x>b?b:x,fr_pow_i:(a,b)=>{if("
       "b<0n)return 0n;let "

@@ -46,6 +46,7 @@ static const ForgeStdFn STRING_FNS[] = {
     {"str_builder_append_view", "fr_str_builder_append_view"},
     {"str_builder_char", "fr_str_builder_char"},
     {"str_builder_finish", "fr_str_builder_finish"},
+    {"str_builder_finish_take", "fr_str_builder_finish_take"},
 
 };
 

@@ -28,6 +28,9 @@ class JavaScriptTest(unittest.TestCase):
  def test_builder_with_capacity(self):
   r=self.compile_run('import strings;native main{let b: int=str_builder_with_capacity(3);println(str_builder_char(b,65));str_builder_char(b,66);str_builder_char(b,67);println(str_builder_finish(b));let invalid: int=str_builder_with_capacity(-1);println(invalid);return 0;}')
   self.assertEqual(r.returncode,0,r.stderr);self.assertEqual(r.stdout.splitlines(),['1','ABC','0'])
+ def test_builder_finish_take(self):
+  r=self.compile_run('import strings;native main{let b: int=str_builder_with_capacity(3);str_builder_append(b,"ABC");let saved: string=str_builder_finish_take(b);str_builder_char(b,68);println(saved);println(str_builder_finish(b));println(str_builder_finish_take(b));return 0;}')
+  self.assertEqual(r.returncode,0,r.stderr);self.assertEqual(r.stdout.splitlines(),['ABC','D','D'])
  def test_cached_length_immutable_view_append(self):
   r=self.compile_run('import strings;native main{let first: int=str_view("A");let second: int=str_view_append_byte(first,200);println(str_view_len(second));println(str_view_at(second,1));println(str_view_at(second,2));println(str_view_sub(second,0,9223372036854775807));let nul: int=str_view_append_byte(second,0);println(str_view_sub(nul,0,9223372036854775807));println(str_view_len(first));println(str_view_append_byte(0,65));return 0;}')
   self.assertEqual(r.returncode,0,r.stderr);self.assertEqual(r.stdout.splitlines(),['3','195','136','AÈ','AÈ','1','0'])

@@ -324,7 +324,7 @@ static const char *const STDLIB_STRING_FNS[] = {
     "fr_lsp_message", "fr_lsp_read_message",
     "fr_os_argv", "fr_os_executable_path", "fr_os_getenv", "fr_os_temp_file",
     "fr_proc_output", "fr_proc_stderr", "fr_proc_stdout",
-    "fr_str_append", "fr_str_append_str", "fr_str_builder_finish", "fr_str_concat", "fr_str_from_int",
+    "fr_str_append", "fr_str_append_str", "fr_str_builder_finish", "fr_str_builder_finish_take", "fr_str_concat", "fr_str_from_int",
     "fr_str_sub", "fr_str_trim", "fr_str_view_sub",
     "fr_tcp_recv",
     "fr_udp_peer", "fr_udp_recv",
@@ -1376,7 +1376,7 @@ static void emit_append_loop_builder(Codegen *cg, Stmt *loop, ForgeStr text,
     fputs(";\n", cg->out);
     cg->indent--;
     cg_line(cg, "}");
-    cg_line(cg, "if (%s && %s) %.*s = fr_str_builder_finish(%s);",
+    cg_line(cg, "if (%s && %s) %.*s = fr_str_builder_finish_take(%s);",
             builder, did_append, (int)text.len, text.data, builder);
     cg_line(cg, "if (!%s) {", builder);
     cg->indent++;
