@@ -112,6 +112,32 @@ class ArithmeticTests(unittest.TestCase):
             source += f'println(positive_mod7({literal(value)}));'
         self.execute(source + 'return 0;}', '\n'.join(expected) + '\n')
 
+    def test_mersenne_modmul_guard_preserves_wrapping_fallback(self):
+        # The native backend may use a Mersenne fold only for a nonnegative
+        # in-range multiplicand whose product is proven not to overflow.
+        # Every other value must retain Forge's wrapping multiply and signed
+        # remainder behavior.
+        rng = random.Random(20261013)
+        cases = [(31, 48271), (2, 2), (4, 7), (62, 1)]
+        functions = ''
+        calls = ''
+        expected = []
+        for index, (shift, multiplier) in enumerate(cases):
+            modulus = (1 << shift) - 1
+            name = f'mersenne_step_{index}'
+            functions += (f'fn {name}(value:int):int{{'
+                          f'return (value*{multiplier})%{modulus};}} ')
+            values = [MIN, MIN + 1, -modulus, -1, 0, 1, modulus - 1,
+                      modulus, modulus + 1, MAX]
+            values += [rng.randrange(MIN, MAX + 1) for _ in range(24)]
+            for value in values:
+                product = wrap(value * multiplier)
+                quotient = abs(product) // modulus * (-1 if product < 0 else 1)
+                expected.append(str(product - quotient * modulus))
+                calls += f'println({name}({literal(value)}));'
+        self.execute(functions + 'native main {' + calls + 'return 0;}',
+                     '\n'.join(expected) + '\n')
+
     def test_dynamic_division_width_boundaries_and_once_evaluation(self):
         # External calls keep operands dynamic even at -O3. Exercise both
         # sides of the unsigned-32 fast path and the full signed fallback.
@@ -283,6 +309,15 @@ while(outer<3){let inner:int=0;
 while(inner<4){inner+=1;yield;if(inner==1){continue;}if(inner==3){break;}sum+=inner;}
 outer+=1;}println(sum);println(outer);}spawn work();}'''
         self.execute(source, '6\n3\n', js=False)
+
+    def test_mersenne_modmul_in_suspended_coroutine(self):
+        # The matched local can live in the coroutine state struct; emit it
+        # through normal identifier lowering so the generated state prefix is
+        # retained across suspension.
+        source = '''process main {coroutine work(value:int){let i:int=0;
+while(i<2){println((value*2)%3);value=value+1;i=i+1;yield;}}
+spawn work(1);}'''
+        self.execute(source, '2\n1\n', js=False)
 
     def test_bool_promotion_and_short_circuit(self):
         self.execute('fn invalid():int{return 1/0;} native main {let yes:bool=true;let no:bool=false;println(yes+yes);println(5-no);println(yes*7);if(no && invalid()){return 1;}if(yes || invalid()){println(1);}return 0;}', '2\n5\n7\n1\n')

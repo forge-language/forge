@@ -53,6 +53,13 @@ typedef struct {
     ForgeStr safe_view_at_index;
 } Codegen;
 
+/* Match only x*C % (2^k-1) with a local integer x and positive constant C.
+ * The emitted helper guards the fold's nonnegative range and signed-product
+ * bound; its fallback keeps the original wrapping multiply and signed mod. */
+static bool cg_mersenne_modmul(Codegen *cg, Expr *e, Expr **value,
+                               int64_t *multiplier, int64_t *modulus,
+                               unsigned *shift);
+
 static void cg_enter(Codegen *cg) {
     if (++cg->depth > CG_MAX_DEPTH)
         forge_die("expression or statement nesting too deep (max "
@@ -560,6 +567,17 @@ static void emit_expr_inner(Codegen *cg, Expr *e) {
         }
         break;
     case EXPR_BINARY: {
+        Expr *mersenne_value;
+        int64_t mersenne_multiplier, mersenne_modulus;
+        unsigned mersenne_shift;
+        if (cg_mersenne_modmul(cg, e, &mersenne_value, &mersenne_multiplier,
+                               &mersenne_modulus, &mersenne_shift)) {
+            fputs("__forge_mersenne_modmul_i64(", cg->out);
+            emit_expr(cg, mersenne_value);
+            fprintf(cg->out, ", INT64_C(%lld), INT64_C(%lld), %u)",
+                    (long long)mersenne_multiplier, (long long)mersenne_modulus, mersenne_shift);
+            break;
+        }
         const char *op = "?";
         switch (e->as.binary.op) {
         case BIN_ADD: op = "+"; break;
@@ -2121,7 +2139,17 @@ static void emit_arithmetic_helpers(FILE *out) {
           "    if (b == 0 || (a == INT64_MIN && b == -1)) { fputs(\"Forge integer division\\n\", stderr); exit(EXIT_FAILURE); }\n"
           "}\n"
           "static inline int64_t __forge_div_i64(int64_t a, int64_t b) { __forge_check_div_i64(a, b); return a / b; }\n"
-          "static inline int64_t __forge_mod_i64(int64_t a, int64_t b) { __forge_check_div_i64(a, b); return a % b; }\n\n", out);
+          "static inline int64_t __forge_mod_i64(int64_t a, int64_t b) { __forge_check_div_i64(a, b); return a % b; }\n"
+          "static inline int64_t __forge_mersenne_modmul_i64(int64_t value, int64_t multiplier, int64_t modulus, unsigned shift) {\n"
+          "    if (value >= 0 && value < modulus && multiplier > 0 && multiplier < modulus &&\n"
+          "        (uint64_t)(modulus - 1) <= (uint64_t)INT64_MAX / (uint64_t)multiplier) {\n"
+          "        uint64_t product = (uint64_t)value * (uint64_t)multiplier;\n"
+          "        uint64_t folded = (product >> shift) + (product & (uint64_t)modulus);\n"
+          "        if (folded >= (uint64_t)modulus) folded -= (uint64_t)modulus;\n"
+          "        return (int64_t)folded;\n"
+          "    }\n"
+          "    return __forge_mod_i64(__forge_mul_i64(value, multiplier), modulus);\n"
+          "}\n\n", out);
     const char *names[] = { "ADD", "SUB", "MUL", "DIV" };
     const char *lower[] = { "add", "sub", "mul", "div" };
     const char *ops[] = { "+", "-", "*", "/" };
@@ -2132,6 +2160,35 @@ static void emit_arithmetic_helpers(FILE *out) {
     /* An external header can reveal a float return type that the semantic
      * checker could not resolve. Preserve C's rejection of float remainder. */
     fputs("#define FORGE_MOD(a, b) ({ _Static_assert(_Generic((a), float: 0, double: 0, default: _Generic((b), float: 0, double: 0, default: 1)), \"Forge remainder requires integer operands\"); __forge_mod_i64((a), (b)); })\n\n", out);
+}
+
+static bool cg_mersenne_modmul(Codegen *cg, Expr *e, Expr **value,
+                               int64_t *multiplier, int64_t *modulus,
+                               unsigned *shift) {
+    if (!e || e->kind != EXPR_BINARY || e->as.binary.op != BIN_MOD) return false;
+    Expr *product = e->as.binary.left;
+    Expr *mod = e->as.binary.right;
+    if (!product || product->kind != EXPR_BINARY || product->as.binary.op != BIN_MUL ||
+        !mod || mod->kind != EXPR_INT || mod->as.int_val <= 1) return false;
+    Expr *var = product->as.binary.left;
+    Expr *factor = product->as.binary.right;
+    if (var->kind == EXPR_INT) { Expr *swap = var; var = factor; factor = swap; }
+    if (var->kind != EXPR_IDENT || !cg_is_local(cg, var->as.ident) ||
+        cg_lookup_local(cg, var->as.ident).kind != TY_INT ||
+        factor->kind != EXPR_INT || factor->as.int_val <= 0) return false;
+
+    uint64_t m = (uint64_t)mod->as.int_val;
+    uint64_t power = m + UINT64_C(1);
+    if ((m & power) != 0 || (power & (power - 1)) != 0) return false;
+    unsigned k = 0;
+    while ((power >> k) > 1) k++;
+    if (k < 2 || k > 63 || (uint64_t)factor->as.int_val >= m) return false;
+
+    *value = var;
+    *multiplier = factor->as.int_val;
+    *modulus = mod->as.int_val;
+    *shift = k;
+    return true;
 }
 
 static void emit_owned_send_helper(FILE *out) {
