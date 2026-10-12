@@ -99,6 +99,19 @@ class ArithmeticTests(unittest.TestCase):
                 expected += [str(value)] * 2
         self.execute(source + 'return 0;}', '\n'.join(expected) + '\n')
 
+    def test_positive_constant_remainder_int64_boundaries(self):
+        # The native code generator may lower `a % 7` directly. Positive
+        # divisors must retain truncating signed-remainder semantics even at
+        # INT64_MIN, where the separate divisor=-1 trap does not apply.
+        values = [MIN, MIN + 1, -15, -7, -1, 0, 1, 7, 15, MAX]
+        source = 'fn positive_mod7(a:int):int{return a%7;} native main {'
+        expected = []
+        for value in values:
+            quotient = abs(value) // 7 * (-1 if value < 0 else 1)
+            expected.append(str(value - quotient * 7))
+            source += f'println(positive_mod7({literal(value)}));'
+        self.execute(source + 'return 0;}', '\n'.join(expected) + '\n')
+
     def test_dynamic_division_width_boundaries_and_once_evaluation(self):
         # External calls keep operands dynamic even at -O3. Exercise both
         # sides of the unsigned-32 fast path and the full signed fallback.

@@ -402,6 +402,38 @@ static CgStrKind cg_expr_str_kind(Codegen *cg, Expr *e) {
     }
 }
 
+/* The semantic pass does not cache all inferred expression types. Restrict
+ * direct arithmetic lowering to expressions whose integer type is explicit. */
+static bool cg_expr_known_int(Codegen *cg, Expr *e) {
+    if (!e) return false;
+    switch (e->kind) {
+    case EXPR_INT: case EXPR_BOOL: case EXPR_RECV: case EXPR_INDEX:
+        return true;
+    case EXPR_IDENT: {
+        if (cg_is_local(cg, e->as.ident)) {
+            ForgeTypeKind kind = cg_lookup_local(cg, e->as.ident).kind;
+            return kind == TY_INT || kind == TY_BOOL;
+        }
+        ConstDecl *constant = cg_find_const(cg, e->as.ident);
+        return constant && constant->value &&
+               (constant->value->kind == EXPR_INT || constant->value->kind == EXPR_BOOL);
+    }
+    case EXPR_BINARY:
+        return cg_expr_known_int(cg, e->as.binary.left) &&
+               cg_expr_known_int(cg, e->as.binary.right);
+    case EXPR_CALL: {
+        FnDecl *fn = cg_resolve_fn_ref(cg, e->as.call.name);
+        return fn && (fn->ret_type.kind == TY_INT || fn->ret_type.kind == TY_BOOL);
+    }
+    case EXPR_QUAL_CALL: {
+        FnDecl *fn = cg_resolve_qual_fn(cg, e->as.qual_call.module, e->as.qual_call.name);
+        return fn && (fn->ret_type.kind == TY_INT || fn->ret_type.kind == TY_BOOL);
+    }
+    default:
+        return e->type.kind == TY_INT || e->type.kind == TY_BOOL;
+    }
+}
+
 static int cg_expr_is_string(Codegen *cg, Expr *e) {
     return cg_expr_str_kind(cg, e) == CG_STR_YES;
 }
@@ -554,11 +586,27 @@ static void emit_expr_inner(Codegen *cg, Expr *e) {
         default: break;
         }
         if (helper) {
-            fprintf(cg->out, "%s(", helper);
-            emit_expr(cg, e->as.binary.left);
-            fputs(", ", cg->out);
-            emit_expr(cg, e->as.binary.right);
-            fputc(')', cg->out);
+            Expr *right = e->as.binary.right;
+            bool direct_positive_remainder =
+                e->as.binary.op == BIN_MOD &&
+                cg_expr_known_int(cg, e->as.binary.left) &&
+                right->kind == EXPR_INT && right->as.int_val > 0;
+            if (direct_positive_remainder) {
+                /* A positive divisor cannot trigger Forge's zero or
+                 * INT64_MIN/-1 remainder traps. Let C lower this constant
+                 * remainder while keeping every other case checked. */
+                fputc('(', cg->out);
+                emit_expr(cg, e->as.binary.left);
+                fputs(" % ", cg->out);
+                emit_expr(cg, right);
+                fputc(')', cg->out);
+            } else {
+                fprintf(cg->out, "%s(", helper);
+                emit_expr(cg, e->as.binary.left);
+                fputs(", ", cg->out);
+                emit_expr(cg, right);
+                fputc(')', cg->out);
+            }
         } else {
             fputc('(', cg->out);
             emit_expr(cg, e->as.binary.left);
