@@ -1,11 +1,14 @@
 #include "parser.h"
 
 #define FORGE_MAX_EXPR_DEPTH 2000
+#define FORGE_MAX_STMT_DEPTH 512
+_Static_assert(sizeof(int) == sizeof(int32_t), "Forge message tags require 32-bit int");
 
 typedef struct {
     Lexer *lx;
     SourceFile *source;
     int expr_depth;
+    int stmt_depth;
 } Parser;
 
 static SourceSpan token_span(Parser *p, Token t) {
@@ -26,16 +29,7 @@ static void parser_error(Parser *p, const char *msg) {
  * growth bounds reallocations and copying as declaration lists get larger. */
 static void *reserve_declarations(void *items, size_t count, size_t *capacity,
                                   size_t item_size) {
-    if (count < *capacity) return items;
-    size_t max_count = SIZE_MAX / item_size;
-    if (count >= max_count) forge_die("too many declarations");
-    size_t next = *capacity ? *capacity : 8;
-    if (next <= count) next = next <= max_count / 2 ? next * 2 : max_count;
-    if (next > max_count) next = max_count;
-    void *grown = realloc(items, next * item_size);
-    if (!grown) forge_die("out of memory growing declarations");
-    *capacity = next;
-    return grown;
+    return forge_array_reserve(items, count, capacity, item_size, 8);
 }
 
 static void expect(Parser *p, TokenKind kind) {
@@ -151,10 +145,7 @@ static Expr *parse_ident_start_inner(Parser *p, ForgeStr name) {
             size_t n = 0, cap = 0;
             if (!lexer_match(p->lx, TOK_RPAREN)) {
                 do {
-                    if (n == cap) {
-                        cap = cap ? cap * 2 : 4;
-                        args = (Expr **)realloc(args, cap * sizeof(Expr *));
-                    }
+                    args = forge_array_reserve(args, n, &cap, sizeof(*args), 4);
                     args[n++] = parse_expr(p);
                 } while (lexer_match(p->lx, TOK_COMMA));
                 expect(p, TOK_RPAREN);
@@ -170,10 +161,7 @@ static Expr *parse_ident_start_inner(Parser *p, ForgeStr name) {
         size_t n = 0, cap = 0;
         if (!lexer_match(p->lx, TOK_RPAREN)) {
             do {
-                if (n == cap) {
-                    cap = cap ? cap * 2 : 4;
-                    args = (Expr **)realloc(args, cap * sizeof(Expr *));
-                }
+                args = forge_array_reserve(args, n, &cap, sizeof(*args), 4);
                 args[n++] = parse_expr(p);
             } while (lexer_match(p->lx, TOK_COMMA));
             expect(p, TOK_RPAREN);
@@ -340,7 +328,7 @@ static Expr *parse_or(Parser *p) {
 static Expr *pipe_rhs_to_call(Expr *left, Expr *right, Parser *p) {
     if (right->kind == EXPR_CALL) {
         size_t n = right->as.call.arg_count + 1;
-        Expr **args = (Expr **)calloc(n, sizeof(Expr *));
+        Expr **args = forge_calloc_array(n, sizeof(*args));
         if (!args) forge_die("out of memory");
         args[0] = left;
         for (size_t i = 1; i < n; i++) args[i] = right->as.call.args[i - 1];
@@ -352,7 +340,7 @@ static Expr *pipe_rhs_to_call(Expr *left, Expr *right, Parser *p) {
     }
     if (right->kind == EXPR_QUAL_CALL) {
         size_t n = right->as.qual_call.arg_count + 1;
-        Expr **args = (Expr **)calloc(n, sizeof(Expr *));
+        Expr **args = forge_calloc_array(n, sizeof(*args));
         if (!args) forge_die("out of memory");
         args[0] = left;
         for (size_t i = 1; i < n; i++) args[i] = right->as.qual_call.args[i - 1];
@@ -395,7 +383,7 @@ static Expr *parse_expr(Parser *p) {
 static Block *parse_block(Parser *p) {
     Token start = lexer_peek(p->lx);
     expect(p, TOK_LBRACE);
-    Block *b = (Block *)calloc(1, sizeof(Block));
+    Block *b = forge_calloc_array(1, sizeof(*b));
     while (!lexer_match(p->lx, TOK_RBRACE)) {
         block_append(b, parse_stmt(p));
     }
@@ -411,10 +399,13 @@ static Stmt *parsed_let(Parser *p, Token name, bool mut, bool owned, ForgeType t
 
 static Stmt *parse_stmt_inner(Parser *p);
 static Stmt *parse_stmt(Parser *p) {
+    if (++p->stmt_depth > FORGE_MAX_STMT_DEPTH)
+        parser_error(p, "statement nesting too deep (maximum 512)");
     Token start = lexer_peek(p->lx);
     Stmt *s = parse_stmt_inner(p);
     s->span = parsed_span(p,start);
     if (!s->focus.file) s->focus = token_span(p,start);
+    p->stmt_depth--;
     return s;
 }
 static Stmt *parse_stmt_inner(Parser *p) {
@@ -463,7 +454,7 @@ static Stmt *parse_stmt_inner(Parser *p) {
         expect(p, TOK_LBRACE);
         MatchArm *arms = NULL, *tail = NULL;
         while (!lexer_match(p->lx, TOK_RBRACE)) {
-            MatchArm *arm = (MatchArm *)calloc(1, sizeof(MatchArm));
+            MatchArm *arm = forge_calloc_array(1, sizeof(*arm));
             if (lexer_peek(p->lx).kind == TOK_INT) {
                 Token t = lexer_next(p->lx);
                 arm->int_pat = t.int_val;
@@ -476,10 +467,11 @@ static Stmt *parse_stmt_inner(Parser *p) {
                 arm->wildcard = true;
             }
             expect(p, TOK_FAT_ARROW);
-            Block *body = (Block *)calloc(1, sizeof(Block));
+            Block *body;
             if (lexer_peek(p->lx).kind == TOK_LBRACE) {
                 body = parse_block(p);
             } else {
+                body = forge_calloc_array(1, sizeof(*body));
                 block_append(body, parse_stmt(p));
             }
             arm->body = body;
@@ -496,7 +488,7 @@ static Stmt *parse_stmt_inner(Parser *p) {
         Block *else_br = NULL;
         if (lexer_match(p->lx, TOK_KW_ELSE)) {
             if (lexer_peek(p->lx).kind == TOK_KW_IF) {
-                else_br = (Block *)calloc(1, sizeof(Block));
+                else_br = forge_calloc_array(1, sizeof(*else_br));
                 block_append(else_br, parse_stmt(p));
             } else {
                 else_br = parse_block(p);
@@ -553,10 +545,7 @@ static Stmt *parse_stmt_inner(Parser *p) {
         size_t n = 0, cap = 0;
         if (!lexer_match(p->lx, TOK_RPAREN)) {
             do {
-                if (n == cap) {
-                    cap = cap ? cap * 2 : 4;
-                    args = (Expr **)realloc(args, cap * sizeof(Expr *));
-                }
+                args = forge_array_reserve(args, n, &cap, sizeof(*args), 4);
                 args[n++] = parse_expr(p);
             } while (lexer_match(p->lx, TOK_COMMA));
             expect(p, TOK_RPAREN);
@@ -574,10 +563,12 @@ static Stmt *parse_stmt_inner(Parser *p) {
         bool move_val = lexer_match(p->lx, TOK_KW_MOVE);
         Expr *value = parse_expr(p);
         expect(p, TOK_SEMI);
-        int tag = 0;
+        uint32_t tag_bits = 0;
         for (size_t i = 0; i < tag_tok.lexeme.len; i++) {
-            tag = tag * 31 + (unsigned char)tag_tok.lexeme.data[i];
+            tag_bits = tag_bits * UINT32_C(31) + (unsigned char)tag_tok.lexeme.data[i];
         }
+        int32_t tag;
+        memcpy(&tag, &tag_bits, sizeof(tag));
         return stmt_send(target, tag, value, move_val);
     }
     if (lexer_match(p->lx, TOK_KW_YIELD)) {
@@ -618,7 +609,7 @@ static Param *parse_params(Parser *p) {
         expect(p, TOK_IDENT);
         expect(p, TOK_COLON);
         ForgeType ty = parse_type(p);
-        Param *param = (Param *)calloc(1, sizeof(Param));
+        Param *param = forge_calloc_array(1, sizeof(*param));
         param->span = token_span(p,name);
         param->name = token_str(name);
         param->type = ty;
@@ -686,10 +677,7 @@ static ProcessDecl parse_process(Parser *p) {
 
     while (lexer_peek(p->lx).kind != TOK_RBRACE) {
         if (lexer_peek(p->lx).kind == TOK_KW_COROUTINE) {
-            if (coro_count == coro_cap) {
-                coro_cap = coro_cap ? coro_cap * 2 : 4;
-                coros = (CoroDecl *)realloc(coros, coro_cap * sizeof(CoroDecl));
-            }
+            coros = forge_array_reserve(coros, coro_count, &coro_cap, sizeof(*coros), 4);
             coros[coro_count++] = parse_coroutine(p);
         } else if (lexer_match(p->lx, TOK_KW_ON)) {
             expect(p, TOK_KW_RECEIVE);
@@ -794,7 +782,7 @@ static StructDecl parse_struct(Parser *p) {
         expect(p, TOK_COLON);
         ForgeType ty = parse_type(p);
         expect(p, TOK_SEMI);
-        Field *f = (Field *)calloc(1, sizeof(Field));
+        Field *f = forge_calloc_array(1, sizeof(*f));
         f->name = token_str(field_name);
         f->type = ty;
         if (!sd.fields) sd.fields = tail = f;
@@ -821,12 +809,11 @@ static EnumDecl parse_enum(Parser *p) {
             Token v = lexer_peek(p->lx);
             expect(p, TOK_INT);
             val = v.int_val;
-            next_val = val + 1;
-        } else {
-            next_val++;
         }
+        uint64_t next_bits = (uint64_t)val + UINT64_C(1);
+        memcpy(&next_val, &next_bits, sizeof(next_val));
         expect(p, TOK_SEMI);
-        EnumVariant *ev = (EnumVariant *)calloc(1, sizeof(EnumVariant));
+        EnumVariant *ev = forge_calloc_array(1, sizeof(*ev));
         ev->name = token_str(variant);
         ev->value = val;
         if (!ed.variants) ed.variants = tail = ev;
@@ -847,7 +834,7 @@ static NativeDecl parse_native(Parser *p) {
 }
 
 Program parse_program_named(Lexer *lx, const char *path) {
-    SourceFile *source = calloc(1,sizeof(*source));
+    SourceFile *source = forge_calloc_array(1,sizeof(*source));
     if (!source) forge_die("out of memory");
     source->path = forge_strdup(forge_str(path ? path : "<input>"));
     if (!source->path) forge_die("out of memory");

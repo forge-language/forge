@@ -18,7 +18,10 @@ typedef struct {
 } Check;
 
 static void error_at(SourceSpan span, ForgeStr name, const char *reason) {
-    size_t cap = name.len + strlen(reason) + 32;
+    size_t reason_len = strlen(reason);
+    if (reason_len > SIZE_MAX - 64 || name.len > SIZE_MAX - reason_len - 64)
+        forge_die("semantic diagnostic too large");
+    size_t cap = name.len + reason_len + 32;
     char *message = malloc(cap), *legacy = malloc(cap + 32);
     if (!message || !legacy) forge_die("out of memory");
     snprintf(message,cap,"%s '%.*s'",reason,(int)name.len,name.data);
@@ -49,12 +52,7 @@ static Local *local(Check *c, ForgeStr name) {
     return NULL;
 }
 static void declare(Check *c, ForgeStr name, ForgeType t, bool initialized) {
-    if (c->count == c->capacity) {
-        c->capacity = c->capacity ? c->capacity * 2 : 16;
-        Local *grown = realloc(c->locals, c->capacity * sizeof(*grown));
-        if (!grown) forge_die("out of memory");
-        c->locals = grown;
-    }
+    c->locals = forge_array_reserve(c->locals, c->count, &c->capacity, sizeof(*c->locals), 16);
     c->locals[c->count++] = (Local){name, t, initialized, false};
 }
 static FnDecl *find_fn(FnDecl *fns, size_t count, ForgeStr name) {
@@ -287,6 +285,7 @@ static void block(Check *, Block *);
 enum { FLOW_NEXT=1, FLOW_RETURN=2, FLOW_BREAK=4, FLOW_CONTINUE=8 };
 static unsigned flow_block(Block *, unsigned);
 static bool *snapshot(Check *c) {
+    if (c->count >= SIZE_MAX / sizeof(bool)) forge_die("too many semantic locals");
     bool *state = malloc((c->count + 1) * sizeof(bool));
     if (!state) forge_die("out of memory");
     for (size_t i = 0; i < c->count; ++i) state[i] = c->locals[i].initialized;
@@ -404,6 +403,7 @@ static void statement(Check *c, Stmt *s) {
     case STMT_MATCH: {
         require(forge_type_int(), expression(c, s->as.match_stmt.scrutinee), forge_str("match"), s->as.match_stmt.scrutinee->span);
         size_t n = c->count; bool *before = snapshot(c);
+        if (n >= SIZE_MAX / sizeof(bool)) forge_die("too many semantic locals");
         bool *joined=malloc((n+1)*sizeof(bool));
         if (!joined) forge_die("out of memory");
         for (size_t i=0;i<n;++i) joined[i]=true;

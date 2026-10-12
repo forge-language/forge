@@ -247,6 +247,8 @@ int main(int argc, char **argv) {
     }
     if (same_file(input, output) || same_file(input, header))
         forge_die("output would overwrite input; use a different filename");
+    if (lib_mode && output && header && same_file(output, header))
+        forge_die("library C/archive output and header must use different files");
     if (emit_js) {
         if (lib_mode || cfg.emit_c_only || !output || link_lib_count) forge_die("--emit-js requires -o and cannot be combined with native library options");
         /* Backend capability checks can fail during generation. Complete that

@@ -62,6 +62,18 @@ class DriverTest(unittest.TestCase):
             self.assertIn('overwrite input', result.stderr)
             self.assertEqual(self.source.read_bytes(), original)
 
+    def test_library_output_and_header_alias_cannot_be_overwritten(self):
+        self.source.write_text('library example { export fn value(): int { return 1; } }')
+        output = self.root / 'result.c'
+        output.write_text('existing artifact')
+        alias = self.root / 'result.h'
+        os.link(output, alias)
+        for header in (output, alias):
+            result = self.compile('--lib', '--emit-c', '-o', str(output), '--header', str(header))
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(output.read_text(), 'existing artifact')
+            self.assertEqual(alias.read_text(), 'existing artifact')
+
     def test_installed_layout_resolves_from_path_without_env(self):
         prefix = self.root / 'installed'
         (prefix / 'bin').mkdir(parents=True)

@@ -8,10 +8,15 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#if defined(FORGE_OS_WINDOWS)
+#include <io.h>
+#endif
 
 #ifndef PATH_MAX
 #define PATH_MAX 4096
 #endif
+#define FORGE_MAX_IMPORT_DEPTH 64
 
 typedef struct {
     char **paths;
@@ -23,21 +28,33 @@ typedef struct {
     const ForgeModuleConfig *cfg;
     char entry_dir[PATH_MAX];
     LoadedPaths loaded;
+    size_t import_depth;
 } ModuleResolver;
+
+static void *extend_decls(void *data, size_t count, size_t extra, size_t size);
 
 static char *read_file(const char *path, size_t *out_len) {
     FILE *f = fopen(path, "rb");
     if (!f) return NULL;
-    fseek(f, 0, SEEK_END);
+#if defined(FORGE_OS_WINDOWS)
+    struct _stat info;
+    bool regular = _fstat(_fileno(f), &info) == 0 &&
+        (info.st_mode & _S_IFMT) == _S_IFREG;
+#else
+    struct stat info;
+    bool regular = fstat(fileno(f), &info) == 0 && S_ISREG(info.st_mode);
+#endif
+    if (!regular) { fclose(f); return NULL; }
+    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return NULL; }
     long sz = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    if (sz < 0) {
+    if (sz < 0 || (uintmax_t)sz >= SIZE_MAX || fseek(f, 0, SEEK_SET) != 0) {
         fclose(f);
         return NULL;
     }
     char *buf = (char *)malloc((size_t)sz + 1);
     if (!buf) forge_die("out of memory");
     size_t n = fread(buf, 1, (size_t)sz, f);
+    if (ferror(f)) { free(buf); fclose(f); return NULL; }
     buf[n] = '\0';
     fclose(f);
     *out_len = n;
@@ -76,12 +93,11 @@ static bool path_already_loaded(ModuleResolver *r, const char *path) {
 }
 
 static void mark_loaded(ModuleResolver *r, const char *path) {
-    if (r->loaded.count == r->loaded.cap) {
-        r->loaded.cap = r->loaded.cap ? r->loaded.cap * 2 : 8;
-        r->loaded.paths = (char **)realloc(r->loaded.paths, r->loaded.cap * sizeof(char *));
-        if (!r->loaded.paths) forge_die("out of memory");
-    }
-    r->loaded.paths[r->loaded.count++] = strdup(path);
+    r->loaded.paths = forge_array_reserve(r->loaded.paths, r->loaded.count,
+        &r->loaded.cap, sizeof(*r->loaded.paths), 8);
+    char *copy = strdup(path);
+    if (!copy) forge_die("out of memory");
+    r->loaded.paths[r->loaded.count++] = copy;
 }
 
 static bool try_candidate(const char *path, char *out, size_t cap) {
@@ -142,9 +158,8 @@ static bool import_present(ForgeStr *imports, size_t count, ForgeStr name) {
 
 static void merge_import(Program *prog, ForgeStr name) {
     if (import_present(prog->imports, prog->import_count, name)) return;
-    prog->import_count++;
-    prog->imports = (ForgeStr *)realloc(prog->imports, prog->import_count * sizeof(ForgeStr));
-    prog->imports[prog->import_count - 1] = name;
+    prog->imports = extend_decls(prog->imports, prog->import_count, 1, sizeof(*prog->imports));
+    prog->imports[prog->import_count++] = name;
 }
 
 static FileModule *find_module(Program *prog, ForgeStr name) {
@@ -233,11 +248,11 @@ static void load_parsed_module(ModuleResolver *r, Program *prog, ForgeStr name,
 
     FileModule *fm = find_module(prog, name);
     if (!fm) {
-        prog->module_count++;
-        prog->modules = (FileModule *)realloc(prog->modules, prog->module_count * sizeof(FileModule));
-        fm = &prog->modules[prog->module_count - 1];
+        prog->modules = extend_decls(prog->modules, prog->module_count, 1, sizeof(*prog->modules));
+        fm = &prog->modules[prog->module_count++];
         fm->name = name;
         fm->path = strdup(resolved_path);
+        if (!fm->path) forge_die("out of memory");
         fm->source = src;
         fm->functions = NULL;
         fm->fn_count = 0;
@@ -285,6 +300,8 @@ static void load_module_file(ModuleResolver *r, Program *prog, ForgeStr name, Fo
         exit(1);
     }
     if (path_already_loaded(r, resolved)) return;
+    if (r->import_depth >= FORGE_MAX_IMPORT_DEPTH)
+        forge_die("module import nesting too deep (maximum 64)");
     mark_loaded(r, resolved);
 
     size_t len = 0;
@@ -298,25 +315,23 @@ static void load_module_file(ModuleResolver *r, Program *prog, ForgeStr name, Fo
     lexer_init(&lx, src, len);
     Program mod = parse_program_named(&lx,resolved);
 
+    r->import_depth++;
     load_parsed_module(r, prog, name, resolved, &mod, src);
+    r->import_depth--;
     program_free(&mod);
 }
 
 static ForgeStr *filter_imports(Program *prog, const ForgeModuleConfig *cfg, size_t *out_count) {
-    ForgeStr *kept = NULL;
+    ForgeStr *kept = extend_decls(NULL, 0, prog->import_count, sizeof(*kept));
     size_t kept_count = 0;
     for (size_t i = 0; i < prog->import_count; i++) {
         ForgeStr imp = prog->imports[i];
         if (forge_import_is_stdlib(imp) || is_prebuilt_lib(cfg->lib_dir, imp)) {
-            kept_count++;
-            kept = (ForgeStr *)realloc(kept, kept_count * sizeof(ForgeStr));
-            kept[kept_count - 1] = imp;
+            kept[kept_count++] = imp;
             continue;
         }
         if (find_module(prog, imp)) continue;
-        kept_count++;
-        kept = (ForgeStr *)realloc(kept, kept_count * sizeof(ForgeStr));
-        kept[kept_count - 1] = imp;
+        kept[kept_count++] = imp;
     }
     *out_count = kept_count;
     return kept;

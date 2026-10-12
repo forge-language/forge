@@ -8,6 +8,30 @@ FORGE = pathlib.Path(sys.argv.pop(1)).resolve()
 
 
 class ModuleMergeTest(unittest.TestCase):
+    def test_failed_imported_read_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            (root / 'unreadable.fg').mkdir()
+            source = root / 'main.fg'
+            source.write_text('import "unreadable.fg"; native main {}')
+            result = subprocess.run([str(FORGE), str(source), '--check'],
+                                    capture_output=True, text=True, timeout=20)
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertIn('cannot read module', result.stderr)
+            self.assertNotIn('out of memory', result.stderr)
+
+    def test_deep_import_chain_is_rejected_before_stack_exhaustion(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            for index in range(66):
+                (root / f'm{index}.fg').write_text(f'import m{index+1};' if index < 65 else '')
+            source = root / 'main.fg'
+            source.write_text('import m0; native main {}')
+            result = subprocess.run([str(FORGE), str(source), '--check'],
+                                    capture_output=True, text=True, timeout=20)
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertIn('module import nesting too deep', result.stderr)
+
     def test_many_declarations_and_mixed_forward_functions(self):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)

@@ -37,14 +37,9 @@ static void argv_init(Argv *a) {
 
 static void argv_push_internal(Argv *a, char *s, int owned) {
     if (a->count == a->cap) {
-        size_t new_cap = a->cap ? a->cap * 2 : 32;
-        char **new_items = (char **)realloc(a->items, new_cap * sizeof(char *));
-        unsigned char *new_owned =
-            (unsigned char *)realloc(a->owned, new_cap * sizeof(unsigned char));
-        if (!new_items || !new_owned) forge_die("out of memory");
-        a->items = new_items;
-        a->owned = new_owned;
-        a->cap = new_cap;
+        size_t owned_cap = a->cap;
+        a->items = forge_array_reserve(a->items, a->count, &a->cap, sizeof(*a->items), 32);
+        a->owned = forge_array_reserve(a->owned, a->count, &owned_cap, sizeof(*a->owned), 32);
     }
     a->items[a->count] = s;
     a->owned[a->count] = owned ? 1 : 0;
@@ -87,20 +82,21 @@ static void argv_add_includes(Argv *a, const ForgeDriverConfig *cfg) {
     if (cfg->include_dir) {
         size_t n = strlen(cfg->include_dir) + 3;
         char *inc = (char *)malloc(n);
+        if (!inc) forge_die("out of memory");
         snprintf(inc, n, "-I%s", cfg->include_dir);
         argv_push_owned(a, inc);
     }
     for (size_t i = 0; i < cfg->extra_include_count; i++) {
         size_t n = strlen(cfg->extra_includes[i]) + 3;
         char *inc = (char *)malloc(n);
+        if (!inc) forge_die("out of memory");
         snprintf(inc, n, "-I%s", cfg->extra_includes[i]);
         argv_push_owned(a, inc);
     }
 }
 
 static int exec_argv(Argv *a) {
-    a->items = (char **)realloc(a->items, (a->count + 1) * sizeof(char *));
-    a->items[a->count] = NULL;
+    argv_push(a, NULL);
 #if defined(FORGE_OS_WINDOWS)
     int rc = _spawnvp(_P_WAIT, a->items[0], a->items);
     return rc < 0 ? 1 : rc;
@@ -196,6 +192,7 @@ static int link_object(const char *obj_path, const char *output_path, const Forg
     if (cfg->lib_dir) {
         size_t n = strlen(cfg->lib_dir) + 3;
         char *libdir = (char *)malloc(n);
+        if (!libdir) forge_die("out of memory");
         snprintf(libdir, n, "-L%s", cfg->lib_dir);
         argv_push_owned(&args, libdir);
     }
@@ -209,6 +206,7 @@ static int link_object(const char *obj_path, const char *output_path, const Forg
     for (size_t i = 0; i < cfg->link_lib_count; i++) {
         size_t n = strlen(cfg->link_libs[i]) + 3;
         char *lib = (char *)malloc(n);
+        if (!lib) forge_die("out of memory");
         snprintf(lib, n, "-l%s", cfg->link_libs[i]);
         argv_push_owned(&args, lib);
     }

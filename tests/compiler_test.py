@@ -26,6 +26,17 @@ class CompilerRegressionTests(unittest.TestCase):
         return subprocess.run([config.forge, *map(str, args)], text=True,
                               capture_output=True, timeout=20)
 
+    def test_excessive_statement_nesting_has_controlled_diagnostic(self):
+        # A bounded input exceeds the parser's guard by only a small margin;
+        # exercise both block and else-if recursion without a giant payload.
+        for source in ('native main {' + '{' * 600 + '}' * 600 + '}',
+                       'native main {' + 'if(0){}else ' * 600 + '{} }'):
+            with self.subTest(source_prefix=source[:40]):
+                self.source.write_text(source)
+                result = self.invoke(self.source, '--check')
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn('statement nesting too deep', result.stderr)
+
     def compile_program(self, source):
         self.source.write_text(source)
         binary = Path(self.temp.name) / 'test'
