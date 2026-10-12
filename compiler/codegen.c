@@ -49,6 +49,8 @@ typedef struct {
     bool prove_loop_increments; /* plain native/library functions only */
     size_t loop_scan_left;      /* fail closed when nested scans exhaust it */
     Stmt *safe_increment;       /* one guard-dominated assignment, never ADD globally */
+    ForgeStr safe_view_at_view;
+    ForgeStr safe_view_at_index;
 } Codegen;
 
 static void cg_enter(Codegen *cg) {
@@ -70,6 +72,8 @@ static void cg_begin_function(Codegen *cg) {
     cg->prove_loop_increments = false;
     cg->loop_scan_left = CG_LOOP_SCAN_BUDGET;
     cg->safe_increment = NULL;
+    cg->safe_view_at_view = (ForgeStr){0};
+    cg->safe_view_at_index = (ForgeStr){0};
 }
 
 static uint64_t cg_key_hash(ForgeStr module, ForgeStr name) {
@@ -567,6 +571,20 @@ static void emit_expr_inner(Codegen *cg, Expr *e) {
     case EXPR_CALL: {
         ForgeStr name = e->as.call.name;
         if (emit_thread_call(cg, name, e->as.call.args, e->as.call.arg_count)) break;
+        const char *mapped_name = forge_std_c_name(name, cg->imports, cg->import_count);
+        if (mapped_name && strcmp(mapped_name, "fr_str_view_at") == 0 &&
+            cg->safe_view_at_view.len && e->as.call.arg_count == 2 &&
+            e->as.call.args[0]->kind == EXPR_IDENT &&
+            e->as.call.args[1]->kind == EXPR_IDENT &&
+            forge_str_eq(e->as.call.args[0]->as.ident, cg->safe_view_at_view) &&
+            forge_str_eq(e->as.call.args[1]->as.ident, cg->safe_view_at_index)) {
+            fputs("fr_detail_str_view_at_unchecked(", cg->out);
+            emit_expr(cg, e->as.call.args[0]);
+            fputc(',', cg->out);
+            emit_expr(cg, e->as.call.args[1]);
+            fputc(')', cg->out);
+            break;
+        }
         if (forge_str_eq(name, forge_str("println"))) {
             fputs("({ ", cg->out);
             for (size_t i = 0; i < e->as.call.arg_count; i++) {
@@ -1145,6 +1163,179 @@ static Stmt *prove_loop_increment(Codegen *cg, Expr *condition, Block *body,
     return increment;
 }
 
+static bool cg_view_accessor_call(Codegen *cg, Expr *e, const char *c_name,
+                                  size_t arg_count) {
+    if (!e || e->kind != EXPR_CALL || e->as.call.arg_count != arg_count) return false;
+    const char *mapped = forge_std_c_name(e->as.call.name, cg->imports, cg->import_count);
+    return mapped && strcmp(mapped, c_name) == 0;
+}
+
+static bool cg_view_pure_expr(Codegen *cg, Expr *e, ForgeStr view, ForgeStr index,
+                              bool allow_at, int depth) {
+    if (!e || depth > CG_MAX_DEPTH) return false;
+    switch (e->kind) {
+    case EXPR_INT: case EXPR_FLOAT: case EXPR_BOOL: case EXPR_IDENT:
+        return true;
+    case EXPR_BINARY:
+        return cg_view_pure_expr(cg, e->as.binary.left, view, index, allow_at, depth + 1) &&
+               cg_view_pure_expr(cg, e->as.binary.right, view, index, allow_at, depth + 1);
+    case EXPR_CALL:
+        return allow_at && cg_view_accessor_call(cg, e, "fr_str_view_at", 2) &&
+               e->as.call.args[0]->kind == EXPR_IDENT &&
+               e->as.call.args[1]->kind == EXPR_IDENT &&
+               forge_str_eq(e->as.call.args[0]->as.ident, view) &&
+               forge_str_eq(e->as.call.args[1]->as.ident, index);
+    default:
+        return false;
+    }
+}
+
+static bool cg_view_loop_body_safe(Codegen *cg, Stmt *s, Stmt *increment,
+                                   ForgeStr view, ForgeStr index, ForgeStr bound,
+                                   int depth, bool top_level, bool allow_at) {
+    if (depth > CG_MAX_DEPTH) return false;
+    bool increment_seen = false;
+    for (; s; s = s->next) {
+        if (!cg->loop_scan_left) return false;
+        cg->loop_scan_left--;
+        if (s == increment) {
+            if (!top_level || increment_seen) return false;
+            increment_seen = true;
+            continue;
+        }
+        bool expression_allows_at = allow_at && !increment_seen;
+        switch (s->kind) {
+        case STMT_LET:
+            if (forge_str_eq(s->as.let.name, view) || forge_str_eq(s->as.let.name, index) ||
+                forge_str_eq(s->as.let.name, bound)) return false;
+            if (s->as.let.init && !cg_view_pure_expr(cg, s->as.let.init,
+                    view, index, expression_allows_at, depth + 1)) return false;
+            break;
+        case STMT_ASSIGN:
+            if (forge_str_eq(s->as.assign.name, view) || forge_str_eq(s->as.assign.name, bound) ||
+                (forge_str_eq(s->as.assign.name, index) && s != increment) ||
+                !cg_view_pure_expr(cg, s->as.assign.value, view, index,
+                    expression_allows_at, depth + 1)) return false;
+            break;
+        case STMT_EXPR:
+            if (!cg_view_pure_expr(cg, s->as.expr, view, index,
+                    expression_allows_at, depth + 1)) return false;
+            break;
+        case STMT_IF:
+            if (!cg_view_pure_expr(cg, s->as.if_stmt.cond, view, index,
+                    expression_allows_at, depth + 1) ||
+                !cg_view_loop_body_safe(cg, s->as.if_stmt.then_br->first, increment,
+                    view, index, bound, depth + 1, false, expression_allows_at) ||
+                (s->as.if_stmt.else_br && !cg_view_loop_body_safe(cg,
+                    s->as.if_stmt.else_br->first, increment, view, index, bound,
+                    depth + 1, false, expression_allows_at)))
+                return false;
+            break;
+        case STMT_BLOCK:
+            if (!cg_view_loop_body_safe(cg, s->as.block->first, increment,
+                    view, index, bound, depth + 1, false, expression_allows_at)) return false;
+            break;
+        case STMT_RETURN:
+            if (s->as.ret && !cg_view_pure_expr(cg, s->as.ret, view, index,
+                    expression_allows_at, depth + 1))
+                return false;
+            break;
+        case STMT_BREAK: case STMT_CONTINUE:
+            break;
+        default:
+            /* Calls other than the proven accessor, suspension, nested loops,
+             * and sends can invalidate the borrowed view or change its arena. */
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool cg_view_prefix_stmt_safe(Codegen *cg, Stmt *s, ForgeStr view,
+                                     ForgeStr index, ForgeStr bound) {
+    switch (s->kind) {
+    case STMT_LET:
+        return !forge_str_eq(s->as.let.name, view) &&
+               !forge_str_eq(s->as.let.name, index) &&
+               !forge_str_eq(s->as.let.name, bound) &&
+               (!s->as.let.init || cg_view_pure_expr(cg, s->as.let.init,
+                    view, index, false, 0));
+    case STMT_ASSIGN:
+        return !forge_str_eq(s->as.assign.name, view) &&
+               !forge_str_eq(s->as.assign.name, index) &&
+               !forge_str_eq(s->as.assign.name, bound) &&
+               cg_view_pure_expr(cg, s->as.assign.value, view, index, false, 0);
+    case STMT_EXPR:
+        return cg_view_pure_expr(cg, s->as.expr, view, index, false, 0);
+    default:
+        /* Keep the pre-loop region straight-line; conditional or nested
+         * control flow would need binding-aware alias analysis. */
+        return false;
+    }
+}
+
+static bool prove_view_at_loop(Codegen *cg, Stmt *block_first, Stmt *loop,
+                               Stmt *increment) {
+    if (!cg->prove_loop_increments || cg->state_prefix ||
+        !loop || loop->kind != STMT_WHILE) return false;
+    Expr *condition = loop->as.while_stmt.cond;
+    if (!condition || condition->kind != EXPR_BINARY || condition->as.binary.op != BIN_LT)
+        return false;
+    Expr *left = condition->as.binary.left, *right = condition->as.binary.right;
+    if (left->kind != EXPR_IDENT || right->kind != EXPR_IDENT) return false;
+    ForgeStr index = left->as.ident, bound = right->as.ident, view = {0};
+    if (!cg_is_local(cg, index) || !cg_is_local(cg, bound) ||
+        cg_lookup_local(cg, index).kind != TY_INT || cg_lookup_local(cg, bound).kind != TY_INT)
+        return false;
+    Stmt *index_init = NULL, *bound_init = NULL;
+    for (Stmt *s = block_first; s && s != loop; s = s->next) {
+        if (s->kind != STMT_LET) continue;
+        if (forge_str_eq(s->as.let.name, index)) index_init = s;
+        if (forge_str_eq(s->as.let.name, bound)) bound_init = s;
+    }
+    if (!index_init || !bound_init || index_init == bound_init ||
+        !index_init->as.let.init || index_init->as.let.init->kind != EXPR_INT ||
+        index_init->as.let.init->as.int_val != 0 ||
+        !cg_view_accessor_call(cg, bound_init->as.let.init, "fr_str_view_len", 1) ||
+        bound_init->as.let.init->as.call.args[0]->kind != EXPR_IDENT) return false;
+    view = bound_init->as.let.init->as.call.args[0]->as.ident;
+    if (!cg_is_local(cg, view) || cg_lookup_local(cg, view).kind != TY_INT) return false;
+
+    bool after_bound = false;
+    for (Stmt *s = block_first; s && s != loop; s = s->next) {
+        if (s == bound_init) {
+            after_bound = true;
+            continue;
+        }
+        if (after_bound && s != index_init &&
+            !cg_view_prefix_stmt_safe(cg, s, view, index, bound)) return false;
+    }
+    if (!increment) {
+        for (Stmt *s = loop->as.while_stmt.body->first; s; s = s->next) {
+            if (s->kind == STMT_ASSIGN && forge_str_eq(s->as.assign.name, index)) {
+                if (increment) return false;
+                increment = s;
+            }
+        }
+    }
+    if (!increment || increment->kind != STMT_ASSIGN ||
+        !forge_str_eq(increment->as.assign.name, index)) return false;
+    Expr *step = increment->as.assign.value;
+    if (!step || step->kind != EXPR_BINARY || step->as.binary.op != BIN_ADD) return false;
+    Expr *variable = step->as.binary.left, *one = step->as.binary.right;
+    if (variable->kind == EXPR_INT) { Expr *swap = variable; variable = one; one = swap; }
+    if (variable->kind != EXPR_IDENT || !forge_str_eq(variable->as.ident, index) ||
+        one->kind != EXPR_INT || one->as.int_val != 1 ||
+        !loop_body_preserves(cg, loop->as.while_stmt.body->first, increment,
+            index, bound, 0)) return false;
+    if (!cg_view_loop_body_safe(cg, loop->as.while_stmt.body->first, increment,
+            view, index, bound, 0, true, true)) return false;
+    cg->safe_increment = increment;
+    cg->safe_view_at_view = view;
+    cg->safe_view_at_index = index;
+    return true;
+}
+
 static void emit_assignment_rhs(Codegen *cg, Stmt *s) {
     if (s == cg->safe_increment) {
         Expr *value = s->as.assign.value;
@@ -1396,6 +1587,7 @@ static void emit_append_loop_builder(Codegen *cg, Stmt *loop, ForgeStr text,
 
 static void emit_stmts(Codegen *cg, Stmt *s, const char *proc_var, bool in_coro) {
     cg_enter(cg);
+    Stmt *block_first = s;
     while (s) {
         switch (s->kind) {
         case STMT_LET: {
@@ -1427,8 +1619,13 @@ static void emit_stmts(Codegen *cg, Stmt *s, const char *proc_var, bool in_coro)
             break;
         case STMT_WHILE: {
             Stmt *saved_increment = cg->safe_increment;
+            ForgeStr saved_view_at_view = cg->safe_view_at_view;
+            ForgeStr saved_view_at_index = cg->safe_view_at_index;
             cg->safe_increment = prove_loop_increment(cg, s->as.while_stmt.cond,
                 s->as.while_stmt.body, s->as.while_stmt.body->last);
+            cg->safe_view_at_view = (ForgeStr){0};
+            cg->safe_view_at_index = (ForgeStr){0};
+            prove_view_at_loop(cg, block_first, s, cg->safe_increment);
             cg_line(cg, "while (");
             emit_expr(cg, s->as.while_stmt.cond);
             fputs(") {\n", cg->out);
@@ -1439,6 +1636,8 @@ static void emit_stmts(Codegen *cg, Stmt *s, const char *proc_var, bool in_coro)
             emit_block_stmts(cg, s->as.while_stmt.body->first, proc_var, in_coro);
             cg->continue_label = saved_cont;
             cg->safe_increment = saved_increment;
+            cg->safe_view_at_view = saved_view_at_view;
+            cg->safe_view_at_index = saved_view_at_index;
             cg->indent--;
             cg_indent(cg);
             fputs("}\n", cg->out);

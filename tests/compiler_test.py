@@ -64,6 +64,76 @@ class CompilerRegressionTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout, 'ABC\n')
 
+    def test_view_index_bounds_elided_only_for_guarded_zero_based_loop(self):
+        optimized = '''import strings;
+fn weighted(view:int):int {
+    let n:int=str_view_len(view); let i:int=0; let sum:int=0;
+    while(i<n){sum=sum+str_view_at(view,i);i=i+1;}
+    return sum;
+}
+native main {let view:int=str_view("ABC");println(weighted(view));return 0;}'''
+        self.source.write_text(optimized)
+        generated_c = Path(self.temp.name) / 'optimized.c'
+        result = self.invoke(self.source, '--emit-c', '-o', generated_c)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('fr_detail_str_view_at_unchecked(view,i)', generated_c.read_text())
+        self.run_program(optimized, '198\n')
+
+        non_tail_increment = optimized.replace(
+            'while(i<n){sum=sum+str_view_at(view,i);i=i+1;}',
+            'while(i<n){sum=sum+str_view_at(view,i);i=i+1;sum=sum+1;}')
+        self.source.write_text(non_tail_increment)
+        generated_c = Path(self.temp.name) / 'non-tail-increment.c'
+        result = self.invoke(self.source, '--emit-c', '-o', generated_c)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('fr_detail_str_view_at_unchecked(view,i)', generated_c.read_text())
+        self.run_program(non_tail_increment, '201\n')
+
+        access_after_increment = optimized.replace(
+            'while(i<n){sum=sum+str_view_at(view,i);i=i+1;}',
+            'while(i<n){i=i+1;sum=sum+str_view_at(view,i);}')
+        self.source.write_text(access_after_increment)
+        generated_c = Path(self.temp.name) / 'access-after-increment.c'
+        result = self.invoke(self.source, '--emit-c', '-o', generated_c)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('fr_str_view_at(view,i)', generated_c.read_text())
+        self.assertNotIn('fr_detail_str_view_at_unchecked(view,i)', generated_c.read_text())
+
+        negative_start = '''import strings;
+fn weighted(view:int):int {
+    let n:int=str_view_len(view); let i:int=-1; let sum:int=0;
+    while(i<n){sum=sum+str_view_at(view,i);i=i+1;}
+    return sum;
+}
+native main {let view:int=str_view("ABC");println(weighted(view));return 0;}'''
+        self.source.write_text(negative_start)
+        generated_c = Path(self.temp.name) / 'checked.c'
+        result = self.invoke(self.source, '--emit-c', '-o', generated_c)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('fr_str_view_at(view,i)', generated_c.read_text())
+        self.assertNotIn('fr_detail_str_view_at_unchecked(view,i)', generated_c.read_text())
+        self.run_program(negative_start, '197\n')
+
+        invalidated_before_loop = optimized.replace(
+            'let n:int=str_view_len(view); let i:int=0; let sum:int=0;',
+            'let n:int=str_view_len(view); str_reset_arena(); let i:int=0; let sum:int=0;')
+        self.source.write_text(invalidated_before_loop)
+        generated_c = Path(self.temp.name) / 'invalidated.c'
+        result = self.invoke(self.source, '--emit-c', '-o', generated_c)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('fr_str_view_at(view,i)', generated_c.read_text())
+        self.assertNotIn('fr_detail_str_view_at_unchecked(view,i)', generated_c.read_text())
+
+        invalidated_in_loop = optimized.replace(
+            'while(i<n){sum=sum+str_view_at(view,i);i=i+1;}',
+            'while(i<n){str_reset_arena();sum=sum+str_view_at(view,i);i=i+1;}')
+        self.source.write_text(invalidated_in_loop)
+        generated_c = Path(self.temp.name) / 'invalidated-body.c'
+        result = self.invoke(self.source, '--emit-c', '-o', generated_c)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('fr_str_view_at(view,i)', generated_c.read_text())
+        self.assertNotIn('fr_detail_str_view_at_unchecked(view,i)', generated_c.read_text())
+
     def run_program(self, source, expected):
         binary = self.compile_program(source)
         result = subprocess.run([str(binary)], text=True, capture_output=True, timeout=10)
