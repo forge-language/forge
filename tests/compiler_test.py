@@ -114,6 +114,17 @@ native main {let view:int=str_view("ABC");println(weighted(view));return 0;}'''
         self.assertNotIn('fr_detail_str_view_at_unchecked(view,i)', generated_c.read_text())
         self.run_program(negative_start, '197\n')
 
+        negative_before_bound = optimized.replace(
+            'let n:int=str_view_len(view); let i:int=0; let sum:int=0;',
+            'let i:int=0; i=-1; let n:int=str_view_len(view); let sum:int=0;')
+        self.source.write_text(negative_before_bound)
+        generated_c = Path(self.temp.name) / 'negative-before-bound.c'
+        result = self.invoke(self.source, '--emit-c', '-o', generated_c)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('fr_str_view_at(view,i)', generated_c.read_text())
+        self.assertNotIn('fr_detail_str_view_at_unchecked(view,i)', generated_c.read_text())
+        self.run_program(negative_before_bound, '197\n')
+
         invalidated_before_loop = optimized.replace(
             'let n:int=str_view_len(view); let i:int=0; let sum:int=0;',
             'let n:int=str_view_len(view); str_reset_arena(); let i:int=0; let sum:int=0;')

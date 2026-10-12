@@ -1301,13 +1301,22 @@ static bool prove_view_at_loop(Codegen *cg, Stmt *block_first, Stmt *loop,
     view = bound_init->as.let.init->as.call.args[0]->as.ident;
     if (!cg_is_local(cg, view) || cg_lookup_local(cg, view).kind != TY_INT) return false;
 
-    bool after_bound = false;
+    bool after_bound = false, after_index_init = false;
     for (Stmt *s = block_first; s && s != loop; s = s->next) {
         if (s == bound_init) {
             after_bound = true;
             continue;
         }
-        if (after_bound && s != index_init &&
+        if (s == index_init) {
+            after_index_init = true;
+            continue;
+        }
+        /* The zero initializer must remain the value of index through the
+         * loop. Scan from it even when it precedes the captured length; the
+         * bound initializer itself is the only statement skipped. Also scan
+         * everything after the bound capture, including statements before
+         * index_init, so view/bound invalidation cannot slip through. */
+        if ((after_index_init || after_bound) &&
             !cg_view_prefix_stmt_safe(cg, s, view, index, bound)) return false;
     }
     if (!increment) {
