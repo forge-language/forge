@@ -251,3 +251,13 @@ improved throughput 1.0246x over its default-capacity builder (95% interval
 source-matched alternative control gave 1.0996x [1.0246–1.2158]. This supports
 a modest workload-specific gain but does not establish 110% of Rust.
 [Conditions and samples](https://github.com/forge-language/forge-benchmarks/blob/main/docs/builder-capacity-reservation-2026-10-12.md).
+
+## SDK link-time optimization check
+
+Building both C archives with LTO passed all 10 stdlib CTest cases, but a
+42-pair comparison did not show a throughput gain over the standard SDK. LTO
+versus normal SDK ratios were 0.993x for scan [0.986–1.001], 0.979x for
+builder [0.921–1.031], and 1.003x for immutable append [0.956–1.141]. The
+normal SDK remains the default; the large immutable workload's interval is too
+wide to claim a difference.
+[Conditions and raw samples](https://github.com/forge-language/forge-benchmarks/blob/main/docs/sdk-lto-comparison-2026-10-12.md).
