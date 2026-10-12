@@ -165,3 +165,23 @@ The bounded V2 observer passed 14/14 validation gates and 8/8 observer tests. A 
 A narrowly proven induction-increment codegen candidate was measured against the immediately preceding compiler with identical runtime/stdlib archives and CPU/Rust fixtures. Across 18 position-balanced pairs per CPU/string workload, candidate/baseline throughput medians were 0.9980 (LCG), 1.0043 (primes), 0.9978 (scan), 0.9963 (builder), and 0.9933 (immutable append); the intervals did not establish a reliable improvement, and no Rust/Forge row reached 1.10. The candidate is not reported as a performance win. [Full paired evidence](https://github.com/forge-language/forge-benchmarks/blob/main/docs/compiler-loop-proof-recheck-2026-10-12.md).
 
 A longer prepared-HTTP V2 comparison stopped after seven complete pairs: the Rust prewarm in pair 8 ended with 64 TCP connect timeouts among 991 retained attempts. The shared network namespace's conntrack table was already near its configured maximum before the sample (261,217/262,144) and reached the maximum afterward. Process attribution is unproven; the run is `failed_no_claim`, and successful partial pairs are not aggregated. Earlier V2 capacity results covered 1,024 requests per trial, so they do not erase this longer-run instability. [Failure evidence and limits](https://github.com/forge-language/forge-benchmarks/blob/main/docs/http-v2-primary-2026-10-12.md).
+
+## 2026-10-12 builder metadata store-order experiment
+
+An inline fast-path candidate wrote the appended byte before publishing the new
+builder length, testing whether changing the metadata dependency order improved
+the pre-reserved builder loop. Sixty paired samples each for scan and builder
+found no scan change (candidate/baseline 0.9955, 95% interval 0.9923–1.0056)
+and a possible builder regression (0.9642, 0.9146–0.9999). The candidate was
+discarded. Both Forge rows remained below Rust in this run (0.9416 and 0.8699).
+[Conditions and raw samples](https://github.com/forge-language/forge-benchmarks/blob/main/docs/builder-length-publication-2026-10-12.md).
+
+## 2026-10-12 current CPU suite recheck
+
+Thirty paired samples of the current frozen compiler and SDK against one Rust
+control confirmed 1.012/1.011 throughput for LCG/primes, 0.948/0.968 for
+scan/builder, and 13.557 for the specifically lowered immutable-append case.
+Only that narrow immutable-append workload exceeds 1.10; the four other rows
+remain below target. Every checksum matched the independent reference. This is
+one host and one run, and does not establish language-wide 110% performance.
+[Conditions and raw samples](https://github.com/forge-language/forge-benchmarks/blob/main/docs/cpu-current-2026-10-12.md).
