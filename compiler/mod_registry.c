@@ -41,6 +41,7 @@ static const ForgeStdFn STRING_FNS[] = {
     {"str_view_matches", "fr_str_view_matches"},
     {"str_view_append_byte", "fr_str_view_append_byte"},
     {"str_builder", "fr_str_builder"},
+    {"str_builder_with_capacity", "fr_str_builder_with_capacity"},
     {"str_builder_append", "fr_str_builder_append"},
     {"str_builder_append_view", "fr_str_builder_append_view"},
     {"str_builder_char", "fr_str_builder_char"},
