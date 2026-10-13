@@ -2168,6 +2168,132 @@ static bool emit_mersenne_loop_version(Codegen *cg, Stmt *loop,
     return true;
 }
 
+static bool cg_ident_named(const Expr *e, ForgeStr name) {
+    return e && e->kind == EXPR_IDENT && forge_str_eq(e->as.ident, name);
+}
+
+static bool cg_unit_assignment(const Stmt *s, ForgeStr name) {
+    if (!s || s->kind != STMT_ASSIGN || !forge_str_eq(s->as.assign.name, name)) return false;
+    Expr *e = s->as.assign.value;
+    if (!e || e->kind != EXPR_BINARY || e->as.binary.op != BIN_ADD) return false;
+    Expr *a = e->as.binary.left, *b = e->as.binary.right;
+    if (a->kind == EXPR_INT) { Expr *swap = a; a = b; b = swap; }
+    return cg_ident_named(a, name) && b->kind == EXPR_INT && b->as.int_val == 1;
+}
+
+/* Recognize a complete, pure periodic byte sum by syntax/binding, never by
+ * function name. Only its sum escapes; index/weight state is dead on return. */
+static bool emit_periodic_view_sum(Codegen *cg, FnDecl *fn) {
+    if (!cg->prove_loop_increments || cg->state_prefix || fn->ret_type.kind != TY_INT) return false;
+    for (Param *p = fn->params; p; p = p->next)
+        if (p->type.kind != TY_INT) return false;
+    Stmt *lets[4];
+    Stmt *s = fn->body.first;
+    for (unsigned i = 0; i < 4; i++) {
+        if (!s || s->kind != STMT_LET || s->as.let.type.kind != TY_INT ||
+            !s->as.let.init || cg_is_local(cg, s->as.let.name)) return false;
+        for (unsigned j = 0; j < i; j++)
+            if (forge_str_eq(lets[j]->as.let.name, s->as.let.name)) return false;
+        lets[i] = s; s = s->next;
+    }
+    Stmt *loop = s, *ret = s ? s->next : NULL;
+    if (!loop || loop->kind != STMT_WHILE || !loop->as.while_stmt.body ||
+        !ret || ret->kind != STMT_RETURN || ret->next) return false;
+    ForgeStr n = lets[0]->as.let.name, index = lets[1]->as.let.name;
+    ForgeStr sum = lets[2]->as.let.name, weight = lets[3]->as.let.name;
+    Expr *length = lets[0]->as.let.init;
+    if (!cg_view_accessor_call(cg, length, "fr_str_view_len", 1) ||
+        cg_resolve_fn_ref(cg, length->as.call.name) ||
+        length->as.call.args[0]->kind != EXPR_IDENT) return false;
+    ForgeStr view = length->as.call.args[0]->as.ident;
+    if (!cg_is_local(cg, view) || cg_lookup_local(cg, view).kind != TY_INT ||
+        lets[1]->as.let.init->kind != EXPR_INT || lets[1]->as.let.init->as.int_val != 0 ||
+        lets[2]->as.let.init->kind != EXPR_INT || lets[2]->as.let.init->as.int_val != 0 ||
+        !cg_ident_named(ret->as.ret, sum)) return false;
+    Expr *initial = lets[3]->as.let.init;
+    if (initial->kind != EXPR_BINARY || initial->as.binary.op != BIN_ADD) return false;
+    Expr *mod = initial->as.binary.left, *one = initial->as.binary.right;
+    if (mod->kind == EXPR_INT) { Expr *swap = mod; mod = one; one = swap; }
+    if (one->kind != EXPR_INT || one->as.int_val != 1 || mod->kind != EXPR_BINARY ||
+        mod->as.binary.op != BIN_MOD || mod->as.binary.left->kind != EXPR_IDENT ||
+        mod->as.binary.right->kind != EXPR_INT) return false;
+    ForgeStr offset = mod->as.binary.left->as.ident;
+    int64_t period = mod->as.binary.right->as.int_val;
+    if (period < 1 || period > 32 || !cg_is_local(cg, offset) ||
+        cg_lookup_local(cg, offset).kind != TY_INT) return false;
+    Expr *cond = loop->as.while_stmt.cond;
+    if (!cond || cond->kind != EXPR_BINARY || cond->as.binary.op != BIN_LT ||
+        !cg_ident_named(cond->as.binary.left, index) || !cg_ident_named(cond->as.binary.right, n)) return false;
+    Stmt *add = loop->as.while_stmt.body->first;
+    Stmt *step = add ? add->next : NULL, *advance = step ? step->next : NULL;
+    Stmt *reset = advance ? advance->next : NULL;
+    if (!add || add->kind != STMT_ASSIGN || !forge_str_eq(add->as.assign.name, sum) ||
+        !cg_unit_assignment(step, index) || !cg_unit_assignment(advance, weight) ||
+        !reset || reset->kind != STMT_IF || reset->next || reset->as.if_stmt.else_br) return false;
+    Expr *addition = add->as.assign.value;
+    if (!addition || addition->kind != EXPR_BINARY || addition->as.binary.op != BIN_ADD) return false;
+    Expr *acc = addition->as.binary.left, *product = addition->as.binary.right;
+    if (!cg_ident_named(acc, sum)) { Expr *swap = acc; acc = product; product = swap; }
+    if (!cg_ident_named(acc, sum) || product->kind != EXPR_BINARY || product->as.binary.op != BIN_MUL) return false;
+    Expr *at = product->as.binary.left, *factor = product->as.binary.right;
+    if (cg_ident_named(at, weight)) { Expr *swap = at; at = factor; factor = swap; }
+    if (!cg_ident_named(factor, weight) || !cg_view_accessor_call(cg, at, "fr_str_view_at", 2) ||
+        cg_resolve_fn_ref(cg, at->as.call.name) ||
+        !cg_ident_named(at->as.call.args[0], view) || !cg_ident_named(at->as.call.args[1], index)) return false;
+    Expr *test = reset->as.if_stmt.cond;
+    Stmt *assign = reset->as.if_stmt.then_br ? reset->as.if_stmt.then_br->first : NULL;
+    if (!test || test->kind != EXPR_BINARY || test->as.binary.op != BIN_GT ||
+        !cg_ident_named(test->as.binary.left, weight) || test->as.binary.right->kind != EXPR_INT ||
+        test->as.binary.right->as.int_val != period || !assign || assign->kind != STMT_ASSIGN ||
+        assign->next || !forge_str_eq(assign->as.assign.name, weight) ||
+        !assign->as.assign.value || assign->as.assign.value->kind != EXPR_INT ||
+        assign->as.assign.value->as.int_val != 1) return false;
+
+    /* All syntax walks above are fixed-size. Bound the coefficient array and
+     * the matching work independently of input size. */
+    if (cg->loop_scan_left < 64) return false;
+    cg->loop_scan_left -= 64;
+    char names[8][64];
+    const char *roles[] = {"view", "weight", "data", "count", "index", "sum", "weights", "j"};
+    int id = ++cg->label_seq;
+    bool collision;
+    do {
+        collision = false;
+        for (unsigned i = 0; i < 8; i++) {
+            snprintf(names[i], sizeof(names[i]), "__forge_periodic_%s_%d", roles[i], id);
+            if (cg_is_local(cg, forge_str(names[i])) || cg_resolve_fn_ref(cg, forge_str(names[i]))) collision = true;
+        }
+        id++;
+    } while (collision);
+    cg_line(cg, "{"); cg->indent++;
+    cg_line(cg, "const fr_detail_str_view *%s = (const fr_detail_str_view *)(intptr_t)%.*s;",
+            names[0], (int)view.len, view.data);
+    cg_line(cg, "int64_t %s = %.*s %% INT64_C(%lld) + INT64_C(1);",
+            names[1], (int)offset.len, offset.data, (long long)period);
+    cg_line(cg, "if (%s && %s->data && %s->len <= (uint64_t)INT64_MAX && %s > 0) {",
+            names[0], names[0], names[0], names[1]); cg->indent++;
+    cg_line(cg, "const unsigned char *%s = (const unsigned char *)%s->data;", names[2], names[0]);
+    cg_line(cg, "uint64_t %s = (uint64_t)%s->len, %s = 0, %s = 0;", names[3], names[0], names[4], names[5]);
+    cg_line(cg, "unsigned %s[%lld];", names[6], (long long)period);
+    cg_line(cg, "for (unsigned %s = 0; %s < %lld; %s++) {", names[7], names[7], (long long)period, names[7]);
+    cg->indent++;
+    cg_line(cg, "%s[%s] = (unsigned)%s + %s;", names[6], names[7], names[1], names[7]);
+    cg_line(cg, "if (%s[%s] > %lld) %s[%s] -= %lld;", names[6], names[7], (long long)period,
+            names[6], names[7], (long long)period);
+    cg->indent--; cg_line(cg, "}");
+    cg_line(cg, "while (%s - %s >= %lld) {", names[3], names[4], (long long)period); cg->indent++;
+    cg_line(cg, "for (unsigned %s = 0; %s < %lld; %s++)", names[7], names[7], (long long)period, names[7]);
+    cg_line(cg, "    %s += (uint64_t)(%s[%s + %s] * %s[%s]);", names[5], names[2], names[4], names[7], names[6], names[7]);
+    cg_line(cg, "%s += %lld;", names[4], (long long)period); cg->indent--; cg_line(cg, "}");
+    cg_line(cg, "unsigned %s = 0;", names[7]);
+    cg_line(cg, "while (%s < %s) {", names[4], names[3]); cg->indent++;
+    cg_line(cg, "%s += (uint64_t)(%s[%s] * %s[%s]);", names[5], names[2], names[4], names[6], names[7]);
+    cg_line(cg, "%s++; %s++;", names[4], names[7]); cg->indent--; cg_line(cg, "}");
+    cg_line(cg, "return __forge_i64_bits(%s);", names[5]);
+    cg->indent--; cg_line(cg, "}"); cg->indent--; cg_line(cg, "}");
+    return true;
+}
+
 static void emit_stmts(Codegen *cg, Stmt *s, const char *proc_var, bool in_coro) {
     cg_enter(cg);
     Stmt *block_first = s;
@@ -2715,6 +2841,7 @@ void codegen_emit_library(Program *prog, FILE *out_c, FILE *out_h, const char *r
         cg.prove_loop_increments = true;
         cg_push_params(&cg, fn->params);
         emit_invariant_mod_descriptors(&cg, fn);
+        emit_periodic_view_sum(&cg, fn);
         emit_stmts(&cg, fn->body.first, NULL, false);
         cg.indent = 0;
         fputs("}\n\n", out_c);
@@ -2805,6 +2932,7 @@ void codegen_emit(Program *prog, FILE *out, const char *runtime_include) {
         cg.prove_loop_increments = true;
         cg_push_params(&cg, fn->params);
         emit_invariant_mod_descriptors(&cg, fn);
+        emit_periodic_view_sum(&cg, fn);
         emit_stmts(&cg, fn->body.first, NULL, false);
         cg.indent = 0;
         fputs("}\n\n", out);
@@ -2825,6 +2953,7 @@ void codegen_emit(Program *prog, FILE *out, const char *runtime_include) {
             cg.prove_loop_increments = true;
             cg_push_params(&cg, fn->params);
             emit_invariant_mod_descriptors(&cg, fn);
+            emit_periodic_view_sum(&cg, fn);
             emit_stmts(&cg, fn->body.first, NULL, false);
             cg.indent = 0;
             fputs("}\n\n", out);

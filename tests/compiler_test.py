@@ -435,6 +435,36 @@ native main {println(run(1,3));return 0;}'''
         self.assertIn('if ((\n(i < n)) && v >= 0', generated)
         self.run_program(empty, '0\n')
 
+    def test_periodic_view_sum_matches_by_structure_and_rejects_observers(self):
+        source='''import strings;
+fn rotate_checksum(view:int,offset:int):int {
+ let n:int=str_view_len(view);let i:int=0;let sum:int=0;let weight:int=offset%13+1;
+ while(i<n){sum=sum+str_view_at(view,i)*weight;i=i+1;weight=weight+1;
+ if(weight>13){weight=1;}}return sum;
+}
+native main {println(rotate_checksum(str_view("ABC"),0));return 0;}'''
+        self.assertIn('__forge_periodic_', self.view_append_c(source))
+        self.run_program(source, '398\n')
+        variants={
+            'observer':source.replace('i=i+1;', 'println(sum);i=i+1;'),
+            'live index':source.replace('return sum;', 'return sum+i;'),
+            'live weight':source.replace('return sum;', 'return sum+weight;'),
+            'different view':source.replace('str_view_at(view,i)', 'str_view_at(offset,i)'),
+            'different index':source.replace('str_view_at(view,i)', 'str_view_at(view,i+1)'),
+            'dynamic period':source.replace('offset%13+1', 'offset%n+1'),
+            'large period':source.replace('13', '33'),
+            'different reset':source.replace('weight=1;', 'weight=2;'),
+            'nonunit step':source.replace('i=i+1;', 'i=i+2;'),
+            'callback':source.replace('return sum;', 'println(sum);return sum;'),
+            'alias':source.replace('let i:int=0;', 'let alias:int=view;let i:int=0;'),
+        }
+        for label,candidate in variants.items():
+            with self.subTest(label=label):
+                self.assertNotIn('__forge_periodic_', self.view_append_c(candidate))
+        collision=source.replace('view:int,', '__forge_periodic_view_1:int,view:int,').replace(
+            'rotate_checksum(str_view("ABC"),0)', 'rotate_checksum(0,str_view("ABC"),0)')
+        self.assertNotIn('fr_detail_str_view *__forge_periodic_view_1 =', self.view_append_c(collision))
+
     def test_private_view_append_loop_lowering(self):
         # Runtime dimensions and signed wrapping byte arithmetic mirror the
         # construction shape, without timing or modifying benchmark fixtures.

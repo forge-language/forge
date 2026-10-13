@@ -1,5 +1,6 @@
 """Compare int64 arithmetic to a Python oracle, with UBSan and JavaScript."""
 import argparse
+import json
 from pathlib import Path
 import random
 import subprocess
@@ -125,6 +126,37 @@ native main {'''
                     expected += [str(max(n,0)), str(value)]
         source += 'return 0;}'
         self.execute(source, '\n'.join(expected)+'\n')
+
+    def test_periodic_view_sum_utf8_signed_offsets_and_tails(self):
+        source = 'import strings;'
+        for period in (1,3,13,32):
+            source += f'''fn checksum_{period}(bytes:int,phase:int):int {{
+ let size:int=str_view_len(bytes);let cursor:int=0;let total:int=0;let scale:int=phase%{period}+1;
+ while(cursor<size){{total=total+str_view_at(bytes,cursor)*scale;cursor=cursor+1;
+ scale=1+scale;if(scale>{period}){{scale=1;}}}}return total;
+}}'''
+        source += 'native main {'
+        expected = []
+        for period in (1,3,13,32):
+            texts = [''.join(chr(65+i%26) for i in range(n))
+                     for n in sorted({0,1,period-1,period,period+1,2*period,2*period+1})]
+            texts += ['é漢字€', '한글']
+            for text in texts:
+                for offset in (MIN,-33,-13,-1,0,1,12,31,MAX):
+                    quotient=abs(offset)//period * (-1 if offset<0 else 1)
+                    weight=offset-quotient*period+1;total=0
+                    for byte in text.encode():
+                        total=wrap(total+byte*weight);weight+=1
+                        if weight>period:weight=1
+                    source += f'println(checksum_{period}(str_view({json.dumps(text,ensure_ascii=False)}),{literal(offset)}));str_reset_arena();'
+                    expected.append(str(total))
+            for offset in (MIN,-1,0,MAX):
+                source += f'println(checksum_{period}(0,{literal(offset)}));'
+                expected.append('0')
+        source += 'return 0;}'
+        output='\n'.join(expected)+'\n'
+        self.execute(source, output)
+        self.execute(source, output, js=False, extra_c_flags=('-DFORGE_STRING_NO_INLINE',))
 
     def test_reserved_builder_real_allocation_failure_and_capacity_fallback(self):
         with tempfile.TemporaryDirectory() as directory:
