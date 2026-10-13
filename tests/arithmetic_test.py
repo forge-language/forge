@@ -203,6 +203,8 @@ native main {let m:int=0;while(m<5){test_mode(m);println(make(3));str_reset_aren
         self.execute(source, '\n'.join(expected)+'\n')
         self.execute(source, '\n'.join(expected)+'\n', js=False,
                      extra_c_flags=('-U__SIZEOF_INT128__',))
+        self.execute(source, '\n'.join(expected)+'\n', js=False,
+                     extra_c_flags=('-D__aarch64__',))
 
     def test_invariant_modulus_mutation_shadowing_and_empty_loop(self):
         source = '''
