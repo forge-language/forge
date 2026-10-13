@@ -375,6 +375,38 @@ native main {let view:int=str_view("ABC");println(weighted(view));return 0;}'''
         self.assertEqual(result.returncode, 0, result.stderr)
         return output.read_text()
 
+    def test_reserved_builder_loop_requires_private_pure_construction(self):
+        source = '''import strings;
+fn make(n:int,seed:int):string {
+ let b:int=str_builder_with_capacity(n);if(b==0){return "";}let i:int=0;
+ while(i<n){if(str_builder_char(b,65+(i+seed)%26)==0){return "";}i=i+1;}
+ return str_builder_finish_take(b);
+}
+native main {println(make(3,0));return 0;}'''
+        generated = self.view_append_c(source)
+        self.assertIn('__forge_reserved_builder_', generated)
+        self.assertIn('fr_str_builder_char(', generated)  # checked fallback
+        self.run_program(source, 'ABC\n')
+        cases = {
+            'escaped builder': source.replace('let i:int=0;', 'let alias:int=b;let i:int=0;'),
+            'observer': source.replace('let i:int=0;', 'println(b);let i:int=0;'),
+            'nonzero index': source.replace('let i:int=0;', 'let i:int=1;'),
+            'dynamic divisor': source.replace('(i+seed)%26', '(i+seed)%n'),
+            'NUL': source.replace('65+(i+seed)%26', 'i%26'),
+            'high byte': source.replace('65+(i+seed)%26', '255+(i+seed)%26'),
+            'extra loop call': source.replace('i=i+1;', 'println(i);i=i+1;'),
+            'extra control flow': source.replace('i=i+1;', 'if(i==1){break;}i=i+1;'),
+            'different bound': source.replace('while(i<n)', 'while(i<3)'),
+            'capacity mutation': source.replace('let i:int=0;', 'n=n+1;let i:int=0;'),
+            'builder in byte': source.replace('(i+seed)%26', '(i+b)%26'),
+            'nonunit increment': source.replace('i=i+1;', 'i=i+2;'),
+        }
+        for label, candidate in cases.items():
+            with self.subTest(label=label):
+                self.assertNotIn('__forge_reserved_builder_', self.view_append_c(candidate))
+        collision = source.replace('let b:int=', 'let __forge_reserved_builder_1:int=seed;let b:int=')
+        self.assertNotIn('fr_detail_str_builder *__forge_reserved_builder_1 =', self.view_append_c(collision))
+
     def test_private_view_append_loop_lowering(self):
         # Runtime dimensions and signed wrapping byte arithmetic mirror the
         # construction shape, without timing or modifying benchmark fixtures.

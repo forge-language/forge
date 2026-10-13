@@ -1688,6 +1688,100 @@ static bool cg_is_empty_string_let(const Stmt *s) {
            s->as.let.init && s->as.let.init->kind == EXPR_STRING &&
            s->as.let.init->as.string_val.len == 0;
 }
+
+typedef struct {
+    Stmt *guard, *index, *loop;
+    Expr *byte;
+} CgReservedBuilderLoop;
+
+/* Fresh, unescaped builders only. Resolve every scalar binding and bound the
+ * proof walk; calls, dynamic division and references to the builder fail closed. */
+static bool cg_reserved_scalar(Codegen *cg, Expr *e, ForgeStr builder,
+                               ForgeStr index, unsigned depth) {
+    if (!e || depth > 64 || !cg->loop_scan_left) return false;
+    cg->loop_scan_left--;
+    if (e->kind == EXPR_INT) return true;
+    if (e->kind == EXPR_IDENT)
+        return !forge_str_eq(e->as.ident, builder) &&
+               (forge_str_eq(e->as.ident, index) ||
+                (cg_is_local(cg, e->as.ident) && cg_lookup_local(cg, e->as.ident).kind == TY_INT));
+    if (e->kind != EXPR_BINARY || e->as.binary.op > BIN_MOD) return false;
+    if ((e->as.binary.op == BIN_DIV || e->as.binary.op == BIN_MOD) &&
+        (e->as.binary.right->kind != EXPR_INT || e->as.binary.right->as.int_val <= 0)) return false;
+    return cg_reserved_scalar(cg, e->as.binary.left, builder, index, depth + 1) &&
+           cg_reserved_scalar(cg, e->as.binary.right, builder, index, depth + 1);
+}
+
+static bool cg_zero_test(Expr *e, ForgeStr name) {
+    if (!e || e->kind != EXPR_BINARY || e->as.binary.op != BIN_EQ) return false;
+    Expr *a = e->as.binary.left, *b = e->as.binary.right;
+    if (a->kind == EXPR_INT) { Expr *swap = a; a = b; b = swap; }
+    return a->kind == EXPR_IDENT && forge_str_eq(a->as.ident, name) &&
+           b->kind == EXPR_INT && b->as.int_val == 0;
+}
+
+static bool cg_failure_return(Stmt *s) {
+    Stmt *ret = s && s->kind == STMT_IF && s->as.if_stmt.then_br ?
+                s->as.if_stmt.then_br->first : NULL;
+    return ret && ret->kind == STMT_RETURN && !ret->next && !s->as.if_stmt.else_br &&
+           ret->as.ret && ret->as.ret->kind == EXPR_STRING;
+}
+
+static CgReservedBuilderLoop cg_reserved_builder_loop(Codegen *cg, Stmt *binding) {
+    CgReservedBuilderLoop none = {0}, plan = {0};
+    ForgeStr builder = binding->as.let.name;
+    Expr *ctor = binding->as.let.init;
+    if (!cg->prove_loop_increments || cg->state_prefix || cg_is_local(cg, builder) ||
+        binding->as.let.type.kind != TY_INT ||
+        !cg_view_accessor_call(cg, ctor, "fr_str_builder_with_capacity", 1) ||
+        cg_lookup_fn(cg, ctor->as.call.name)) return none;
+    Expr *capacity = ctor->as.call.args[0];
+    if (capacity->kind != EXPR_IDENT || forge_str_eq(capacity->as.ident, builder) ||
+        !cg_is_local(cg, capacity->as.ident) || cg_lookup_local(cg, capacity->as.ident).kind != TY_INT)
+        return none;
+    Stmt *s = binding->next;
+    if (s && s->kind == STMT_IF) {
+        if (!cg_zero_test(s->as.if_stmt.cond, builder) || !cg_failure_return(s)) return none;
+        plan.guard = s;
+        s = s->next;
+    }
+    if (!s || s->kind != STMT_LET || s->as.let.type.kind != TY_INT ||
+        !s->as.let.init || s->as.let.init->kind != EXPR_INT || s->as.let.init->as.int_val != 0 ||
+        cg_is_local(cg, s->as.let.name) || forge_str_eq(s->as.let.name, builder) ||
+        forge_str_eq(s->as.let.name, capacity->as.ident)) return none;
+    plan.index = s;
+    ForgeStr index = s->as.let.name;
+    Stmt *loop = s->next;
+    if (!loop || loop->kind != STMT_WHILE || !loop->as.while_stmt.body) return none;
+    Expr *cond = loop->as.while_stmt.cond;
+    if (!cond || cond->kind != EXPR_BINARY || cond->as.binary.op != BIN_LT ||
+        cond->as.binary.left->kind != EXPR_IDENT || cond->as.binary.right->kind != EXPR_IDENT ||
+        !forge_str_eq(cond->as.binary.left->as.ident, index) ||
+        !forge_str_eq(cond->as.binary.right->as.ident, capacity->as.ident)) return none;
+    Stmt *append = loop->as.while_stmt.body->first, *step = append ? append->next : NULL;
+    if (!cg_failure_return(append) || !step || step->kind != STMT_ASSIGN || step->next ||
+        !forge_str_eq(step->as.assign.name, index)) return none;
+    Expr *test = append->as.if_stmt.cond;
+    if (!test || test->kind != EXPR_BINARY || test->as.binary.op != BIN_EQ) return none;
+    Expr *call = test->as.binary.left, *zero = test->as.binary.right;
+    if (call->kind == EXPR_INT) { Expr *swap = call; call = zero; zero = swap; }
+    if (zero->kind != EXPR_INT || zero->as.int_val != 0 ||
+        !cg_view_accessor_call(cg, call, "fr_str_builder_char", 2) ||
+        cg_lookup_fn(cg, call->as.call.name) || call->as.call.args[0]->kind != EXPR_IDENT ||
+        !forge_str_eq(call->as.call.args[0]->as.ident, builder)) return none;
+    Expr *increment = step->as.assign.value;
+    if (!increment || increment->kind != EXPR_BINARY || increment->as.binary.op != BIN_ADD) return none;
+    Expr *a = increment->as.binary.left, *b = increment->as.binary.right;
+    if (a->kind == EXPR_INT) { Expr *swap = a; a = b; b = swap; }
+    if (a->kind != EXPR_IDENT || !forge_str_eq(a->as.ident, index) ||
+        b->kind != EXPR_INT || b->as.int_val != 1) return none;
+    CgIntRange range;
+    plan.byte = call->as.call.args[1];
+    if (!cg_reserved_scalar(cg, plan.byte, builder, index, 0) ||
+        !cg_int_range(plan.byte, &range) || range.low < 1 || range.high > 127) return none;
+    plan.loop = loop;
+    return plan;
+}
 static bool cg_append_loop_matches(Codegen *cg, ForgeStr text, Stmt *loop,
                                    const char *append_name) {
     if (!loop || loop->kind != STMT_WHILE || !loop->as.while_stmt.body ||
@@ -1961,6 +2055,54 @@ static void emit_view_append_loop_builder(Codegen *cg, Stmt *loop, ForgeStr view
     cg->safe_increment = saved_increment;
 }
 
+static void emit_reserved_builder_loop(Codegen *cg, CgReservedBuilderLoop plan,
+                                       ForgeStr builder, const char *proc_var) {
+    Stmt *loop = plan.loop, *step = loop->as.while_stmt.body->first->next;
+    ForgeStr index = plan.index->as.let.name;
+    ForgeStr bound = loop->as.while_stmt.cond->as.binary.right->as.ident;
+    char descriptor[64], data[64];
+    int id = ++cg->label_seq;
+    do {
+        snprintf(descriptor, sizeof(descriptor), "__forge_reserved_builder_%d", id);
+        snprintf(data, sizeof(data), "__forge_reserved_data_%d", id++);
+    } while (cg_is_local(cg, forge_str(descriptor)) || cg_is_local(cg, forge_str(data)) ||
+             cg_lookup_fn(cg, forge_str(descriptor)) || cg_lookup_fn(cg, forge_str(data)));
+    Stmt *saved_increment = cg->safe_increment;
+    cg->safe_increment = step;
+    cg_line(cg, "{");
+    cg->indent++;
+    cg_line(cg, "fr_detail_str_builder *%s = (fr_detail_str_builder *)(intptr_t)%.*s;",
+            descriptor, (int)builder.len, builder.data);
+    cg_line(cg, "if (%s && %.*s > 0 && %s->data && %s->len == 0 && %s->cap > (uint64_t)%.*s) {",
+            descriptor, (int)bound.len, bound.data, descriptor, descriptor, descriptor,
+            (int)bound.len, bound.data);
+    cg->indent++;
+    cg_line(cg, "char *%s = %s->data;", data, descriptor);
+    cg_line(cg, "while (%.*s < %.*s) {", (int)index.len, index.data, (int)bound.len, bound.data);
+    cg->indent++;
+    cg_indent(cg);
+    fprintf(cg->out, "%s[%.*s] = (char)(", data, (int)index.len, index.data);
+    emit_expr(cg, plan.byte);
+    fputs(");\n", cg->out);
+    cg_line(cg, "%.*s = %.*s + INT64_C(1);", (int)index.len, index.data, (int)index.len, index.data);
+    cg->indent--;
+    cg_line(cg, "}");
+    cg_line(cg, "%s->len = (size_t)%.*s;", descriptor, (int)bound.len, bound.data);
+    cg->indent--;
+    cg_line(cg, "} else {");
+    cg->indent++;
+    cg_line(cg, "while (%.*s < %.*s) {", (int)index.len, index.data, (int)bound.len, bound.data);
+    cg->indent++;
+    emit_block_stmts(cg, loop->as.while_stmt.body->first, proc_var, false);
+    cg->indent--;
+    cg_line(cg, "}");
+    cg->indent--;
+    cg_line(cg, "}");
+    cg->indent--;
+    cg_line(cg, "}");
+    cg->safe_increment = saved_increment;
+}
+
 static void emit_stmts(Codegen *cg, Stmt *s, const char *proc_var, bool in_coro) {
     cg_enter(cg);
     Stmt *block_first = s;
@@ -1968,11 +2110,17 @@ static void emit_stmts(Codegen *cg, Stmt *s, const char *proc_var, bool in_coro)
         switch (s->kind) {
         case STMT_LET: {
             Stmt *append_loop = NULL;
+            CgReservedBuilderLoop reserved = !in_coro ? cg_reserved_builder_loop(cg, s) : (CgReservedBuilderLoop){0};
             Stmt *view_append_loop = !in_coro ? cg_find_view_append_loop(cg, s) : NULL;
             if (!in_coro && !cg->state_prefix && cg_is_empty_string_let(s))
                 append_loop = cg_find_append_loop(cg, s->next, s->as.let.name);
             emit_local_let(cg, s);
-            if (view_append_loop) {
+            if (reserved.loop) {
+                if (reserved.guard) emit_if_stmt(cg, reserved.guard, proc_var, false);
+                emit_local_let(cg, reserved.index);
+                emit_reserved_builder_loop(cg, reserved, s->as.let.name, proc_var);
+                s = reserved.loop;
+            } else if (view_append_loop) {
                 for (Stmt *pre = s->next; pre != view_append_loop; pre = pre->next)
                     emit_local_let(cg, pre);
                 emit_view_append_loop_builder(cg, view_append_loop, s->as.let.name);

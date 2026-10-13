@@ -77,6 +77,57 @@ class ArithmeticTests(unittest.TestCase):
                     self.assertEqual(result.returncode, 0, result.stderr)
                     self.assertEqual(result.stdout, expected)
 
+    def test_reserved_builder_signed_byte_and_index_oracle(self):
+        source = '''import strings;
+fn make(n:int,seed:int):string {
+ let b:int=str_builder_with_capacity(n);if(b==0){return "";}let i:int=0;
+ while(i<n){if(str_builder_char(b,65+(i+seed)%26)==0){return "";}i=1+i;}
+ println(i);return str_builder_finish_take(b);
+}
+native main {'''
+        expected = []
+        for n in (0, 1, 13, 64):
+            for seed in (MIN, MIN+1, -100, -26, -1, 0, 1, MAX-1, MAX):
+                chars = []
+                for i in range(n):
+                    value = wrap(i+seed)
+                    remainder = (abs(value) % 26) * (-1 if value < 0 else 1)
+                    chars.append(chr(65+remainder))
+                source += f'println(make({n},{literal(seed)}));str_reset_arena();'
+                expected += [str(n), ''.join(chars)]
+        source += 'return 0;}'
+        output = '\n'.join(expected)+'\n'
+        self.execute(source, output)
+        self.execute(source, output, js=False, extra_c_flags=('-DFORGE_STRING_NO_INLINE',))
+
+    def test_reserved_builder_real_allocation_failure_and_capacity_fallback(self):
+        with tempfile.TemporaryDirectory() as directory:
+            header = Path(directory) / 'builder-faults.h'
+            header.write_text('''#define FORGE_STRING_NO_INLINE
+#include "forge/string.h"
+static int64_t mode;
+void test_mode(int64_t value) { mode=value; }
+static int64_t test_capacity(int64_t n) {
+ if (mode==1) return 0;
+ if (mode==2) return fr_str_builder_with_capacity(0);
+ if (mode==3) return fr_str_builder_with_capacity(n-1);
+ int64_t b=fr_str_builder_with_capacity(n+5);
+ if (mode==4 && b) fr_str_builder_char(b,90);
+ return b;
+}
+#define fr_str_builder_with_capacity(n) test_capacity(n)
+''')
+            source = '''import strings;extern fn test_mode(mode:int):void;
+fn make(n:int):string {
+ let b:int=str_builder_with_capacity(n);if(b==0){return "failed";}let i:int=0;
+ while(i<n){if(str_builder_char(b,65+i%26)==0){return "byte-failed";}i=i+1;}
+ println(i);return str_builder_finish_take(b);
+}
+native main {let m:int=0;while(m<5){test_mode(m);println(make(3));str_reset_arena();m=m+1;}
+ return 0;}'''
+            self.execute(source, '3\nABC\nfailed\n3\nABC\n3\nABC\n3\nZABC\n',
+                         js=False, extra_c_flags=('-include', str(header)))
+
     def test_invariant_modulus_full_width_oracle(self):
         rng = random.Random(20261012)
         pairs = [(a, b) for a in (MIN, MIN+1, -26, -1, 0, 1, 2, MAX-1, MAX)
