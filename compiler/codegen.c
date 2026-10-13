@@ -2185,8 +2185,11 @@ static bool cg_unit_assignment(const Stmt *s, ForgeStr name) {
  * function name. Only its sum escapes; index/weight state is dead on return. */
 static bool emit_periodic_view_sum(Codegen *cg, FnDecl *fn) {
     if (!cg->prove_loop_increments || cg->state_prefix || fn->ret_type.kind != TY_INT) return false;
-    for (Param *p = fn->params; p; p = p->next)
+    for (Param *p = fn->params; p; p = p->next) {
+        if (!cg->loop_scan_left) return false;
+        cg->loop_scan_left--;
         if (p->type.kind != TY_INT) return false;
+    }
     Stmt *lets[4];
     Stmt *s = fn->body.first;
     for (unsigned i = 0; i < 4; i++) {
@@ -2257,7 +2260,10 @@ static bool emit_periodic_view_sum(Codegen *cg, FnDecl *fn) {
     const char *roles[] = {"view", "weight", "data", "count", "index", "sum", "weights", "j"};
     int id = ++cg->label_seq;
     bool collision;
+    unsigned attempts = 0;
     do {
+        if (attempts++ == 64 || !cg->loop_scan_left) return false;
+        cg->loop_scan_left--;
         collision = false;
         for (unsigned i = 0; i < 8; i++) {
             snprintf(names[i], sizeof(names[i]), "__forge_periodic_%s_%d", roles[i], id);

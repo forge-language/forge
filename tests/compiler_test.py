@@ -464,6 +464,11 @@ native main {println(rotate_checksum(str_view("ABC"),0));return 0;}'''
         collision=source.replace('view:int,', '__forge_periodic_view_1:int,view:int,').replace(
             'rotate_checksum(str_view("ABC"),0)', 'rotate_checksum(0,str_view("ABC"),0)')
         self.assertNotIn('fr_detail_str_view *__forge_periodic_view_1 =', self.view_append_c(collision))
+        crowded=source.replace('view:int,', ','.join(
+            f'__forge_periodic_view_{i}:int' for i in range(1,65))+',view:int,').replace(
+            'rotate_checksum(str_view("ABC"),0)', 'rotate_checksum('+','.join(['0']*64)+',str_view("ABC"),0)')
+        self.assertNotIn('const fr_detail_str_view *__forge_periodic_', self.view_append_c(crowded))
+        self.run_program(crowded, '398\n')
 
     def test_private_view_append_loop_lowering(self):
         # Runtime dimensions and signed wrapping byte arithmetic mirror the
