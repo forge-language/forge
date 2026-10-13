@@ -26,7 +26,7 @@ def wrap(value):
 
 class ArithmeticTests(unittest.TestCase):
     def execute(self, source, expected='', failure=False, bridge='', js_bridge='', js=True,
-                library_bridge=None, modules=None):
+                library_bridge=None, modules=None, extra_c_flags=(), c_suffix=''):
         with tempfile.TemporaryDirectory() as directory:
             work = Path(directory)
             fg, c, binary = [work / name for name in ('test.fg', 'test.c', 'test')]
@@ -38,6 +38,8 @@ class ArithmeticTests(unittest.TestCase):
                 args += ['--lib', '--header', str(work / 'arithmetic.h')]
             result = subprocess.run(args, capture_output=True, text=True, timeout=20)
             self.assertEqual(result.returncode, 0, result.stderr)
+            if c_suffix:
+                c.write_text(c.read_text() + '\n' + c_suffix)
             extras = []
             if bridge or library_bridge is not None:
                 extra = work / 'bridge.c'
@@ -47,7 +49,7 @@ class ArithmeticTests(unittest.TestCase):
                 with self.subTest(optimization=opt):
                     result = subprocess.run([
                         config.cc, '-std=gnu11', opt, '-g', '-fsanitize=undefined',
-                        '-fno-sanitize-recover=all', '-Werror',
+                        '-fno-sanitize-recover=all', '-Werror', *extra_c_flags,
                         '-I', str(Path(config.root) / 'include'), str(c), *extras,
                         '-L', config.lib_dir, '-lforge_std', '-lforge_runtime',
                         '-lpthread', '-lm', '-o', str(binary)
@@ -74,6 +76,92 @@ class ArithmeticTests(unittest.TestCase):
                 else:
                     self.assertEqual(result.returncode, 0, result.stderr)
                     self.assertEqual(result.stdout, expected)
+
+    def test_invariant_modulus_full_width_oracle(self):
+        rng = random.Random(20261012)
+        pairs = [(a, b) for a in (MIN, MIN+1, -26, -1, 0, 1, 2, MAX-1, MAX)
+                 for b in (MIN, -26, -1, 1, 2, 3, 26, 1373653, MAX)]
+        pairs = [(a, b) for a, b in pairs if (a, b) != (MIN, -1)]
+        pairs += [(rng.randrange(MIN, MAX+1), rng.randrange(2, MAX+1)) for _ in range(64)]
+        source = ('fn repeated(a:int,m:int):int {let i:int=0;let sum:int=0;'
+                  'while(i<3){sum=sum+a%m;i=i+1;}return sum;} native main {')
+        expected = []
+        for a, b in pairs:
+            quotient = abs(a)//abs(b) * (-1 if (a<0)!=(b<0) else 1)
+            expected.append(str(wrap(3*(a-quotient*b))))
+            source += f'println(repeated({literal(a)},{literal(b)}));'
+        source += 'return 0;}'
+        self.execute(source, '\n'.join(expected)+'\n')
+        self.execute(source, '\n'.join(expected)+'\n', js=False,
+                     extra_c_flags=('-U__SIZEOF_INT128__',))
+
+    def test_invariant_modulus_mutation_shadowing_and_empty_loop(self):
+        source = '''
+fn before(a:int,m:int):int {m=m+1;let i:int=0;let s:int=0;
+ while(i<2){s=s+a%m;i=i+1;}return s;}
+fn during(a:int,m:int):int {let i:int=0;let s:int=0;
+ while(i<2){m=m+2;s=s+a%m;i=i+1;}return s;}
+fn after(a:int,m:int):int {let i:int=0;let s:int=0;
+ while(i<2){s=s+a%m;i=i+1;}m=m+1;return s+a%m;}
+fn shadow(a:int,m:int):int {let i:int=0;let s:int=0;
+ while(i<2){let m:int=5;s=s+a%m;i=i+1;}return s;}
+fn loop_shadow(a:int,m:int):int {let s:int=0;
+ for(let m:int=5;m<8;m=m+1){s=s+a%m;}return s;}
+fn empty(a:int,m:int,n:int):int {let i:int=0;let s:int=0;
+ while(i<n){s=s+a%m;i=i+1;}return s;}
+fn collision(a:int,m:int):int {let __forge_invariant_mod_0:int=11;
+ let i:int=0;let s:int=0;while(i<2){s=s+a%m;i=i+1;}
+ return s+__forge_invariant_mod_0;}
+native main {println(before(17,3));println(during(17,3));println(after(17,3));
+ println(shadow(29,7));println(loop_shadow(29,7));println(empty(1,0,0));
+ println(empty((-9223372036854775807-1),-1,0));println(collision(17,3));return 0;}
+'''
+        self.execute(source, '2\n5\n5\n8\n10\n0\n0\n15\n')
+
+    def test_invariant_modulus_checked_traps(self):
+        for value, divisor in [(1, 0), (MIN, -1)]:
+            with self.subTest(value=value, divisor=divisor):
+                self.execute('fn trapped(a:int,m:int):int {let i:int=0;let s:int=0;'
+                             'while(i<1){s=a%m;i=i+1;}return s;}native main {'
+                             f'println(trapped({literal(value)},{divisor}));return 0;}}',
+                             failure=True)
+
+    def test_invariant_modulus_generated_helper_random_oracle(self):
+        # Exercise the actual emitted helper, including both signed fallback
+        # and the positive full-width reciprocal path, under UBSan.
+        suffix = r'''
+#undef main
+int main(void) {
+    uint64_t state = UINT64_C(20261012);
+    for (unsigned i = 0; i < 100000; ++i) {
+        state ^= state << 13; state ^= state >> 7; state ^= state << 17;
+        int64_t n; memcpy(&n, &state, sizeof(n));
+        state ^= state << 13; state ^= state >> 7; state ^= state << 17;
+        int64_t d = (int64_t)(state & INT64_MAX);
+        if (d < 2) d = 2;
+        if (i % 3 == 0) d = d % 2000000 + 2;
+        if (i % 5 == 0) d = -d;
+        int64_t result = __forge_mod_invariant(n, __forge_mod_prepare(d));
+        if (result != n % d) return 2;
+    }
+    puts("100000 emitted-helper oracle cases passed");
+    return 0;
+}
+'''
+        self.execute('fn repeated(a:int,m:int):int {let i:int=0;let s:int=0;'
+                     'while(i<3){s=s+a%m;i=i+1;}return s;}native main{return 0;}',
+                     '100000 emitted-helper oracle cases passed\n', js=False,
+                     extra_c_flags=('-Dmain=forge_unused_main',), c_suffix=suffix)
+
+    def test_invariant_modulus_single_evaluation(self):
+        self.execute('extern fn tick():int;extern fn ticks():int;'
+                     'fn repeated(m:int):int {let i:int=0;let s:int=0;'
+                     'while(i<4){s=s+tick()%m;i=i+1;}return s;}'
+                     'native main{println(repeated(3));println(ticks());return 0;}',
+                     '4\n4\n',
+                     bridge='#include <stdint.h>\nstatic int64_t count;\n'
+                            'int64_t tick(void){return ++count;}\nint64_t ticks(void){return count;}\n',
+                     js_bridge='let tickCount=0n;globalThis.ForgeNative={tick:()=>++tickCount,ticks:()=>tickCount};')
 
     def test_modular_constants_and_dynamic_oracle(self):
         rng = random.Random(20261009)

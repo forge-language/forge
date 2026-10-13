@@ -51,6 +51,8 @@ typedef struct {
     Stmt *safe_increment;       /* one guard-dominated assignment, never ADD globally */
     ForgeStr safe_view_at_view;
     ForgeStr safe_view_at_index;
+    struct { ForgeStr parameter; char name[64]; } invariant_mods[8];
+    size_t invariant_mod_count;
 } Codegen;
 
 /* Match x*C[+K] % (2^k-1) with a local integer x and positive constants.
@@ -81,6 +83,7 @@ static void cg_begin_function(Codegen *cg) {
     cg->safe_increment = NULL;
     cg->safe_view_at_view = (ForgeStr){0};
     cg->safe_view_at_index = (ForgeStr){0};
+    cg->invariant_mod_count = 0;
 }
 
 static uint64_t cg_key_hash(ForgeStr module, ForgeStr name) {
@@ -584,6 +587,21 @@ static void emit_expr_inner(Codegen *cg, Expr *e) {
                         (long long)mersenne_multiplier, (long long)mersenne_modulus,
                         mersenne_shift);
             break;
+        }
+        if (e->as.binary.op == BIN_MOD &&
+            e->as.binary.right->kind == EXPR_IDENT &&
+            cg_expr_known_int(cg, e->as.binary.left)) {
+            bool emitted = false;
+            for (size_t i = 0; i < cg->invariant_mod_count; i++) {
+                if (!forge_str_eq(e->as.binary.right->as.ident,
+                                  cg->invariant_mods[i].parameter)) continue;
+                fputs("__forge_mod_invariant(", cg->out);
+                emit_expr(cg, e->as.binary.left);
+                fprintf(cg->out, ", %s)", cg->invariant_mods[i].name);
+                emitted = true;
+                break;
+            }
+            if (emitted) break;
         }
         const char *op = "?";
         switch (e->as.binary.op) {
@@ -1154,6 +1172,152 @@ static bool for_step_inlinable(Stmt *step) {
         if (s->kind != STMT_ASSIGN && s->kind != STMT_EXPR) return false;
     }
     return true;
+}
+
+typedef struct {
+    ForgeStr name;
+    size_t *budget;
+    bool rejected, name_seen, repeated_mod;
+} InvariantModScan;
+
+static bool invariant_mod_visit(InvariantModScan *scan, int depth) {
+    if (depth > CG_MAX_DEPTH || !*scan->budget) {
+        scan->rejected = true;
+        return false;
+    }
+    --*scan->budget;
+    return true;
+}
+
+static void invariant_mod_expr(InvariantModScan *scan, Expr *e, bool repeated, int depth) {
+    if (!e || scan->rejected || !invariant_mod_visit(scan, depth)) return;
+    switch (e->kind) {
+    case EXPR_IDENT:
+        if (forge_str_eq(e->as.ident, scan->name)) scan->name_seen = true;
+        break;
+    case EXPR_BINARY:
+        if (repeated && e->as.binary.op == BIN_MOD &&
+            e->as.binary.right->kind == EXPR_IDENT &&
+            forge_str_eq(e->as.binary.right->as.ident, scan->name))
+            scan->repeated_mod = true;
+        invariant_mod_expr(scan, e->as.binary.left, repeated, depth + 1);
+        invariant_mod_expr(scan, e->as.binary.right, repeated, depth + 1);
+        break;
+    case EXPR_CALL:
+    case EXPR_QUAL_CALL: {
+        bool qualified = e->kind == EXPR_QUAL_CALL;
+        ForgeStr name = qualified ? e->as.qual_call.name : e->as.call.name;
+        Expr **args = qualified ? e->as.qual_call.args : e->as.call.args;
+        size_t count = qualified ? e->as.qual_call.arg_count : e->as.call.arg_count;
+        if (forge_str_eq(name, scan->name)) scan->name_seen = true;
+        for (size_t i = 0; i < count && !scan->rejected; i++)
+            invariant_mod_expr(scan, args[i], repeated, depth + 1);
+        break;
+    }
+    case EXPR_INDEX:
+        invariant_mod_expr(scan, e->as.index.base, repeated, depth + 1);
+        invariant_mod_expr(scan, e->as.index.index, repeated, depth + 1);
+        break;
+    case EXPR_FIELD:
+        invariant_mod_expr(scan, e->as.field.base, repeated, depth + 1);
+        break;
+    case EXPR_MOVE:
+    case EXPR_RECV:
+        /* Moves can mutate named storage; coroutine/receive paths have a
+         * separate lifetime model. Fail closed for this function. */
+        scan->rejected = true;
+        break;
+    default: break;
+    }
+}
+
+static void invariant_mod_stmts(InvariantModScan *scan, Stmt *s, bool repeated, int depth) {
+    for (; s && !scan->rejected; s = s->next) {
+        if (!invariant_mod_visit(scan, depth)) return;
+        switch (s->kind) {
+        case STMT_LET:
+            if (forge_str_eq(s->as.let.name, scan->name)) scan->rejected = true;
+            invariant_mod_expr(scan, s->as.let.init, repeated, depth + 1);
+            break;
+        case STMT_ASSIGN:
+            if (forge_str_eq(s->as.assign.name, scan->name)) scan->rejected = true;
+            invariant_mod_expr(scan, s->as.assign.value, repeated, depth + 1);
+            break;
+        case STMT_EXPR: invariant_mod_expr(scan, s->as.expr, repeated, depth + 1); break;
+        case STMT_RETURN: invariant_mod_expr(scan, s->as.ret, repeated, depth + 1); break;
+        case STMT_IF:
+            invariant_mod_expr(scan, s->as.if_stmt.cond, repeated, depth + 1);
+            invariant_mod_stmts(scan, s->as.if_stmt.then_br->first, repeated, depth + 1);
+            if (s->as.if_stmt.else_br)
+                invariant_mod_stmts(scan, s->as.if_stmt.else_br->first, repeated, depth + 1);
+            break;
+        case STMT_WHILE:
+            invariant_mod_expr(scan, s->as.while_stmt.cond, true, depth + 1);
+            invariant_mod_stmts(scan, s->as.while_stmt.body->first, true, depth + 1);
+            break;
+        case STMT_FOR:
+            invariant_mod_stmts(scan, s->as.for_stmt.init, repeated, depth + 1);
+            invariant_mod_expr(scan, s->as.for_stmt.cond, true, depth + 1);
+            invariant_mod_stmts(scan, s->as.for_stmt.body->first, true, depth + 1);
+            invariant_mod_stmts(scan, s->as.for_stmt.step, true, depth + 1);
+            break;
+        case STMT_BLOCK:
+            invariant_mod_stmts(scan, s->as.block->first, repeated, depth + 1);
+            break;
+        case STMT_MATCH:
+            invariant_mod_expr(scan, s->as.match_stmt.scrutinee, repeated, depth + 1);
+            for (MatchArm *arm = s->as.match_stmt.arms; arm && !scan->rejected; arm = arm->next) {
+                if (!invariant_mod_visit(scan, depth)) return;
+                invariant_mod_stmts(scan, arm->body->first, repeated, depth + 1);
+            }
+            break;
+        case STMT_SPAWN:
+            for (size_t i = 0; i < s->as.spawn.arg_count && !scan->rejected; i++)
+                invariant_mod_expr(scan, s->as.spawn.args[i], repeated, depth + 1);
+            break;
+        case STMT_SEND:
+            if (s->as.send.move_) scan->rejected = true;
+            invariant_mod_expr(scan, s->as.send.target, repeated, depth + 1);
+            invariant_mod_expr(scan, s->as.send.value, repeated, depth + 1);
+            break;
+        case STMT_YIELD:
+        case STMT_AWAIT: scan->rejected = true; break;
+        case STMT_BREAK:
+        case STMT_CONTINUE: break;
+        default: scan->rejected = true; break;
+        }
+    }
+}
+
+/* Only immutable integer parameters with loop-repeated remainder qualify.
+ * Checking the whole function rejects writes before/after the loop and any
+ * shadow binding. Primitive native parameters are otherwise passed by value.
+ * This budget is independent of the existing loop-bound proof budget. */
+static void emit_invariant_mod_descriptors(Codegen *cg, FnDecl *fn) {
+    size_t budget = CG_LOOP_SCAN_BUDGET;
+    unsigned name_id = 0;
+    for (Param *p = fn->params; p && budget; p = p->next) {
+        if (p->type.kind != TY_INT || cg->invariant_mod_count == 8) continue;
+        InvariantModScan scan = { .name = p->name, .budget = &budget };
+        invariant_mod_stmts(&scan, fn->body.first, false, 0);
+        if (scan.rejected || !scan.repeated_mod) continue;
+        char name[64];
+        bool available = false;
+        while (budget && !available) {
+            snprintf(name, sizeof(name), "__forge_invariant_mod_%u", name_id++);
+            ForgeStr candidate = forge_str(name);
+            if (cg_is_local(cg, candidate) || cg_lookup_fn(cg, candidate)) continue;
+            InvariantModScan collision = { .name = candidate, .budget = &budget };
+            invariant_mod_stmts(&collision, fn->body.first, false, 0);
+            available = !collision.rejected && !collision.name_seen;
+        }
+        if (!available) continue;
+        size_t index = cg->invariant_mod_count++;
+        cg->invariant_mods[index].parameter = p->name;
+        memcpy(cg->invariant_mods[index].name, name, strlen(name) + 1);
+        cg_line(cg, "const __forge_mod_descriptor %s = __forge_mod_prepare(%.*s);",
+                name, (int)p->name.len, p->name.data);
+    }
 }
 
 /* Expressions cannot assign primitive locals, and native scalar arguments are
@@ -2172,6 +2336,28 @@ static void emit_arithmetic_helpers(FILE *out) {
           "    }\n"
           "    return __forge_mod_i64(__forge_add_i64(__forge_mul_i64(value, multiplier), addend), modulus);\n"
           "}\n\n", out);
+    fputs("typedef struct { int64_t divisor; uint64_t reciprocal; } __forge_mod_descriptor;\n"
+          "static inline __forge_mod_descriptor __forge_mod_prepare(int64_t divisor) {\n"
+          "    __forge_mod_descriptor result = {divisor, 0};\n"
+          "#if defined(__SIZEOF_INT128__)\n"
+          "    if (divisor > 1) result.reciprocal = UINT64_MAX / (uint64_t)divisor + UINT64_C(1);\n"
+          "#endif\n"
+          "    return result;\n"
+          "}\n"
+          "static inline int64_t __forge_mod_invariant(int64_t value, __forge_mod_descriptor descriptor) {\n"
+          "#if defined(__SIZEOF_INT128__)\n"
+          "    if (value >= 0 && descriptor.divisor > 1) {\n"
+          "        uint64_t n = (uint64_t)value, d = (uint64_t)descriptor.divisor;\n"
+          "        uint64_t q = (uint64_t)(((unsigned __int128)n * descriptor.reciprocal) >> 64);\n"
+          "        /* ceil(2^64/d) gives the exact quotient or one larger.\n"
+          "         * q*d <= n+d <= 2^64-2, so the product cannot wrap. */\n"
+          "        uint64_t product = q * d;\n"
+          "        if (product > n) product -= d;\n"
+          "        return (int64_t)(n - product);\n"
+          "    }\n"
+          "#endif\n"
+          "    return __forge_mod_i64(value, descriptor.divisor);\n"
+          "}\n\n", out);
     const char *names[] = { "ADD", "SUB", "MUL", "DIV" };
     const char *lower[] = { "add", "sub", "mul", "div" };
     const char *ops[] = { "+", "-", "*", "/" };
@@ -2309,6 +2495,7 @@ void codegen_emit_library(Program *prog, FILE *out_c, FILE *out_h, const char *r
         cg_begin_function(&cg);
         cg.prove_loop_increments = true;
         cg_push_params(&cg, fn->params);
+        emit_invariant_mod_descriptors(&cg, fn);
         emit_stmts(&cg, fn->body.first, NULL, false);
         cg.indent = 0;
         fputs("}\n\n", out_c);
@@ -2398,6 +2585,7 @@ void codegen_emit(Program *prog, FILE *out, const char *runtime_include) {
         cg.current_module = forge_str("");
         cg.prove_loop_increments = true;
         cg_push_params(&cg, fn->params);
+        emit_invariant_mod_descriptors(&cg, fn);
         emit_stmts(&cg, fn->body.first, NULL, false);
         cg.indent = 0;
         fputs("}\n\n", out);
@@ -2417,6 +2605,7 @@ void codegen_emit(Program *prog, FILE *out, const char *runtime_include) {
             cg.current_module = mod->name;
             cg.prove_loop_increments = true;
             cg_push_params(&cg, fn->params);
+            emit_invariant_mod_descriptors(&cg, fn);
             emit_stmts(&cg, fn->body.first, NULL, false);
             cg.indent = 0;
             fputs("}\n\n", out);
