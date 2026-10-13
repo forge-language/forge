@@ -18,7 +18,9 @@
 #define FORGE_HAVE_UNISTD 1
 #else
 #include <process.h>
+#ifndef PATH_MAX
 #define PATH_MAX MAX_PATH
+#endif
 #endif
 
 typedef struct {
@@ -75,6 +77,8 @@ static void argv_add_opt(Argv *a, int opt_level) {
 static void argv_add_lto(Argv *a) {
 #if !defined(FORGE_OS_WINDOWS)
     argv_push_owned(a, strdup("-flto"));
+#else
+    (void)a;
 #endif
 }
 
@@ -98,7 +102,13 @@ static void argv_add_includes(Argv *a, const ForgeDriverConfig *cfg) {
 static int exec_argv(Argv *a) {
     argv_push(a, NULL);
 #if defined(FORGE_OS_WINDOWS)
-    int rc = _spawnvp(_P_WAIT, a->items[0], a->items);
+    /* Adding const through char ** is not a valid C pointer conversion.
+     * Build a read-only argument vector; the Argv still owns the strings. */
+    const char **args = malloc(a->count * sizeof(*args));
+    if (!args) forge_die("out of memory");
+    for (size_t i = 0; i < a->count; ++i) args[i] = a->items[i];
+    int rc = (int)_spawnvp(_P_WAIT, a->items[0], args);
+    free(args);
     return rc < 0 ? 1 : rc;
 #else
     pid_t pid = fork();
