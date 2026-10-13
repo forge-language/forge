@@ -422,6 +422,7 @@ native main {println(run(1,3));return 0;}'''
             'non-Mersenne': source.replace('2147483647', '2147483646'),
             'nonunit step': source.replace('i=i+1;', 'i=i+2;'),
             'dynamic coefficient': source.replace('(v*48271)', '(v*seed)'),
+            'call in condition': source.replace('fn run', 'fn tick(n:int):int{println(n);return n;}fn run').replace('i<n', 'i<tick(n)'),
         }
         for label, candidate in cases.items():
             with self.subTest(label=label):
