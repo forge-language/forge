@@ -100,6 +100,32 @@ native main {'''
         self.execute(source, output)
         self.execute(source, output, js=False, extra_c_flags=('-DFORGE_STRING_NO_INLINE',))
 
+    def test_mersenne_loop_version_full_width_and_affine_oracles(self):
+        source = '''fn recurrence(seed:int,n:int):int {
+ let value:int=seed;let i:int=0;
+ while(i<n){value=(value*48271)%2147483647;i=1+i;}
+ println(i);return value;
+}
+fn affine(seed:int,n:int):int {
+ let value:int=seed;let i:int=0;
+ while(i<n){value=(value*7+3)%31;i=i+1;}
+ println(i);return value;
+}
+native main {'''
+        expected = []
+        for name, multiplier, addend, modulus in (('recurrence',48271,0,2147483647),('affine',7,3,31)):
+            for n in (-1,0,1,17):
+                for seed in (MIN, MIN+1,-2147483647,-1,0,1,30,31,2147483646,2147483647,MAX):
+                    value = seed
+                    for _ in range(max(n,0)):
+                        value = wrap(wrap(value*multiplier)+addend)
+                        quotient = abs(value)//modulus * (-1 if value<0 else 1)
+                        value -= quotient*modulus
+                    source += f'println({name}({literal(seed)},{n}));'
+                    expected += [str(max(n,0)), str(value)]
+        source += 'return 0;}'
+        self.execute(source, '\n'.join(expected)+'\n')
+
     def test_reserved_builder_real_allocation_failure_and_capacity_fallback(self):
         with tempfile.TemporaryDirectory() as directory:
             header = Path(directory) / 'builder-faults.h'

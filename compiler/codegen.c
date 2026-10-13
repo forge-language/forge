@@ -2103,6 +2103,71 @@ static void emit_reserved_builder_loop(Codegen *cg, CgReservedBuilderLoop plan,
     cg->safe_increment = saved_increment;
 }
 
+/* A pure two-assignment recurrence closes the nonnegative Mersenne range.
+ * Version the whole loop instead of testing that range for every update. */
+static bool emit_mersenne_loop_version(Codegen *cg, Stmt *loop,
+                                       const char *proc_var) {
+    if (!cg->prove_loop_increments || cg->state_prefix || !cg->safe_increment) return false;
+    Stmt *update = loop->as.while_stmt.body->first;
+    Stmt *step = update ? update->next : NULL;
+    if (!update || update->kind != STMT_ASSIGN || !step || step->next ||
+        step != cg->safe_increment) return false;
+    Expr *value = NULL;
+    int64_t multiplier, modulus, addend;
+    unsigned shift;
+    if (!cg_mersenne_modmul(cg, update->as.assign.value, &value,
+                            &multiplier, &modulus, &addend, &shift) ||
+        !forge_str_eq(update->as.assign.name, value->as.ident) ||
+        forge_str_eq(update->as.assign.name, step->as.assign.name) ||
+        (uint64_t)(modulus - 1) > ((uint64_t)INT64_MAX - (uint64_t)addend) / (uint64_t)multiplier)
+        return false;
+    char product[64], folded[64];
+    int id = ++cg->label_seq;
+    do {
+        snprintf(product, sizeof(product), "__forge_mersenne_product_%d", id);
+        snprintf(folded, sizeof(folded), "__forge_mersenne_folded_%d", id++);
+    } while (cg_is_local(cg, forge_str(product)) || cg_is_local(cg, forge_str(folded)) ||
+             cg_lookup_fn(cg, forge_str(product)) || cg_lookup_fn(cg, forge_str(folded)));
+    ForgeStr name = value->as.ident;
+    cg_line(cg, "if ((");
+    emit_expr(cg, loop->as.while_stmt.cond);
+    fprintf(cg->out, ") && %.*s >= 0 && %.*s < INT64_C(%lld)) {\n",
+            (int)name.len, name.data, (int)name.len, name.data, (long long)modulus);
+    cg->indent++;
+    cg_line(cg, "while (");
+    emit_expr(cg, loop->as.while_stmt.cond);
+    fputs(") {\n", cg->out);
+    cg->indent++;
+    cg_line(cg, "uint64_t %s = (uint64_t)%.*s * UINT64_C(%lld);",
+            product, (int)name.len, name.data, (long long)multiplier);
+    if (addend)
+        cg_line(cg, "%s += UINT64_C(%lld);", product, (long long)addend);
+    cg_line(cg, "uint64_t %s = (%s >> %u) + (%s & UINT64_C(%lld));",
+            folded, product, shift, product, (long long)modulus);
+    cg_line(cg, "if (%s >= UINT64_C(%lld)) %s -= UINT64_C(%lld);",
+            folded, (long long)modulus, folded, (long long)modulus);
+    cg_line(cg, "%.*s = (int64_t)%s;", (int)name.len, name.data, folded);
+    cg_indent(cg);
+    fprintf(cg->out, "%.*s = ", (int)step->as.assign.name.len, step->as.assign.name.data);
+    emit_assignment_rhs(cg, step);
+    fputs(";\n", cg->out);
+    cg->indent--;
+    cg_line(cg, "}");
+    cg->indent--;
+    cg_line(cg, "} else {");
+    cg->indent++;
+    cg_line(cg, "while (");
+    emit_expr(cg, loop->as.while_stmt.cond);
+    fputs(") {\n", cg->out);
+    cg->indent++;
+    emit_block_stmts(cg, loop->as.while_stmt.body->first, proc_var, false);
+    cg->indent--;
+    cg_line(cg, "}");
+    cg->indent--;
+    cg_line(cg, "}");
+    return true;
+}
+
 static void emit_stmts(Codegen *cg, Stmt *s, const char *proc_var, bool in_coro) {
     cg_enter(cg);
     Stmt *block_first = s;
@@ -2156,6 +2221,12 @@ static void emit_stmts(Codegen *cg, Stmt *s, const char *proc_var, bool in_coro)
             cg->safe_view_at_view = (ForgeStr){0};
             cg->safe_view_at_index = (ForgeStr){0};
             prove_view_at_loop(cg, block_first, s, cg->safe_increment);
+            if (!in_coro && emit_mersenne_loop_version(cg, s, proc_var)) {
+                cg->safe_increment = saved_increment;
+                cg->safe_view_at_view = saved_view_at_view;
+                cg->safe_view_at_index = saved_view_at_index;
+                break;
+            }
             cg_line(cg, "while (");
             emit_expr(cg, s->as.while_stmt.cond);
             fputs(") {\n", cg->out);

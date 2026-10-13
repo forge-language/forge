@@ -407,6 +407,33 @@ native main {println(make(3,0));return 0;}'''
         collision = source.replace('let b:int=', 'let __forge_reserved_builder_1:int=seed;let b:int=')
         self.assertNotIn('fr_detail_str_builder *__forge_reserved_builder_1 =', self.view_append_c(collision))
 
+    def test_mersenne_loop_version_rejects_unproven_recurrences(self):
+        source = '''fn run(seed:int,n:int):int {
+ let v:int=seed;let i:int=0;
+ while(i<n){v=(v*48271)%2147483647;i=i+1;}return v;
+}
+native main {println(run(1,3));return 0;}'''
+        self.assertIn('__forge_mersenne_product_', self.view_append_c(source))
+        cases = {
+            'observer': source.replace('i=i+1;', 'println(v);i=i+1;'),
+            'changing bound': source.replace('while(i<n)', 'while(i<v)'),
+            'different value': source.replace('(v*48271)', '(seed*48271)'),
+            'overflowing closed range': source.replace('2147483647', '9223372036854775807'),
+            'non-Mersenne': source.replace('2147483647', '2147483646'),
+            'nonunit step': source.replace('i=i+1;', 'i=i+2;'),
+            'dynamic coefficient': source.replace('(v*48271)', '(v*seed)'),
+        }
+        for label, candidate in cases.items():
+            with self.subTest(label=label):
+                self.assertNotIn('__forge_mersenne_product_', self.view_append_c(candidate))
+        collision=source.replace('let v:int=', 'let __forge_mersenne_product_1:int=seed;let v:int=')
+        self.assertNotIn('uint64_t __forge_mersenne_product_1 =', self.view_append_c(collision))
+        # The original loop predicate is evaluated before the recurrence guard.
+        empty = source.replace('run(1,3)', 'run(0,0)')
+        generated = self.view_append_c(empty)
+        self.assertIn('if ((\n(i < n)) && v >= 0', generated)
+        self.run_program(empty, '0\n')
+
     def test_private_view_append_loop_lowering(self):
         # Runtime dimensions and signed wrapping byte arithmetic mirror the
         # construction shape, without timing or modifying benchmark fixtures.
