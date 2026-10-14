@@ -1,5 +1,6 @@
 #include "codegen.h"
 #include "mod_registry.h"
+#include <limits.h>
 #include <stdarg.h>
 #include <string.h>
 
@@ -2181,6 +2182,124 @@ static bool cg_unit_assignment(const Stmt *s, ForgeStr name) {
     return cg_ident_named(a, name) && b->kind == EXPR_INT && b->as.int_val == 1;
 }
 
+static bool cg_integer_is(const Expr *e, int64_t value) {
+    return e && e->kind == EXPR_INT && e->as.int_val == value;
+}
+
+static bool cg_power_mod_product(const Expr *e, ForgeStr a, ForgeStr b, ForgeStr modulus) {
+    if (!e || e->kind != EXPR_BINARY || e->as.binary.op != BIN_MOD ||
+        !cg_ident_named(e->as.binary.right, modulus)) return false;
+    Expr *product = e->as.binary.left;
+    return product && product->kind == EXPR_BINARY && product->as.binary.op == BIN_MUL &&
+        ((cg_ident_named(product->as.binary.left, a) && cg_ident_named(product->as.binary.right, b)) ||
+         (cg_ident_named(product->as.binary.left, b) && cg_ident_named(product->as.binary.right, a)));
+}
+
+/* Complete pure binary exponentiation, independent of function/parameter names.
+ * The small positive modulus closes every product below d^2. Other inputs keep
+ * the original checked, wrapping body, including its initial remainder trap. */
+static bool emit_bounded_mod_pow(Codegen *cg, FnDecl *fn) {
+    if (!cg->prove_loop_increments || cg->state_prefix || fn->ret_type.kind != TY_INT) return false;
+    for (Param *p = fn->params; p; p = p->next) {
+        if (!cg->loop_scan_left) return false;
+        cg->loop_scan_left--;
+        if (p->type.kind != TY_INT) return false;
+    }
+    Stmt *lets[3], *s = fn->body.first;
+    for (unsigned i = 0; i < 3; i++) {
+        if (!s || s->kind != STMT_LET || s->as.let.type.kind != TY_INT ||
+            !s->as.let.init || cg_is_local(cg, s->as.let.name)) return false;
+        for (unsigned j = 0; j < i; j++)
+            if (forge_str_eq(lets[j]->as.let.name, s->as.let.name)) return false;
+        lets[i] = s; s = s->next;
+    }
+    Stmt *loop = s, *ret = s ? s->next : NULL;
+    ForgeStr result = lets[0]->as.let.name, factor = lets[1]->as.let.name;
+    ForgeStr power = lets[2]->as.let.name;
+    if (!cg_integer_is(lets[0]->as.let.init, 1) || !loop || loop->kind != STMT_WHILE ||
+        !loop->as.while_stmt.body || !ret || ret->kind != STMT_RETURN || ret->next ||
+        !cg_ident_named(ret->as.ret, result)) return false;
+    Expr *initial = lets[1]->as.let.init, *exponent = lets[2]->as.let.init;
+    if (initial->kind != EXPR_BINARY || initial->as.binary.op != BIN_MOD ||
+        !initial->as.binary.left || !initial->as.binary.right ||
+        initial->as.binary.left->kind != EXPR_IDENT || initial->as.binary.right->kind != EXPR_IDENT ||
+        exponent->kind != EXPR_IDENT) return false;
+    ForgeStr base = initial->as.binary.left->as.ident, modulus = initial->as.binary.right->as.ident;
+    ForgeStr exp = exponent->as.ident;
+    if (!cg_is_local(cg, base) || !cg_is_local(cg, modulus) || !cg_is_local(cg, exp) ||
+        cg_lookup_local(cg, base).kind != TY_INT || cg_lookup_local(cg, modulus).kind != TY_INT ||
+        cg_lookup_local(cg, exp).kind != TY_INT) return false;
+    Expr *cond = loop->as.while_stmt.cond;
+    if (!cond || cond->kind != EXPR_BINARY || cond->as.binary.op != BIN_GT ||
+        !cg_ident_named(cond->as.binary.left, power) || !cg_integer_is(cond->as.binary.right, 0)) return false;
+    Stmt *bit = loop->as.while_stmt.body->first;
+    Stmt *square = bit ? bit->next : NULL, *halve = square ? square->next : NULL;
+    if (!bit || bit->kind != STMT_IF || bit->as.if_stmt.else_br || !bit->as.if_stmt.then_br ||
+        !square || square->kind != STMT_ASSIGN || !forge_str_eq(square->as.assign.name, factor) ||
+        !cg_power_mod_product(square->as.assign.value, factor, factor, modulus) ||
+        !halve || halve->kind != STMT_ASSIGN || !forge_str_eq(halve->as.assign.name, power) || halve->next) return false;
+    Expr *odd = bit->as.if_stmt.cond, *half = halve->as.assign.value;
+    if (!odd || odd->kind != EXPR_BINARY || odd->as.binary.op != BIN_EQ ||
+        !half || half->kind != EXPR_BINARY || half->as.binary.op != BIN_DIV ||
+        !cg_ident_named(half->as.binary.left, power) || !cg_integer_is(half->as.binary.right, 2)) return false;
+    Expr *remainder = odd->as.binary.left, *one = odd->as.binary.right;
+    if (cg_integer_is(remainder, 1)) { Expr *swap = remainder; remainder = one; one = swap; }
+    if (!cg_integer_is(one, 1) || !remainder || remainder->kind != EXPR_BINARY || remainder->as.binary.op != BIN_MOD ||
+        !cg_ident_named(remainder->as.binary.left, power) || !cg_integer_is(remainder->as.binary.right, 2)) return false;
+    Stmt *multiply = bit->as.if_stmt.then_br->first;
+    if (!multiply || multiply->kind != STMT_ASSIGN || multiply->next ||
+        !forge_str_eq(multiply->as.assign.name, result) ||
+        !cg_power_mod_product(multiply->as.assign.value, result, factor, modulus)) return false;
+
+    if (cg->loop_scan_left < 64) return false;
+    cg->loop_scan_left -= 64;
+    char names[7][64];
+    const char *roles[] = {"divisor", "reciprocal", "factor", "result", "power", "product", "quotient"};
+    if (cg->label_seq > INT_MAX - 65) return false;
+    int id = ++cg->label_seq;
+    unsigned attempts = 0;
+    bool collision;
+    do {
+        if (attempts++ == 64 || !cg->loop_scan_left) return false;
+        cg->loop_scan_left--;
+        collision = false;
+        for (unsigned i = 0; i < 7; i++) {
+            snprintf(names[i], sizeof(names[i]), "__forge_pow_%s_%d", roles[i], id);
+            if (cg_is_local(cg, forge_str(names[i])) || cg_resolve_fn_ref(cg, forge_str(names[i]))) collision = true;
+        }
+        id++;
+    } while (collision);
+    cg_line(cg, "#if defined(__SIZEOF_INT128__)");
+    cg_line(cg, "if (%.*s >= 0 && %.*s >= 0 && %.*s > 1 && %.*s <= INT64_C(2097152)) {",
+            (int)base.len, base.data, (int)exp.len, exp.data,
+            (int)modulus.len, modulus.data, (int)modulus.len, modulus.data);
+    cg->indent++;
+    cg_line(cg, "uint64_t %s = (uint64_t)%.*s;", names[0], (int)modulus.len, modulus.data);
+    cg_line(cg, "uint64_t %s = UINT64_MAX / %s + UINT64_C(1);", names[1], names[0]);
+    cg_line(cg, "uint64_t %s = (uint64_t)%.*s %% %s;", names[2], (int)base.len, base.data, names[0]);
+    cg_line(cg, "uint64_t %s = 1, %s = (uint64_t)%.*s;", names[3], names[4], (int)exp.len, exp.data);
+    cg_line(cg, "if (%s) {", names[4]); cg->indent++;
+    cg_line(cg, "if (%s & 1) %s = %s;", names[4], names[3], names[2]);
+    cg_line(cg, "%s >>= 1;", names[4]);
+    cg_line(cg, "while (%s) {", names[4]); cg->indent++;
+    cg_line(cg, "uint64_t %s = %s * %s;", names[5], names[2], names[2]);
+    /* For B=2^64, R=ceil(B/d), e=d*R-B<d, n<d^2 and d<=2^21:
+     * n*e < B <= (d-n%d)*B (n=0 is immediate), so floor(n*R/B)
+     * is exactly floor(n/d). No quotient correction or signed wrap occurs. */
+    cg_line(cg, "uint64_t %s = (uint64_t)(((unsigned __int128)%s * %s) >> 64);", names[6], names[5], names[1]);
+    cg_line(cg, "%s = %s - %s * %s;", names[2], names[5], names[6], names[0]);
+    cg_line(cg, "if (%s & 1) {", names[4]); cg->indent++;
+    cg_line(cg, "%s = %s * %s;", names[5], names[3], names[2]);
+    cg_line(cg, "%s = (uint64_t)(((unsigned __int128)%s * %s) >> 64);", names[6], names[5], names[1]);
+    cg_line(cg, "%s = %s - %s * %s;", names[3], names[5], names[6], names[0]);
+    cg->indent--; cg_line(cg, "}");
+    cg_line(cg, "%s >>= 1;", names[4]);
+    cg->indent--; cg_line(cg, "}"); cg->indent--; cg_line(cg, "}");
+    cg_line(cg, "return (int64_t)%s;", names[3]);
+    cg->indent--; cg_line(cg, "}"); cg_line(cg, "#endif");
+    return true;
+}
+
 /* Recognize a complete, pure periodic byte sum by syntax/binding, never by
  * function name. Only its sum escapes; index/weight state is dead on return. */
 static bool emit_periodic_view_sum(Codegen *cg, FnDecl *fn) {
@@ -2846,6 +2965,7 @@ void codegen_emit_library(Program *prog, FILE *out_c, FILE *out_h, const char *r
         cg_begin_function(&cg);
         cg.prove_loop_increments = true;
         cg_push_params(&cg, fn->params);
+        emit_bounded_mod_pow(&cg, fn);
         emit_invariant_mod_descriptors(&cg, fn);
         emit_periodic_view_sum(&cg, fn);
         emit_stmts(&cg, fn->body.first, NULL, false);
@@ -2937,6 +3057,7 @@ void codegen_emit(Program *prog, FILE *out, const char *runtime_include) {
         cg.current_module = forge_str("");
         cg.prove_loop_increments = true;
         cg_push_params(&cg, fn->params);
+        emit_bounded_mod_pow(&cg, fn);
         emit_invariant_mod_descriptors(&cg, fn);
         emit_periodic_view_sum(&cg, fn);
         emit_stmts(&cg, fn->body.first, NULL, false);
@@ -2958,6 +3079,7 @@ void codegen_emit(Program *prog, FILE *out, const char *runtime_include) {
             cg.current_module = mod->name;
             cg.prove_loop_increments = true;
             cg_push_params(&cg, fn->params);
+            emit_bounded_mod_pow(&cg, fn);
             emit_invariant_mod_descriptors(&cg, fn);
             emit_periodic_view_sum(&cg, fn);
             emit_stmts(&cg, fn->body.first, NULL, false);

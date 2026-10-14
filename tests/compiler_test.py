@@ -435,6 +435,56 @@ native main {println(run(1,3));return 0;}'''
         self.assertIn('if ((\n(i < n)) && v >= 0', generated)
         self.run_program(empty, '0\n')
 
+    def test_modular_power_matches_structure_and_rejects_observable_variants(self):
+        source='''fn compute_residue(base:int,exponent:int,modulus:int):int {
+ let result:int=1;let factor:int=base%modulus;let power:int=exponent;
+ while(power>0){if(power%2==1){result=(result*factor)%modulus;}
+ factor=(factor*factor)%modulus;power=power/2;}return result;
+}
+native main {println(compute_residue(7,31,1000003));return 0;}'''
+        self.assertIn('__forge_pow_', self.view_append_c(source))
+        self.run_program(source, str(pow(7,31,1000003))+'\n')
+        reversed_bit=source.replace('power%2==1','1==power%2')
+        self.assertIn('__forge_pow_', self.view_append_c(reversed_bit))
+        self.run_program(reversed_bit, str(pow(7,31,1000003))+'\n')
+        variants={
+            'observer':source.replace('power=power/2;', 'println(result);power=power/2;'),
+            'live factor':source.replace('return result;', 'return factor;'),
+            'live power':source.replace('return result;', 'return result+power;'),
+            'changed initial result':source.replace('result:int=1', 'result:int=0'),
+            'changed factor':source.replace('base%modulus', '(base+1)%modulus'),
+            'different modulus':source.replace('result*factor)%modulus', 'result*factor)%base'),
+            'different bit':source.replace('power%2==1', 'power%2==0'),
+            'different halving':source.replace('power=power/2', 'power=power/3'),
+            'extra local':source.replace('let power:int=', 'let alias:int=factor;let power:int='),
+            'observed final square':source.replace('factor=(factor*factor)%modulus;', 'factor=(factor*factor)%modulus;println(factor);'),
+            'extra return work':source.replace('return result;', 'println(power);return result;'),
+            'else observer':source.replace('result=(result*factor)%modulus;}', 'result=(result*factor)%modulus;}else{println(result);}'),
+        }
+        for label,candidate in variants.items():
+            with self.subTest(label=label):
+                self.assertNotIn('__forge_pow_', self.view_append_c(candidate))
+        collision=source.replace('base:int,','__forge_pow_divisor_1:int,base:int,').replace(
+            'compute_residue(7,31,1000003)', 'compute_residue(0,7,31,1000003)')
+        self.assertNotIn('uint64_t __forge_pow_divisor_1 =', self.view_append_c(collision))
+        self.run_program(collision, str(pow(7,31,1000003))+'\n')
+        live_collision=source.replace('base','__forge_pow_divisor_1')
+        self.assertNotIn('uint64_t __forge_pow_divisor_1 =', self.view_append_c(live_collision))
+        self.run_program(live_collision, str(pow(7,31,1000003))+'\n')
+        crowded=source.replace('base:int,',','.join(f'__forge_pow_divisor_{i}:int' for i in range(1,65))+',base:int,').replace(
+            'compute_residue(7,31,1000003)', 'compute_residue('+','.join(['0']*64)+',7,31,1000003)')
+        self.assertNotIn('uint64_t __forge_pow_divisor_', self.view_append_c(crowded))
+        self.run_program(crowded, str(pow(7,31,1000003))+'\n')
+
+    def test_modular_power_in_suspended_coroutine_keeps_checked_body(self):
+        source='''process main {coroutine work(){
+ let a:int=7;let bits:int=31;let d:int=1000003;
+ let answer:int=1;let x:int=a%d;let k:int=bits;
+ while(k>0){yield;if(k%2==1){answer=(answer*x)%d;}x=(x*x)%d;k=k/2;}
+ println(answer);}spawn work();}'''
+        self.assertNotIn('__forge_pow_', self.view_append_c(source))
+        self.run_program(source, str(pow(7,31,1000003))+'\n')
+
     def test_periodic_view_sum_matches_by_structure_and_rejects_observers(self):
         source='''import strings;
 fn rotate_checksum(view:int,offset:int):int {

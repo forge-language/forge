@@ -27,7 +27,7 @@ def wrap(value):
 
 class ArithmeticTests(unittest.TestCase):
     def execute(self, source, expected='', failure=False, bridge='', js_bridge='', js=True,
-                library_bridge=None, modules=None, extra_c_flags=(), c_suffix=''):
+                library_bridge=None, modules=None, extra_c_flags=(), c_suffix='', require_c=None):
         with tempfile.TemporaryDirectory() as directory:
             work = Path(directory)
             fg, c, binary = [work / name for name in ('test.fg', 'test.c', 'test')]
@@ -39,6 +39,8 @@ class ArithmeticTests(unittest.TestCase):
                 args += ['--lib', '--header', str(work / 'arithmetic.h')]
             result = subprocess.run(args, capture_output=True, text=True, timeout=20)
             self.assertEqual(result.returncode, 0, result.stderr)
+            if require_c:
+                self.assertIn(require_c, c.read_text())
             if c_suffix:
                 c.write_text(c.read_text() + '\n' + c_suffix)
             extras = []
@@ -126,6 +128,94 @@ native main {'''
                     expected += [str(max(n,0)), str(value)]
         source += 'return 0;}'
         self.execute(source, '\n'.join(expected)+'\n')
+
+    def test_bounded_modular_power_full_width_and_guard_boundaries(self):
+        source = '''fn raise_residue(a:int,bits:int,d:int):int {
+ let answer:int=1;let x:int=a%d;let k:int=bits;
+ while(k>0){if(k%2==1){answer=(x*answer)%d;}x=(x*x)%d;k=k/2;}
+ return answer;
+}
+native main {'''
+        def remainder(a, b):
+            if b == 0 or (a == MIN and b == -1):
+                raise ArithmeticError
+            q = abs(a)//abs(b) * (-1 if (a < 0) != (b < 0) else 1)
+            return a-q*b
+        expected = []
+        for d in (MIN,-26,-1,1,2,3,26,65537,1000003,1373651,
+                  2097151,2097152,2097153,3037000499,MAX):
+            bases = (MIN,MIN+1,-1,0,1,2,MAX) + ((d-1,) if d > 0 else ())
+            for a in bases:
+                for exponent in (-1,0,1,2,3,31,63,MAX):
+                    try:
+                        result, factor, power = 1, remainder(a,d), exponent
+                        while power > 0:
+                            if power%2 == 1:result=remainder(wrap(result*factor),d)
+                            factor=remainder(wrap(factor*factor),d)
+                            power//=2
+                    except ArithmeticError:
+                        continue
+                    source += f'println(raise_residue({literal(a)},{literal(exponent)},{literal(d)}));'
+                    expected.append(str(result))
+        source += 'return 0;}'
+        output='\n'.join(expected)+'\n'
+        self.execute(source, output)
+        self.execute(source, output, js=False, extra_c_flags=('-U__SIZEOF_INT128__',))
+        self.execute(source, output, js=False, extra_c_flags=('-D__aarch64__=1',))
+
+    def test_bounded_modular_power_preserves_initial_traps(self):
+        fn='''fn raise_residue(a:int,bits:int,d:int):int {
+ let answer:int=1;let x:int=a%d;let k:int=bits;
+ while(k>0){if(k%2==1){answer=(answer*x)%d;}x=(x*x)%d;k=k/2;}
+ return answer;
+}'''
+        for a,d,exponent in ((0,0,0),(1,0,-1),(7,0,5),(MIN,-1,0),(MIN,-1,-1),(MIN,-1,3)):
+            with self.subTest(a=a,d=d,exponent=exponent):
+                self.execute(fn+f'native main {{println(raise_residue({literal(a)},{literal(exponent)},{literal(d)}));return 0;}}', failure=True)
+
+    def test_bounded_modular_power_exported_library_and_module(self):
+        body='''let answer:int=1;let x:int=a%d;let k:int=bits;
+ while(k>0){if(k%2==1){answer=(answer*x)%d;}x=(x*x)%d;k=k/2;}
+ return answer;'''
+        cases=[(7,31,1000003,pow(7,31,1000003)),
+               (2097151,MAX,2097152,2097151),
+               (7,31,2097153,pow(7,31,2097153)),
+               (-2,3,13,-8),(0,0,2,1),(MIN,2,MAX,1),(MAX,0,2,1),
+               (MAX-1,1,MAX,MAX-1),(MIN+1,1,MIN,MIN+1)]
+        source='library arithmetic {export fn residue(a:int,bits:int,d:int):int {'+body+'}}'
+        bridge='#include "arithmetic.h"\n#include <stdint.h>\nint main(void){\n'
+        def c_int(value):
+            if value==MIN:return 'INT64_MIN'
+            return ('-' if value<0 else '')+f'INT64_C({abs(value)})'
+        for index,(a,e,d,wanted) in enumerate(cases,1):
+            bridge+=f'if(frlib_arithmetic_residue({c_int(a)},{c_int(e)},{c_int(d)})!={c_int(wanted)})return {index};\n'
+        bridge+='return 0;}\n'
+        self.execute(source, js=False, library_bridge=bridge, require_c='__forge_pow_')
+        module='fn residue(a:int,bits:int,d:int):int {'+body+'}\n'
+        # The base and exponent roles can refer to the same bound parameter.
+        module+='fn shared(a:int,d:int):int {'+body.replace('k:int=bits','k:int=a')+'}\n'
+        source='import powers;fn residue():int{return 42;}native main {println(residue());'
+        expected=['42']
+        for a,e,d,wanted in cases:
+            source+=f'println(powers.residue({literal(a)},{literal(e)},{literal(d)}));'
+            expected.append(str(wanted))
+        for a,d,wanted in ((7,1000003,pow(7,7,1000003)),(-1,13,1),(MAX,2,1)):
+            source+=f'println(powers.shared({literal(a)},{literal(d)}));'
+            expected.append(str(wanted))
+        source+='return 0;}'
+        self.execute(source, '\n'.join(expected)+'\n', modules={'powers.fg':module}, require_c='__forge_pow_')
+
+    def test_bounded_modular_power_exported_library_trap(self):
+        source='''library arithmetic {export fn residue(a:int,bits:int,d:int):int {
+ let answer:int=1;let x:int=a%d;let k:int=bits;
+ while(k>0){if(k%2==1){answer=(answer*x)%d;}x=(x*x)%d;k=k/2;}
+ return answer;}}'''
+        bridge='''#include "arithmetic.h"
+#include <stdint.h>
+int main(void){frlib_arithmetic_residue(INT64_C(7),INT64_C(5),INT64_C(0));return 0;}'''
+        self.execute(source, failure=True, js=False, library_bridge=bridge, require_c='__forge_pow_')
+        self.execute(source, failure=True, js=False, library_bridge=bridge,
+                     extra_c_flags=('-U__SIZEOF_INT128__','-D__aarch64__=1'))
 
     def test_periodic_view_sum_utf8_signed_offsets_and_tails(self):
         source = 'import strings;'
