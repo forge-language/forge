@@ -18,3 +18,6 @@ venv/
 !.vscode/settings.json
 !.vscode/extensions.json
 !.vscode/tasks.json
+
+# Local scratch screenshots (kept on disk, not committed)
+/2026-10-08_10-05.png
