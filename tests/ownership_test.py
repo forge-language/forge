@@ -96,15 +96,25 @@ native main {
 }''', 'arena payload\n')
 
     def test_suspended_coroutine_transfer(self):
+        padding = ''.join(f'let p{i}:int=seed+{i};' for i in range(80))
         self.run_source('''process main {
     coroutine sender() {
         own let payload: string = "suspended";
+        let seed:int=7;''' + padding + '''
         yield;
         send 0, Drop, move payload;
         println("sent");
     }
     spawn sender();
 }''', 'sent\n')
+
+    def test_promoted_scope_restores_owned_outer_binding(self):
+        padding = ''.join(f'let p{i}:int=seed+{i};' for i in range(80))
+        self.run_source('native main{own let payload:string="outer";let seed:int=7;' + padding + '''
+{own let payload:string="inner";send 0,Drop,move payload;}
+println(payload);send 0,Drop,move payload;
+payload="again";println(payload);send 0,Drop,move payload;return 0;}
+''', 'outer\nagain\n')
 
 
 if __name__ == '__main__':

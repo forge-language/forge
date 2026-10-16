@@ -1,5 +1,6 @@
 """Exercise the public compiler CLI and execute the generated native programs."""
 import argparse
+import os
 from pathlib import Path
 import socket
 import subprocess
@@ -17,6 +18,50 @@ sys.argv = [sys.argv[0], *remaining]
 
 
 class CompilerRegressionTests(unittest.TestCase):
+    @unittest.skipUnless(sys.platform == 'linux', 'requires GNU linker wrapping')
+    def test_generated_process_construction_failures_release_owned_resources(self):
+        import resource
+        import signal
+        wrapper = Path(self.temp.name) / 'cc-factory-faults'
+        stub = Path(__file__).with_name('factory_faults.c').resolve()
+        symbols = ('fr_scheduler_create', 'fr_process_create', 'fr_supervisor_create',
+                   'fr_scheduler_destroy', 'fr_coro_spawn', 'calloc', 'free')
+        flags = [f'-Wl,--wrap={name}' for name in symbols]
+        wrapper.write_text('#!/usr/bin/env python3\nimport os, sys\n'
+                           f'cc = {config.cc!r}\n'
+                           f'extra = [] if "-c" in sys.argv else [{str(stub)!r}, "-I", {str(Path(config.root) / "include")!r}, *{flags!r}]\n'
+                           'os.execv(cc, [cc, *extra, *sys.argv[1:]])\n')
+        wrapper.chmod(0o755)
+        binary = self.compile_program('''
+            process helper {}
+            process main { coroutine task() { println(7); } spawn task(); }
+            supervisor app { restart: all; helper; main; }
+        ''', str(wrapper))
+
+        def no_core():
+            resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+
+        for mode, destroys in (('none', 1), ('scheduler', 0),
+                               ('process', 1), ('supervisor', 1), ('coroutine', 0),
+                               ('coroutine-real', 0)):
+            with self.subTest(mode=mode):
+                result = subprocess.run([str(binary)], text=True, capture_output=True,
+                                        timeout=10, env={**os.environ, 'FORGE_TEST_FAIL': mode},
+                                        preexec_fn=no_core)
+                coro_failure = mode.startswith('coroutine')
+                expected = -signal.SIGABRT if coro_failure else int(mode != 'none')
+                self.assertEqual(result.returncode, expected, result.stderr)
+                self.assertEqual(result.stdout, '7\n' if mode == 'none' else '')
+                if coro_failure:
+                    self.assertIn('forge: cannot create coroutine', result.stderr)
+                    self.assertEqual(result.stderr.count('factory: rejected state freed'), 1)
+                    if mode == 'coroutine-real':
+                        self.assertIn('factory: coroutine allocation failed', result.stderr)
+                else:
+                    self.assertIn(f'factory: live=0 destroys={destroys}', result.stderr)
+                    if mode != 'none':
+                        self.assertIn(f'forge: cannot create {mode}', result.stderr)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -330,6 +375,16 @@ native main {let view:int=str_view("ABC");println(weighted(view));return 0;}'''
             return 0;
         }''', 'inner\n7\n3\n')
 
+    def test_promoted_local_index_shadow_types_and_for_scope(self):
+        padding = ''.join(f'let p{i}:int=seed+{i};' for i in range(80))
+        self.run_program('fn work():int{let outer:int=41;let seed:int=7;' + padding + '''
+{let outer:string="inner";println(outer);}println(outer);
+for(let outer:int=0;outer<2;outer=outer+1){println(outer);}
+println(outer);return 0;}
+fn next():string{let outer:string="next";return outer;}
+native main{work();println(next());return 0;}
+''', 'inner\n41\n0\n1\n41\nnext\n')
+
     def test_imported_function_signatures_are_checked(self):
         (self.source.parent / 'helper.fg').write_text('fn value(n: int): string { return "ok"; }')
         self.source.write_text('import helper; native main { helper.value("wrong"); }')
@@ -340,6 +395,65 @@ native main {let view:int=str_view("ABC");println(weighted(view));return 0;}'''
         result = self.invoke(self.source, '--check')
         self.assertEqual(result.returncode, 1, result.stderr)
         self.assertIn('unknown function', result.stderr)
+
+    def test_indexed_function_lookup_preserves_owner_precedence(self):
+        # Each owner exceeds the small-owner threshold. Matching names in other
+        # owners must neither hide the right signature nor satisfy a missing one.
+        padding = ''.join(f'fn padding_{i}():int{{return {i};}}' for i in range(20))
+        (self.source.parent / 'helper.fg').write_text(padding + '''
+fn target(value:string):string{return value;}
+fn module_call():string{return target("module");}
+fn global_call():int{return global_only(41);}
+''')
+        self.run_program('import helper;' + padding + '''
+fn target(value:int):int{return value+1;}
+fn global_only(value:int):int{return value+1;}
+native main {println(target(41));println(helper.module_call());println(helper.global_call());return 0;}
+''', '42\nmodule\n42\n')
+
+        # Empty file modules still block a same-named library namespace.
+        (self.source.parent / 'empty.fg').write_text('')
+        library_padding = padding.replace('fn ', 'export fn ')
+        self.source.write_text('import empty;library empty {' + library_padding + '''
+export fn target(value:int):int{return value;}}
+native main {return empty.target(1);}
+''')
+        result = self.invoke(self.source, '--check')
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn('unknown function', result.stderr)
+
+        self.source.write_text('library values {' + library_padding + '''
+export fn target(value:string):string{return value;}}
+fn target(value:int):int{return value;}
+native main {println(target(42));println(values.target("library"));return 0;}
+''')
+        self.assertEqual(self.invoke(self.source, '--check').returncode, 0)
+
+        self.source.write_text('library values {' + library_padding + '''
+export fn target(value:string):string{return value;}
+export fn call_global():int{return target(42);}}
+fn target(value:int):int{return value;}
+native main {return values.call_global();}
+''')
+        self.assertEqual(self.invoke(self.source, '--check').returncode, 0)
+        self.source.write_text('import helper;const CALLBACK=helper.module_call;'
+                               'fn global_only(x:int):int{return x;}native main{return 0;}')
+        self.assertEqual(self.invoke(self.source, '--check').returncode, 0)
+
+    def test_indexed_duplicate_names_retain_first_signature(self):
+        # --check historically resolves the first declaration. This does not
+        # promise duplicate definitions can be emitted by either backend.
+        padding = ''.join(f'fn padding_{i}():int{{return {i};}}' for i in range(20))
+        for first, second, argument, accepted in (
+                ('int','string','1',True), ('string','int','1',False),
+                ('string','int','"text"',True), ('int','string','"text"',False)):
+            self.source.write_text(f'fn pick(x:{first}):int{{return 1;}}' + padding +
+                                   f'fn pick(x:{second}):int{{return 2;}}' +
+                                   f'native main {{return pick({argument});}}')
+            result = self.invoke(self.source, '--check')
+            self.assertEqual(result.returncode, 0 if accepted else 1, result.stderr)
+            if not accepted:
+                self.assertIn('type mismatch', result.stderr)
 
     def test_string_views_and_builder_snapshots(self):
         self.run_program('import strings;native main{let v: int=str_view("한글");println(str_view_len(v));println(str_view_at(v,0));println(str_view_at(v,9));let b: int=str_builder();str_builder_append(b,"one");let first: string=str_builder_finish(b);str_builder_char(b,65);println(first);println(str_builder_finish(b));println(str_builder_char(b,0));return 0;}', '6\n237\n-1\none\noneA\n0\n')
@@ -471,6 +585,9 @@ native main {println(compute_residue(7,31,1000003));return 0;}'''
         live_collision=source.replace('base','__forge_pow_divisor_1')
         self.assertNotIn('uint64_t __forge_pow_divisor_1 =', self.view_append_c(live_collision))
         self.run_program(live_collision, str(pow(7,31,1000003))+'\n')
+        mask_collision=source.replace('base','__forge_pow_mask_1').replace('1000003','4194304')
+        self.assertNotIn('uint64_t __forge_pow_mask_1 =', self.view_append_c(mask_collision))
+        self.run_program(mask_collision, str(pow(7,31,4194304))+'\n')
         crowded=source.replace('base:int,',','.join(f'__forge_pow_divisor_{i}:int' for i in range(1,65))+',base:int,').replace(
             'compute_residue(7,31,1000003)', 'compute_residue('+','.join(['0']*64)+',7,31,1000003)')
         self.assertNotIn('uint64_t __forge_pow_divisor_', self.view_append_c(crowded))
@@ -669,6 +786,26 @@ native main {run(0,8);run(1,8);run(2,8);run(3,8);run(4,8);run(5,8);
                 result = subprocess.run([str(binary)], text=True, capture_output=True, timeout=10)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn('Forge integer', result.stderr)
+
+    def test_indexed_constants_keep_local_and_call_precedence(self):
+        constants = ''.join(f'const K_{i}={i};' for i in range(64))
+        warm = ''.join(f'fn warm_{i}():int{{return K_63;}}' for i in range(20))
+        self.run_program(constants + warm + '''const TEXT="constant";
+fn K_63(value:int):int{return value+1;}
+fn show(TEXT:string):string{return TEXT;}
+native main{println(warm_19());println(K_63);println(K_63(4));
+println(show("parameter"));{let TEXT:int=9;println(TEXT);}println(TEXT);return 0;}
+''', '63\n63\n5\nparameter\n9\nconstant\n')
+
+    def test_indexed_forward_and_cyclic_constants_keep_existing_check_rules(self):
+        padding = ''.join(f'const K_{i}={i};' for i in range(64))
+        self.source.write_text('const FIRST=LAST;' + padding + 'const LAST=42;native main{return FIRST;}')
+        result = self.invoke(self.source, '--check')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.source.write_text('const FIRST=LAST;const LAST=FIRST;' + padding + 'native main{return 0;}')
+        result = self.invoke(self.source, '--check')
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn('semantic expression nesting limit exceeded', result.stderr)
 
     def test_local_type_and_constant_resolution_follow_lexical_scopes(self):
         self.run_program('''const LABEL = "constant";

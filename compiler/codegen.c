@@ -1,5 +1,6 @@
 #include "codegen.h"
 #include "mod_registry.h"
+#include "local_index.h"
 #include <limits.h>
 #include <stdarg.h>
 #include <string.h>
@@ -34,6 +35,7 @@ typedef struct {
     struct ForgeLocal { ForgeStr name; ForgeType type; } *locals;
     size_t local_count;
     size_t local_cap;
+    ForgeLocalIndex local_index;
     ForgeStr *imports;
     size_t import_count;
     CgMap fn_map;      /* (module, name) -> FnDecl*  */
@@ -55,6 +57,7 @@ typedef struct {
     struct { ForgeStr parameter; char name[64]; } invariant_mods[8];
     size_t invariant_mod_count;
 } Codegen;
+_Static_assert(offsetof(struct ForgeLocal, name) == 0, "local index requires a leading name");
 
 /* Match x*C[+K] % (2^k-1) with a local integer x and positive constants.
  * The emitted helper guards the fold's nonnegative range and signed-product
@@ -75,6 +78,7 @@ static void cg_leave(Codegen *cg) { cg->depth--; }
  * append-only within a function; leaking it into the next function would make
  * every later use of a same-named local look like a use-after-move. */
 static void cg_begin_function(Codegen *cg) {
+    forge_local_truncate(&cg->local_index, 0);
     cg->local_count = 0;
     cg->moved_count = 0;
     cg->continue_label = 0;
@@ -261,10 +265,7 @@ static int cg_lookup_const(Codegen *cg, ForgeStr name) {
 }
 
 static int cg_is_local(Codegen *cg, ForgeStr name) {
-    for (size_t i = 0; i < cg->local_count; i++) {
-        if (forge_str_eq(cg->locals[i].name, name)) return 1;
-    }
-    return 0;
+    return forge_local_find(&cg->local_index, cg->locals, cg->local_count, sizeof(*cg->locals), name) != SIZE_MAX;
 }
 
 /* Index every function and const once, up front, so emission never rescans. */
@@ -304,6 +305,7 @@ static void cg_build_symbols(Codegen *cg) {
 static void cg_free_symbols(Codegen *cg) {
     cg_map_free(&cg->fn_map);
     cg_map_free(&cg->const_map);
+    forge_local_free(&cg->local_index);
 }
 
 static void cg_push_local(Codegen *cg, ForgeStr name, ForgeType ty) {
@@ -312,6 +314,7 @@ static void cg_push_local(Codegen *cg, ForgeStr name, ForgeType ty) {
     cg->locals[cg->local_count].name = name;
     cg->locals[cg->local_count].type = ty;
     cg->local_count++;
+    forge_local_push(&cg->local_index, name);
 }
 
 static void cg_push_params(Codegen *cg, Param *params) {
@@ -319,10 +322,8 @@ static void cg_push_params(Codegen *cg, Param *params) {
 }
 
 static ForgeType cg_lookup_local(Codegen *cg, ForgeStr name) {
-    for (size_t i = cg->local_count; i > 0; i--) {
-        if (forge_str_eq(cg->locals[i - 1].name, name)) return cg->locals[i - 1].type;
-    }
-    return forge_type_int();
+    size_t i = forge_local_find(&cg->local_index, cg->locals, cg->local_count, sizeof(*cg->locals), name);
+    return i == SIZE_MAX ? forge_type_int() : cg->locals[i].type;
 }
 
 /* Sorted for bsearch: the C names of the stdlib functions that return a
@@ -1095,7 +1096,7 @@ static void emit_coro_fn(Codegen *cg, CoroDecl *coro) {
     cg->hoisted_count = 0;
     free(hoisted.items);
     cg->state_prefix = saved_prefix;
-    cg->local_count = 0;
+    forge_local_truncate(&cg->local_index, 0); cg->local_count = 0;
     cg->indent--;
     fputs("    }\n", cg->out);
     fputs("    return FR_CORO_DONE;\n", cg->out);
@@ -1122,9 +1123,10 @@ static void emit_coro_fn(Codegen *cg, CoroDecl *coro) {
     cg->indent = 1;
     emit_coro_spawn_inits(cg, coro);
     cg->indent = 0;
-    fprintf(cg->out, "    fr_coro_spawn(proc, %.*s_fn, init, sizeof(%.*s_state_t));\n",
+    fprintf(cg->out, "    if (!fr_coro_spawn(proc, %.*s_fn, init, sizeof(%.*s_state_t))) {\n",
             (int)coro->name.len, coro->name.data,
             (int)coro->name.len, coro->name.data);
+    fputs("        free(init); fprintf(stderr, \"forge: cannot create coroutine\\n\"); abort();\n    }\n", cg->out);
     fputs("}\n\n", cg->out);
 }
 
@@ -1133,7 +1135,7 @@ static void emit_coro_fn(Codegen *cg, CoroDecl *coro) {
 static void emit_block_stmts(Codegen *cg, Stmt *s, const char *proc_var, bool in_coro) {
     size_t saved_locals = cg->local_count;
     emit_stmts(cg, s, proc_var, in_coro);
-    cg->local_count = saved_locals;
+    forge_local_truncate(&cg->local_index, saved_locals); cg->local_count = saved_locals;
 }
 
 static void emit_if_stmt(Codegen *cg, Stmt *s, const char *proc_var, bool in_coro) {
@@ -1732,9 +1734,9 @@ static CgReservedBuilderLoop cg_reserved_builder_loop(Codegen *cg, Stmt *binding
     CgReservedBuilderLoop none = {0}, plan = {0};
     ForgeStr builder = binding->as.let.name;
     Expr *ctor = binding->as.let.init;
-    if (!cg->prove_loop_increments || cg->state_prefix || cg_is_local(cg, builder) ||
-        binding->as.let.type.kind != TY_INT ||
+    if (!cg->prove_loop_increments || cg->state_prefix || binding->as.let.type.kind != TY_INT ||
         !cg_view_accessor_call(cg, ctor, "fr_str_builder_with_capacity", 1) ||
+        cg_is_local(cg, builder) ||
         cg_lookup_fn(cg, ctor->as.call.name)) return none;
     Expr *capacity = ctor->as.call.args[0];
     if (capacity->kind != EXPR_IDENT || forge_str_eq(capacity->as.ident, builder) ||
@@ -1859,10 +1861,10 @@ static Stmt *cg_find_view_append_loop(Codegen *cg, Stmt *binding) {
     Expr *init = binding->as.let.init;
     ForgeStr view = binding->as.let.name;
     if (!cg->prove_loop_increments || cg->state_prefix ||
-        binding->as.let.type.kind != TY_INT || cg_is_local(cg, view) ||
+        binding->as.let.type.kind != TY_INT ||
         !cg_view_accessor_call(cg, init, "fr_str_view", 1) ||
         init->as.call.args[0]->kind != EXPR_STRING ||
-        init->as.call.args[0]->as.string_val.len != 0) return NULL;
+        init->as.call.args[0]->as.string_val.len != 0 || cg_is_local(cg, view)) return NULL;
 
     Stmt *first = binding->next, *loop = first;
     for (unsigned count = 0; loop && count < 8; count++, loop = loop->next) {
@@ -2196,8 +2198,9 @@ static bool cg_power_mod_product(const Expr *e, ForgeStr a, ForgeStr b, ForgeStr
 }
 
 /* Complete pure binary exponentiation, independent of function/parameter names.
- * The small positive modulus closes every product below d^2. Other inputs keep
- * the original checked, wrapping body, including its initial remainder trap. */
+ * Powers of two permit a signed wrapping mask; small positive moduli also permit
+ * bounded reciprocal reduction. Other inputs keep the original checked, wrapping
+ * body, including its initial remainder trap. */
 static bool emit_bounded_mod_pow(Codegen *cg, FnDecl *fn) {
     if (!cg->prove_loop_increments || cg->state_prefix || fn->ret_type.kind != TY_INT) return false;
     for (Param *p = fn->params; p; p = p->next) {
@@ -2253,8 +2256,8 @@ static bool emit_bounded_mod_pow(Codegen *cg, FnDecl *fn) {
 
     if (cg->loop_scan_left < 64) return false;
     cg->loop_scan_left -= 64;
-    char names[7][64];
-    const char *roles[] = {"divisor", "reciprocal", "factor", "result", "power", "product", "quotient"};
+    char names[8][64];
+    const char *roles[] = {"divisor", "reciprocal", "factor", "result", "power", "product", "quotient", "mask"};
     if (cg->label_seq > INT_MAX - 65) return false;
     int id = ++cg->label_seq;
     unsigned attempts = 0;
@@ -2263,12 +2266,42 @@ static bool emit_bounded_mod_pow(Codegen *cg, FnDecl *fn) {
         if (attempts++ == 64 || !cg->loop_scan_left) return false;
         cg->loop_scan_left--;
         collision = false;
-        for (unsigned i = 0; i < 7; i++) {
+        for (unsigned i = 0; i < 8; i++) {
             snprintf(names[i], sizeof(names[i]), "__forge_pow_%s_%d", roles[i], id);
             if (cg_is_local(cg, forge_str(names[i])) || cg_resolve_fn_ref(cg, forge_str(names[i]))) collision = true;
         }
         id++;
     } while (collision);
+    /* A power-of-two divisor also admits a full-width wrapping reduction.
+     * For signed n with bits u, its truncating remainder is u&mask when n>=0
+     * or the masked value is zero, and (u&mask)-d otherwise. Products are
+     * unsigned so their low 64 bits exactly match Forge wrapping multiplication.
+     * Unlike the bounded reciprocal path, this works for negative bases and
+     * all positive int64 powers of two, without int128. */
+    cg_line(cg, "if (%.*s > 1 && (%.*s & (%.*s - 1)) == 0 && %.*s > 0) {",
+            (int)modulus.len, modulus.data, (int)modulus.len, modulus.data,
+            (int)modulus.len, modulus.data, (int)exp.len, exp.data);
+    cg->indent++;
+    cg_line(cg, "uint64_t %s = (uint64_t)%.*s;", names[0], (int)modulus.len, modulus.data);
+    cg_line(cg, "uint64_t %s = %s - UINT64_C(1);", names[7], names[0]);
+    cg_line(cg, "uint64_t %s = (uint64_t)%.*s & %s;", names[2], (int)base.len, base.data, names[7]);
+    cg_line(cg, "if (%.*s < 0 && %s) %s -= %s;", (int)base.len, base.data, names[2], names[2], names[0]);
+    cg_line(cg, "uint64_t %s = 1, %s = (uint64_t)%.*s;", names[3], names[4], (int)exp.len, exp.data);
+    cg_line(cg, "if (%s & 1) %s = %s;", names[4], names[3], names[2]);
+    cg_line(cg, "%s >>= 1;", names[4]);
+    cg_line(cg, "while (%s) {", names[4]); cg->indent++;
+    cg_line(cg, "uint64_t %s = %s * %s;", names[5], names[2], names[2]);
+    cg_line(cg, "%s = %s & %s;", names[2], names[5], names[7]);
+    cg_line(cg, "if ((%s >> 63) && %s) %s -= %s;", names[5], names[2], names[2], names[0]);
+    cg_line(cg, "if (%s & 1) {", names[4]); cg->indent++;
+    cg_line(cg, "%s = %s * %s;", names[5], names[3], names[2]);
+    cg_line(cg, "%s = %s & %s;", names[3], names[5], names[7]);
+    cg_line(cg, "if ((%s >> 63) && %s) %s -= %s;", names[5], names[3], names[3], names[0]);
+    cg->indent--; cg_line(cg, "}");
+    cg_line(cg, "%s >>= 1;", names[4]);
+    cg->indent--; cg_line(cg, "}");
+    cg_line(cg, "return __forge_i64_bits(%s);", names[3]);
+    cg->indent--; cg_line(cg, "}");
     cg_line(cg, "#if defined(__SIZEOF_INT128__)");
     cg_line(cg, "if (%.*s >= 0 && %.*s >= 0 && %.*s > 1 && %.*s <= INT64_C(2097152)) {",
             (int)base.len, base.data, (int)exp.len, exp.data,
@@ -2547,7 +2580,7 @@ static void emit_stmts(Codegen *cg, Stmt *s, const char *proc_var, bool in_coro)
             cg->indent--;
             cg_indent(cg);
             fputs("}\n", cg->out);
-            cg->local_count = saved_locals;
+            forge_local_truncate(&cg->local_index, saved_locals); cg->local_count = saved_locals;
             cg->safe_increment = saved_increment;
             break;
         }
@@ -3135,11 +3168,14 @@ void codegen_emit(Program *prog, FILE *out, const char *runtime_include) {
     cg_begin_function(&cg);
     cg_line(&cg, "fr_os_set_args(argc, argv);");
     cg_line(&cg, "fr_scheduler_t *sched = fr_scheduler_create(0);");
+    cg_line(&cg, "if (!sched) { fprintf(stderr, \"forge: cannot create scheduler\\n\"); return 1; }");
 
     for (size_t i = 0; i < prog->process_count; i++) {
         ProcessDecl *pd = &prog->processes[i];
         fprintf(out, "    fr_process_t *proc_%.*s = fr_process_create(\"%.*s\");\n",
                 (int)pd->name.len, pd->name.data, (int)pd->name.len, pd->name.data);
+        cg_line(&cg, "if (!proc_%.*s) { fprintf(stderr, \"forge: cannot create process\\n\"); fr_scheduler_destroy(sched); return 1; }",
+                (int)pd->name.len, pd->name.data);
         cg_line(&cg, "fr_scheduler_add_process(sched, proc_%.*s);", (int)pd->name.len, pd->name.data);
     }
 
@@ -3150,6 +3186,8 @@ void codegen_emit(Program *prog, FILE *out, const char *runtime_include) {
         else if (sup->policy == SUP_RESTART_ALL) pol = "FR_RESTART_ALL";
         fprintf(out, "    fr_process_t *sup_%.*s = fr_supervisor_create(\"%.*s\", %s);\n",
                 (int)sup->name.len, sup->name.data, (int)sup->name.len, sup->name.data, pol);
+        cg_line(&cg, "if (!sup_%.*s) { fprintf(stderr, \"forge: cannot create supervisor\\n\"); fr_scheduler_destroy(sched); return 1; }",
+                (int)sup->name.len, sup->name.data);
         for (size_t j = 0; j < sup->child_count; j++) {
             ProcessDecl *child = find_process(prog, sup->children[j]);
             if (child) {

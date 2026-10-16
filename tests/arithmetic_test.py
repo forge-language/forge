@@ -143,7 +143,9 @@ native main {'''
             return a-q*b
         expected = []
         for d in (MIN,-26,-1,1,2,3,26,65537,1000003,1373651,
-                  2097151,2097152,2097153,3037000499,MAX):
+                  2097151,2097152,2097153,4194304,998244353,1000000007,
+                  2147483647,2147483648,3037000498,3037000499,3037000500,3037000501,
+                  1 << 32,1 << 40,1 << 62,MAX):
             bases = (MIN,MIN+1,-1,0,1,2,MAX) + ((d-1,) if d > 0 else ())
             for a in bases:
                 for exponent in (-1,0,1,2,3,31,63,MAX):
@@ -163,6 +165,67 @@ native main {'''
         self.execute(source, output, js=False, extra_c_flags=('-U__SIZEOF_INT128__',))
         self.execute(source, output, js=False, extra_c_flags=('-D__aarch64__=1',))
 
+    def test_wide_modular_power_oracle(self):
+        source = '''fn residue(a:int,bits:int,d:int):int {
+ let r:int=1;let x:int=a%d;let k:int=bits;
+ while(k>0){if(k%2==1){r=(r*x)%d;}x=(x*x)%d;k=k/2;}return r;
+}
+native main {'''
+        # Exact nonzero multiples exercise zero residues and modulus boundaries.
+        cases = [(1 << shift, exponent, 1 << (2*shift))
+                 for shift in (11, 12, 13, 14, 15) for exponent in (2, 3, 4, 31, MAX)]
+        # A mixed even divisor must keep the fallback: a^2 % d = d/2 when
+        # a=6t and d=24t^2, and (d/2)*a is a nonzero multiple of d.
+        cases += [(6*t, 3, 24*t*t) for t in (512, 1024, 4096, 8192)]
+        rng = random.Random(20261015)
+        for _ in range(160):
+            d = rng.choice((2097153, 1 << 22, 998244353, 1000000007,
+                            1 << 31, 3037000499, rng.randrange(2097153,3037000500)))
+            a = rng.choice((0, d-1, d, MAX, rng.randrange(MAX+1)))
+            cases.append((a, rng.choice((0, 1, 2, 3, MAX, rng.randrange(MAX+1))), d))
+        expected = []
+        for a, exponent, d in cases:
+            source += f'println(residue({a},{exponent},{d}));'
+            expected.append(str(pow(a, exponent, d)))
+        source += 'return 0;}'
+        output = '\n'.join(expected)+'\n'
+        self.execute(source, output, require_c='__forge_pow_mask_')
+        self.execute(source, output, js=False, extra_c_flags=('-U__SIZEOF_INT128__',))
+
+    def test_power_of_two_modular_power_preserves_wrapping_signs(self):
+        source = '''fn residue(a:int,bits:int,d:int):int {
+ let r:int=1;let x:int=a%d;let k:int=bits;
+ while(k>0){if(k%2==1){r=(r*x)%d;}x=(x*x)%d;k=k/2;}return r;
+}
+native main {'''
+        rng = random.Random(20261016)
+        cases = []
+        for shift in (21,22,23,31,32,33,40,62):
+            d = 1 << shift
+            for a in (MIN,MIN+1,-d-1,-d,-d+1,-1,0,1,d-1,d,MAX):
+                for exponent in (-1,0,1,2,3,4,31,MAX):
+                    cases.append((a,exponent,d))
+        cases += [(rng.randrange(MIN,MAX+1), rng.randrange(MAX+1),
+                   1 << rng.randrange(22,63)) for _ in range(160)]
+        cases += [(1 << 21,3,1 << 40), (3037000500,2,1 << 40)]
+        expected = []
+        for a, exponent, d in cases:
+            # Python signed division oracle, independent of masking/reduction.
+            def remainder(value):
+                return value%d if value >= 0 else -((-value)%d)
+            result, factor, power = 1, remainder(a), exponent
+            while power > 0:
+                if power%2 == 1:
+                    result = remainder(wrap(result*factor))
+                factor = remainder(wrap(factor*factor))
+                power //= 2
+            source += f'println(residue({literal(a)},{literal(exponent)},{d}));'
+            expected.append(str(result))
+        source += 'return 0;}'
+        output = '\n'.join(expected)+'\n'
+        self.execute(source, output, require_c='__forge_pow_mask_')
+        self.execute(source, output, js=False, extra_c_flags=('-U__SIZEOF_INT128__',))
+
     def test_bounded_modular_power_preserves_initial_traps(self):
         fn='''fn raise_residue(a:int,bits:int,d:int):int {
  let answer:int=1;let x:int=a%d;let k:int=bits;
@@ -180,6 +243,11 @@ native main {'''
         cases=[(7,31,1000003,pow(7,31,1000003)),
                (2097151,MAX,2097152,2097151),
                (7,31,2097153,pow(7,31,2097153)),
+               (2048,3,4194304,0),
+               (MAX,MAX,3037000499,pow(MAX,MAX,3037000499)),
+               (-1,3,1 << 62,-1),
+               (MIN+1,2,1 << 62,-(1 << 62)+1),
+               ((1 << 62)-1,2,1 << 62,-(1 << 62)+1),
                (-2,3,13,-8),(0,0,2,1),(MIN,2,MAX,1),(MAX,0,2,1),
                (MAX-1,1,MAX,MAX-1),(MIN+1,1,MIN,MIN+1)]
         source='library arithmetic {export fn residue(a:int,bits:int,d:int):int {'+body+'}}'

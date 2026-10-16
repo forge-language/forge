@@ -83,16 +83,19 @@ add_custom_command(OUTPUT "${FORGE_STAGE1_BIN}"
     DEPENDS forge forge_runtime forge_std "${FORGE_BOOTSTRAP_SRC}" VERBATIM)
 add_custom_target(forge-stage1 DEPENDS "${FORGE_STAGE1_BIN}")
 add_custom_command(OUTPUT "${FORGE_STAGE2_BIN}"
+    BYPRODUCTS "${FORGE_STAGE2_C}"
     COMMAND "${FORGE_STAGE1_BIN}" "${FORGE_BOOTSTRAP_SRC}" -o "${FORGE_STAGE2_C}"
     COMMAND ${CMAKE_C_COMPILER} -std=c11 -O3 "-I${FORGE_ROOT_DIR}/include"
         "${FORGE_STAGE2_C}" -o "${FORGE_STAGE2_BIN}" "-L${FORGE_LIB_DIR}" ${FORGE_BOOTSTRAP_LINK}
-    DEPENDS forge-stage1 forge_std forge_runtime "${FORGE_BOOTSTRAP_SRC}" VERBATIM)
+    # Custom targets provide ordering; the executable file also invalidates
+    # downstream output when an upstream compiler has actually been rebuilt.
+    DEPENDS forge-stage1 "${FORGE_STAGE1_BIN}" forge_std forge_runtime "${FORGE_BOOTSTRAP_SRC}" VERBATIM)
 add_custom_target(forge-selfhost ALL DEPENDS "${FORGE_STAGE2_BIN}")
 foreach(name IN ITEMS match control_flow)
     set(output "${CMAKE_BINARY_DIR}/generated/selfhost_${name}.c")
     add_custom_command(OUTPUT "${output}"
         COMMAND "${FORGE_STAGE2_BIN}" "${CMAKE_CURRENT_SOURCE_DIR}/examples/${name}.fg" -o "${output}"
-        DEPENDS forge-selfhost "${CMAKE_CURRENT_SOURCE_DIR}/examples/${name}.fg" VERBATIM)
+        DEPENDS forge-selfhost "${FORGE_STAGE2_BIN}" "${CMAKE_CURRENT_SOURCE_DIR}/examples/${name}.fg" VERBATIM)
     if(name STREQUAL "match")
         add_custom_target(forge-selfhost-test DEPENDS "${output}")
     else()
@@ -103,12 +106,13 @@ set(FORGE_STAGE3_C "${CMAKE_BINARY_DIR}/generated/forge-stage3.c")
 set(FORGE_STAGE3_BIN "${CMAKE_BINARY_DIR}/bin/forge-stage3")
 set(FORGE_STAGE4_C "${CMAKE_BINARY_DIR}/generated/forge-stage4.c")
 add_custom_command(OUTPUT "${FORGE_STAGE4_C}"
+    BYPRODUCTS "${FORGE_STAGE3_C}" "${FORGE_STAGE3_BIN}"
     COMMAND "${FORGE_STAGE2_BIN}" "${FORGE_BOOTSTRAP_SRC}" -o "${FORGE_STAGE3_C}"
     COMMAND ${CMAKE_C_COMPILER} -std=c11 -O3 "-I${FORGE_ROOT_DIR}/include"
         "${FORGE_STAGE3_C}" -o "${FORGE_STAGE3_BIN}" "-L${FORGE_LIB_DIR}" ${FORGE_BOOTSTRAP_LINK}
     COMMAND "${FORGE_STAGE3_BIN}" "${FORGE_BOOTSTRAP_SRC}" -o "${FORGE_STAGE4_C}"
     COMMAND ${CMAKE_COMMAND} -E compare_files "${FORGE_STAGE3_C}" "${FORGE_STAGE4_C}"
-    DEPENDS forge-selfhost forge_std forge_runtime "${FORGE_BOOTSTRAP_SRC}" VERBATIM)
+    DEPENDS forge-selfhost "${FORGE_STAGE2_BIN}" forge_std forge_runtime "${FORGE_BOOTSTRAP_SRC}" VERBATIM)
 add_custom_target(forge-selfhost-verify DEPENDS "${FORGE_STAGE4_C}")
 
 install(FILES cmake/ForgeLibrary.cmake DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/Forge)
@@ -129,7 +133,10 @@ install(FILES LICENSE DESTINATION ${CMAKE_INSTALL_DATADIR}/forge)
 if(BUILD_TESTING)
     add_executable(optimizer_test tests/optimizer_test.c compiler/ast.c compiler/optimize.c)
     add_executable(parser_test tests/parser_test.c compiler/parser.c compiler/lexer.c compiler/ast.c compiler/source.c)
-    foreach(name IN ITEMS optimizer parser)
+    add_executable(function_index_test tests/function_index_test.c)
+    add_executable(local_index_test tests/local_index_test.c)
+    add_executable(const_index_test tests/const_index_test.c)
+    foreach(name IN ITEMS optimizer parser function_index local_index const_index)
         target_include_directories(${name}_test PRIVATE compiler)
         if(MSVC)
             target_compile_options(${name}_test PRIVATE /UNDEBUG)

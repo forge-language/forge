@@ -1,5 +1,6 @@
 #include "codegen.h"
 #include "mod_registry.h"
+#include "function_index.h"
 #include <inttypes.h>
 #include <string.h>
 
@@ -11,6 +12,7 @@ typedef struct {
   unsigned match_id;
   ForgeStr locals[1024];
   size_t local_count;
+  ForgeFunctionIndex *module_functions;
 } JS;
 static void expression(JS *g, Expr *e);
 static void statements(JS *g, Stmt *s);
@@ -18,12 +20,13 @@ static void pad(JS *g) {
   for (unsigned i = 0; i < g->indent; i++)
     fputs("  ", g->out);
 }
-static FnDecl *module_fn(Program *p, ForgeStr module, ForgeStr name) {
+static FnDecl *module_fn(JS *g, ForgeStr module, ForgeStr name) {
+  Program *p = g->prog;
   for (size_t i = 0; i < p->module_count; i++)
-    if (forge_str_eq(p->modules[i].name, module))
-      for (size_t j = 0; j < p->modules[i].fn_count; j++)
-        if (forge_str_eq(p->modules[i].functions[j].name, name))
-          return &p->modules[i].functions[j];
+    if (forge_str_eq(p->modules[i].name, module)) {
+      FnDecl *function = forge_function_index_get(&g->module_functions[i], name);
+      if (function) return function;
+    }
   return NULL;
 }
 static int local(JS *g, ForgeStr name_) {
@@ -131,7 +134,7 @@ static void expression(JS *g, Expr *e) {
     break;
   case EXPR_IDENT:
     if (!local(g, e->as.ident) && g->module.len &&
-        module_fn(g->prog, g->module, e->as.ident))
+        module_fn(g, g->module, e->as.ident))
       module_name(g->out, g->module, e->as.ident);
     else
       name(g->out, e->as.ident);
@@ -171,7 +174,7 @@ static void expression(JS *g, Expr *e) {
       }
       fprintf(g->out, "__forge.%s", standard);
     } else if (!local(g, fn) && g->module.len &&
-               module_fn(g->prog, g->module, fn))
+               module_fn(g, g->module, fn))
       module_name(g->out, g->module, fn);
     else
       name(g->out, fn);
@@ -179,7 +182,7 @@ static void expression(JS *g, Expr *e) {
     break;
   }
   case EXPR_QUAL_CALL:
-    if (!module_fn(g->prog, e->as.qual_call.module, e->as.qual_call.name)) {
+    if (!module_fn(g, e->as.qual_call.module, e->as.qual_call.name)) {
       fprintf(stderr, "forge: JavaScript backend requires a source module for "
                       "qualified calls\n");
       exit(1);
@@ -197,7 +200,7 @@ static void expression(JS *g, Expr *e) {
   case EXPR_FIELD:
     if (e->as.field.base->kind == EXPR_IDENT &&
         !local(g, e->as.field.base->as.ident) &&
-        module_fn(g->prog, e->as.field.base->as.ident, e->as.field.field))
+        module_fn(g, e->as.field.base->as.ident, e->as.field.field))
       module_name(g->out, e->as.field.base->as.ident, e->as.field.field);
     else {
       expression(g, e->as.field.base);
@@ -380,6 +383,10 @@ void codegen_emit_js(Program *prog, FILE *out) {
         "JavaScript backend supports functions, enums, source modules and "
         "native main; native process/struct declarations are unavailable");
   JS g = {.out = out, .prog = prog};
+  if (prog->module_count)
+    g.module_functions = forge_calloc_array(prog->module_count, sizeof(*g.module_functions));
+  for (size_t i = 0; i < prog->module_count; i++)
+    g.module_functions[i] = forge_function_index_build(prog->modules[i].functions, prog->modules[i].fn_count);
   fputs(
       "\"use strict\";\nconst __forge=(()=>{\n"
       "const wrap=v=>BigInt.asIntN(64,v),numeric=v=>typeof "
@@ -478,4 +485,7 @@ void codegen_emit_js(Program *prog, FILE *out) {
       block(&g, &prog->natives[i].body);
       fputs("\n__forge_main();\n", out);
     }
+  for (size_t i = 0; i < prog->module_count; i++)
+    forge_function_index_free(&g.module_functions[i]);
+  free(g.module_functions);
 }

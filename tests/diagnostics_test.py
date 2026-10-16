@@ -68,6 +68,50 @@ native main {
 '''
         self.check(text, 'missing', occurrence=4, message='unknown value')
 
+    def test_constant_index_reads_each_use_in_current_context(self):
+        padding = ''.join(f'const K_{i}={i};' for i in range(64))
+        warm = ''.join(f'fn warm_{i}():int{{return K_63;}}' for i in range(20))
+        prefix = padding + 'const SOURCE=7;const COPY=SOURCE;' + warm
+        self.check(prefix + 'fn bad(SOURCE:string):int{return COPY;}native main{return 0;}',
+                   'COPY', occurrence=1, message='type mismatch')
+        prefix = padding + 'const SOURCE="global";const COPY=SOURCE;' + warm
+        # Existing diagnostics point to the referenced constant initializer.
+        self.check(prefix + 'native main{let SOURCE:string;println(COPY);return 0;}',
+                   'SOURCE', occurrence=1, message='uninitialized value')
+        self.check(prefix + 'native main{own let SOURCE:string="owned";'
+                   'send 0,Drop,move SOURCE;println(COPY);return 0;}',
+                   'SOURCE', occurrence=1, message='use of moved owned value')
+
+    def test_constant_index_keeps_first_duplicate_and_unknown_value_span(self):
+        padding = ''.join(f'const K_{i}={i};' for i in range(64))
+        warm = ''.join(f'fn warm_{i}():int{{return K_63;}}' for i in range(20))
+        self.check(padding + 'const PICK="first";const PICK=7;' + warm +
+                   'fn bad():int{return PICK;}native main{return 0;}',
+                   'PICK', occurrence=2, message='type mismatch')
+        self.check(padding + warm + 'native main{return absent;}', 'absent', message='unknown value')
+
+    def test_function_signature_error_after_index_promotion(self):
+        # Repeated late hits exhaust the initial probe budget. The sorted
+        # lookup must retain the first signature and the original source span.
+        text = ''.join(f'fn warm_{i}():int{{return pick(1);}}\n' for i in range(20))
+        text += '''fn pick(value:int):int{return value;}
+fn pick(value:string):int{return 0;}
+native main { return pick("bad"); }
+'''
+        self.check(text, '"bad"', message='type mismatch')
+
+    def test_promoted_local_index_reads_current_flow_and_move_state(self):
+        padding = ''.join(f'let p{i}:int=seed+{i};' for i in range(80))
+        self.check('native main{own let payload:string="owned";let seed:int=7;' + padding +
+                   'send 0,Drop,move payload;println(payload);return 0;}',
+                   'payload', occurrence=2, message='use of moved owned value')
+        self.check('fn checked(flag:int):int{let value:int;let seed:int=7;' + padding +
+                   'if(flag){value=1;}return value;}native main{return 0;}',
+                   'value', occurrence=2, message='uninitialized value')
+        self.check('native main{let value:int=41;let seed:int=7;' + padding +
+                   '{let value:string=value;}return 0;}',
+                   'value', occurrence=2, message='type mismatch')
+
     def test_initializer_multiline_raw_string(self):
         self.check('native main {\n let value:int = "first\\n\nsecond";\n return 0;\n}',
                    '"first\\n\nsecond"', message='type mismatch')

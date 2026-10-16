@@ -1,20 +1,28 @@
 #include "semantic.h"
 #include "mod_registry.h"
+#include "function_index.h"
+#include "const_index.h"
+#include "local_index.h"
 
 /* Unknown is deliberately distinct from every language type: imported binary
  * APIs do not expose a typed Forge AST. Never guess signatures from names. */
 #define UNKNOWN ((ForgeTypeKind)-1)
 #define FUNCTION_REFERENCE ((ForgeTypeKind)-2)
 typedef struct { ForgeStr name; ForgeType type; bool initialized, owned; } Local;
+_Static_assert(offsetof(Local, name) == 0, "local index requires a leading name");
 typedef struct {
     Program *program;
     ForgeStr module;
     ProcessDecl *process;
     Local *locals;
     size_t count, capacity;
+    ForgeLocalIndex local_index;
     ForgeType result;
     unsigned loops, depth;
     bool coroutine;
+    ForgeConstIndex constants;
+    ForgeFunctionIndex functions, library_functions;
+    ForgeFunctionIndex *module_functions;
 } Check;
 
 static void error_at(SourceSpan span, ForgeStr name, const char *reason) {
@@ -47,32 +55,29 @@ static void require(ForgeType to, ForgeType from, ForgeStr name, SourceSpan loca
     if (!compatible(to, from)) error(name, "type mismatch for");
 }
 static Local *local(Check *c, ForgeStr name) {
-    for (size_t i = c->count; i; --i)
-        if (forge_str_eq(c->locals[i-1].name, name)) return &c->locals[i-1];
-    return NULL;
+    /* Borrow only until the next declare(): expression checking never declares
+     * bindings. The index itself never retains this reallocatable pointer. */
+    size_t i = forge_local_find(&c->local_index, c->locals, c->count, sizeof(*c->locals), name);
+    return i == SIZE_MAX ? NULL : &c->locals[i];
 }
 static void declare(Check *c, ForgeStr name, ForgeType t, bool initialized) {
     c->locals = forge_array_reserve(c->locals, c->count, &c->capacity, sizeof(*c->locals), 16);
     c->locals[c->count++] = (Local){name, t, initialized, false};
-}
-static FnDecl *find_fn(FnDecl *fns, size_t count, ForgeStr name) {
-    for (size_t i = 0; i < count; ++i)
-        if (forge_str_eq(fns[i].name, name)) return &fns[i];
-    return NULL;
+    forge_local_push(&c->local_index, name);
 }
 static FnDecl *resolve(Check *c, ForgeStr module, ForgeStr name) {
     Program *p = c->program;
     if (module.len) {
         for (size_t i = 0; i < p->module_count; ++i)
             if (forge_str_eq(p->modules[i].name, module))
-                return find_fn(p->modules[i].functions, p->modules[i].fn_count, name);
+                return forge_function_index_get(&c->module_functions[i], name);
         if (p->library.present && forge_str_eq(p->library.name, module))
-            return find_fn(p->library.functions, p->library.fn_count, name);
+            return forge_function_index_get(&c->library_functions, name);
         return NULL;
     }
-    FnDecl *fn = find_fn(p->functions, p->fn_count, name);
+    FnDecl *fn = forge_function_index_get(&c->functions, name);
     if (!fn && p->library.present)
-        fn = find_fn(p->library.functions, p->library.fn_count, name);
+        fn = forge_function_index_get(&c->library_functions, name);
     return fn;
 }
 static ForgeType expression(Check *, Expr *);
@@ -226,10 +231,12 @@ static ForgeType expression(Check *c, Expr *e) {
             if (!l->initialized) error(e->as.ident, l->owned ? "use of moved owned value" : "uninitialized value");
             t = l->type; break;
         }
-        for (size_t i = 0; i < c->program->const_count; ++i)
-            if (forge_str_eq(c->program->consts[i].name, e->as.ident)) {
-                t = expression(c, c->program->consts[i].value); goto done;
-            }
+        ConstDecl *constant = forge_const_index_get(&c->constants, e->as.ident);
+        if (constant) {
+            /* Recheck in this caller's context: constant initializers may refer
+             * to names shadowed by live locals. Do not memoize their types. */
+            t = expression(c, constant->value); goto done;
+        }
         /* Function identifiers are accepted as callback references. */
         if (resolve(c, c->module, e->as.ident) || resolve(c, forge_str(""), e->as.ident)) { t.kind=FUNCTION_REFERENCE; break; }
         error(e->as.ident, "unknown value"); break;
@@ -367,7 +374,7 @@ static void statement(Check *c, Stmt *s) {
         }
         --c->loops;
         for (size_t i=0;i<n;++i) c->locals[i].initialized=before[i] && after[i];
-        free(after); free(before); c->count = outer; break;
+        free(after); free(before); forge_local_truncate(&c->local_index, outer); c->count = outer; break;
     }
     case STMT_BREAK: case STMT_CONTINUE:
         if (!c->loops) error(forge_str("loop control"), "outside loop");
@@ -431,11 +438,11 @@ static void block(Check *c, Block *b) {
     if (++c->depth > 2000) forge_die("semantic block nesting limit exceeded");
     size_t count = c->count;
     for (Stmt *s = b->first; s; s = s->next) statement(c, s);
-    c->count = count;
+    forge_local_truncate(&c->local_index, count); c->count = count;
     --c->depth;
 }
 static void body(Check *c, Param *params, Block *b, ForgeType result) {
-    c->count = 0; c->loops = 0; c->result = result;
+    forge_local_truncate(&c->local_index, 0); c->count = 0; c->loops = 0; c->result = result;
     for (Param *p = params; p; p = p->next) declare(c, p->name, p->type, true);
     block(c, b);
 }
@@ -496,6 +503,16 @@ static void functions(Check *c, FnDecl *fns, size_t count) {
 }
 void forge_check_program(Program *p) {
     Check c = {.program = p};
+    c.constants = forge_const_index_build(p->consts, p->const_count);
+    c.functions = forge_function_index_build(p->functions, p->fn_count);
+    if (p->library.present)
+        c.library_functions = forge_function_index_build(p->library.functions, p->library.fn_count);
+    if (p->module_count)
+        c.module_functions = forge_calloc_array(p->module_count, sizeof(*c.module_functions));
+    /* Keep one owner per module, in original order. A matching empty module
+     * must still block later modules and a same-named library in resolve(). */
+    for (size_t i = 0; i < p->module_count; i++)
+        c.module_functions[i] = forge_function_index_build(p->modules[i].functions, p->modules[i].fn_count);
     for (size_t i = 0; i < p->const_count; ++i) expression(&c, p->consts[i].value);
     functions(&c, p->functions, p->fn_count);
     if (p->library.present) functions(&c, p->library.functions, p->library.fn_count);
@@ -516,4 +533,11 @@ void forge_check_program(Program *p) {
         c.coroutine = false;
     }
     free(c.locals);
+    forge_local_free(&c.local_index);
+    forge_const_index_free(&c.constants);
+    forge_function_index_free(&c.functions);
+    forge_function_index_free(&c.library_functions);
+    for (size_t i = 0; i < p->module_count; i++)
+        forge_function_index_free(&c.module_functions[i]);
+    free(c.module_functions);
 }

@@ -22,9 +22,28 @@ class JavaScriptTest(unittest.TestCase):
  def test_parameter_shadowing_module_function(self):
   r=self.compile_run('import helper;native main{println(helper.text("value"));return 0;}',{'helper':'fn text(text: string): string {let read: string=text;return read;}fn read(): string{return "wrong";}'})
   self.assertEqual(r.returncode,0,r.stderr);self.assertEqual(r.stdout.strip(),"value")
+ def test_indexed_module_owners_callbacks_and_shadowing(self):
+  padding=''.join(f'fn filler_{i}():int{{return {i};}}' for i in range(32))
+  helper=padding+'''fn target(x:int):int{return x+1;}
+fn run():int{return target(41);}fn echo(target:string):string{return target;}
+extern fn js_invoke(callback:int):int;
+fn callback(x:int):int{return target(x);}fn call_callback():int{return js_invoke(callback);}'''
+  peer=padding+'fn target(value:string):string{return value;}'
+  source='import helper;import peer;'+padding+'''fn target(x:string):string{return x;}
+native main{println(helper.run());println(helper.echo("shadow"));println(helper.call_callback());println(peer.target("peer"));println(target("global"));return 0;}'''
+  r=self.compile_run(source,{'helper':helper,'peer':peer},'globalThis.ForgeNative={js_invoke:fn=>fn(41n)};')
+  self.assertEqual(r.returncode,0,r.stderr);self.assertEqual(r.stdout,'42\nshadow\n42\npeer\nglobal\n')
  def test_scoped_views_and_builder_bytes(self):
   r=self.compile_run('import strings;native main{let v: int=str_view("한글😀");println(str_view_len(v));println(str_view_at(v,0));println(str_view_at(v,9));println(str_view_at(v,-1));let b: int=str_builder();str_builder_append(b,"한글");let first: string=str_builder_finish(b);str_builder_char(b,240);str_builder_char(b,159);str_builder_char(b,152);str_builder_char(b,128);println(str_builder_finish(b));println(first);println(str_builder_char(b,0));println(str_builder_char(b,256));str_reset_arena();println(str_view_len(v));let next: int=str_builder();str_builder_append(next,"reset");println(str_builder_finish(next));return 0;}')
   self.assertEqual(r.returncode,0,r.stderr);self.assertEqual(r.stdout.splitlines(),['10','237','128','-1','한글😀','한글','0','0','0','reset'])
+ def test_indexed_constants_keep_shadowing(self):
+  constants=''.join(f'const K_{i}={i};' for i in range(64))
+  warm=''.join(f'fn warm_{i}():int{{return K_63;}}' for i in range(20))
+  r=self.compile_run(constants+warm+'''const TEXT="constant";
+fn show(TEXT:string):string{return TEXT;}
+native main{println(warm_19());println(K_63);
+println(show("parameter"));{let TEXT:int=9;println(TEXT);}println(TEXT);return 0;}''')
+  self.assertEqual(r.returncode,0,r.stderr);self.assertEqual(r.stdout,'63\n63\nparameter\n9\nconstant\n')
  def test_builder_with_capacity(self):
   r=self.compile_run('import strings;native main{let b: int=str_builder_with_capacity(3);println(str_builder_char(b,65));str_builder_char(b,66);str_builder_char(b,67);println(str_builder_finish(b));let invalid: int=str_builder_with_capacity(-1);println(invalid);return 0;}')
   self.assertEqual(r.returncode,0,r.stderr);self.assertEqual(r.stdout.splitlines(),['1','ABC','0'])
