@@ -9,6 +9,9 @@
 typedef struct {
     const char *fr_name;
     const char *c_name;
+    /* Result followed by arguments: v=void, i=int, f=float, s=string,
+     * p=pointer. Integer runtime handles remain integers. */
+    const char *signature;
 } ForgeStdFn;
 
 typedef struct {
@@ -20,6 +23,7 @@ typedef struct {
 
 const ForgeModule *forge_std_module(ForgeStr name);
 const char *forge_std_c_name(ForgeStr fr_name, ForgeStr *imports, size_t import_count);
+const ForgeStdFn *forge_std_function(ForgeStr name, ForgeStr *imports, size_t import_count);
 const char *forge_std_header(ForgeStr module);
 int forge_import_is_stdlib(ForgeStr name);
 void forge_lib_mangle(char *out, size_t cap, ForgeStr lib, ForgeStr fn);

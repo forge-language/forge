@@ -15,7 +15,7 @@ typedef struct {
     ForgeStr module;
     ProcessDecl *process;
     Local *locals;
-    size_t count, capacity;
+    size_t count, capacity, scope_start;
     ForgeLocalIndex local_index;
     ForgeType result;
     unsigned loops, depth;
@@ -60,7 +60,10 @@ static Local *local(Check *c, ForgeStr name) {
     size_t i = forge_local_find(&c->local_index, c->locals, c->count, sizeof(*c->locals), name);
     return i == SIZE_MAX ? NULL : &c->locals[i];
 }
-static void declare(Check *c, ForgeStr name, ForgeType t, bool initialized) {
+static void declare(Check *c, ForgeStr name, ForgeType t, bool initialized, SourceSpan location) {
+    size_t existing = forge_local_find(&c->local_index, c->locals, c->count, sizeof(*c->locals), name);
+    if (existing != SIZE_MAX && existing >= c->scope_start)
+        error(name, "duplicate declaration of");
     c->locals = forge_array_reserve(c->locals, c->count, &c->capacity, sizeof(*c->locals), 16);
     c->locals[c->count++] = (Local){name, t, initialized, false};
     forge_local_push(&c->local_index, name);
@@ -81,6 +84,16 @@ static FnDecl *resolve(Check *c, ForgeStr module, ForgeStr name) {
     return fn;
 }
 static ForgeType expression(Check *, Expr *);
+static ForgeType signature_type(char code) {
+    switch (code) {
+    case 'v': return forge_type_void();
+    case 'i': return forge_type_int();
+    case 'f': return forge_type_float();
+    case 's': return forge_type_string();
+    case 'p': return forge_type_ptr();
+    default: forge_die("invalid standard library signature"); return unknown();
+    }
+}
 /* Callback ABIs currently use int/ptr handles. Keep their compatibility scoped
  * to argument positions; a function reference is never a scalar value. A source
  * wrapper is eligible only when its parameter is forwarded directly to an
@@ -183,13 +196,13 @@ static ForgeType call(Check *c, ForgeStr module, ForgeStr name, Expr **args, siz
         size_t required = forge_str_eq(name, forge_str("thread_spawn")) ? 1 : 2;
         if (arity != required) error(name, "wrong callback argument count for");
         require(forge_type_int(), expression(c, args[1]), name, args[1]->span);
-        return forge_type_int();
+        return required == 1 ? forge_type_int() : forge_type_void();
     }
     FnDecl *fn = NULL;
-    const char *standard = module.len ? NULL :
-        forge_std_c_name(name, c->program->imports, c->program->import_count);
+    const ForgeStdFn *standard = module.len ? NULL :
+        forge_std_function(name, c->program->imports, c->program->import_count);
     if (!standard && !module.len && c->program->library.present)
-        standard = forge_std_c_name(name, c->program->library.imports, c->program->library.import_count);
+        standard = forge_std_function(name, c->program->library.imports, c->program->library.import_count);
     if (!standard) {
         fn = resolve(c, module.len ? module : c->module, name);
         if (!fn && !module.len) fn = resolve(c, forge_str(""), name);
@@ -202,18 +215,39 @@ static ForgeType call(Check *c, ForgeStr module, ForgeStr name, Expr **args, siz
         forge_str_eq(name, forge_str("print")) || forge_str_eq(name, forge_str("print_int")) ||
         forge_str_eq(name, forge_str("print_str")) || forge_str_eq(name, forge_str("eprint")) ||
         forge_str_eq(name, forge_str("eprintln")));
+    if (standard || builtin) {
+        bool scalar_print = builtin && forge_str_eq(name,forge_str("println"));
+        size_t expected = builtin ? 1 : strlen(standard->signature) - 1;
+        if (!scalar_print && count != expected) error(name, "wrong argument count for");
+        for (size_t i=0; i<count; ++i) {
+            ForgeType value=expression(c,args[i]);
+            if (value.kind==TY_VOID) error_at(args[i]->span,name,"void argument for");
+            if (value.kind==FUNCTION_REFERENCE)
+                error_at(args[i]->span,name,"function reference is not a scalar argument for");
+            if (scalar_print) {
+                if (value.kind!=UNKNOWN && value.kind!=TY_INT && value.kind!=TY_BOOL &&
+                    value.kind!=TY_FLOAT && value.kind!=TY_STRING)
+                    error_at(args[i]->span,name,"invalid print argument for");
+            } else {
+                ForgeType expected_type = builtin ?
+                    (forge_str_eq(name,forge_str("print_int")) ? forge_type_int() : forge_type_string()) :
+                    signature_type(standard->signature[i+1]);
+                require(expected_type,value,name,args[i]->span);
+            }
+        }
+        return builtin ? forge_type_void() : signature_type(standard->signature[0]);
+    }
     bool binary = false;
     if (module.len && !forge_import_is_file_module(c->program, module)) {
         for (size_t i = 0; i < c->program->import_count; ++i)
             if (forge_str_eq(module, c->program->imports[i]) && !forge_import_is_stdlib(module)) binary = true;
     }
-    if (!standard && !builtin && !binary) error(name, "unknown function");
+    if (!binary) error(name, "unknown function");
     for (size_t i = 0; i < count; ++i) {
         ForgeType t = expression(c, args[i]);
         if (t.kind == TY_VOID) error(name, "void argument for");
-        if (t.kind == FUNCTION_REFERENCE && !binary) error(name, "function reference is not a scalar argument for");
     }
-    return builtin ? forge_type_void() : unknown();
+    return unknown();
 }
 static ForgeType expression(Check *c, Expr *e) {
     SourceSpan location = e ? (e->focus.file ? e->focus : e->span) : (SourceSpan){0};
@@ -312,7 +346,7 @@ static void statement(Check *c, Stmt *s) {
         if (s->as.let.init) require(s->as.let.type, expression(c, s->as.let.init), s->as.let.name, s->as.let.init->span);
         if (s->as.let.owned_ && (s->as.let.type.kind!=TY_STRING || !s->as.let.init))
             error(s->as.let.name,"owned bindings require initialized strings for");
-        declare(c, s->as.let.name, s->as.let.type, s->as.let.init != NULL);
+        declare(c, s->as.let.name, s->as.let.type, s->as.let.init != NULL, location);
         c->locals[c->count-1].owned=s->as.let.owned_; break;
     case STMT_ASSIGN: {
         Local *l = local(c, s->as.assign.name);
@@ -360,6 +394,7 @@ static void statement(Check *c, Stmt *s) {
     }
     case STMT_FOR: {
         size_t outer = c->count;
+        size_t saved_scope = c->scope_start; c->scope_start = outer;
         if (s->as.for_stmt.init) statement(c, s->as.for_stmt.init);
         condition(c, s->as.for_stmt.cond);
         size_t n = c->count; bool *before = snapshot(c);
@@ -374,7 +409,8 @@ static void statement(Check *c, Stmt *s) {
         }
         --c->loops;
         for (size_t i=0;i<n;++i) c->locals[i].initialized=before[i] && after[i];
-        free(after); free(before); forge_local_truncate(&c->local_index, outer); c->count = outer; break;
+        free(after); free(before); forge_local_truncate(&c->local_index, outer); c->count = outer;
+        c->scope_start = saved_scope; break;
     }
     case STMT_BREAK: case STMT_CONTINUE:
         if (!c->loops) error(forge_str("loop control"), "outside loop");
@@ -437,14 +473,17 @@ static void block(Check *c, Block *b) {
     if (!b) return;
     if (++c->depth > 2000) forge_die("semantic block nesting limit exceeded");
     size_t count = c->count;
+    size_t saved_scope = c->scope_start; c->scope_start = count;
     for (Stmt *s = b->first; s; s = s->next) statement(c, s);
     forge_local_truncate(&c->local_index, count); c->count = count;
+    c->scope_start = saved_scope;
     --c->depth;
 }
 static void body(Check *c, Param *params, Block *b, ForgeType result) {
-    forge_local_truncate(&c->local_index, 0); c->count = 0; c->loops = 0; c->result = result;
-    for (Param *p = params; p; p = p->next) declare(c, p->name, p->type, true);
-    block(c, b);
+    forge_local_truncate(&c->local_index, 0); c->count = 0; c->scope_start = 0;
+    c->loops = 0; c->result = result;
+    for (Param *p = params; p; p = p->next) declare(c, p->name, p->type, true, p->span);
+    if (b) for (Stmt *s=b->first; s; s=s->next) statement(c,s);
 }
 /* Reachability summarizes exits rather than searching for a return token.
  * Only literal true loops establish nontermination; arbitrary conditions remain
@@ -494,12 +533,13 @@ static unsigned flow_block(Block *b,unsigned depth) {
     return exits;
 }
 static void functions(Check *c, FnDecl *fns, size_t count) {
-    for (size_t i = 0; i < count; ++i)
+    for (size_t i = 0; i < count; ++i) {
+        body(c, fns[i].params, fns[i].is_extern ? NULL : &fns[i].body, fns[i].ret_type);
         if (!fns[i].is_extern) {
-            body(c, fns[i].params, &fns[i].body, fns[i].ret_type);
             if (fns[i].ret_type.kind!=TY_VOID && (flow_block(&fns[i].body,0)&FLOW_NEXT))
                 error_at(fns[i].body.closing,fns[i].name,"reachable end of non-void function");
         }
+    }
 }
 void forge_check_program(Program *p) {
     Check c = {.program = p};

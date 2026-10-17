@@ -93,8 +93,12 @@ from scalar values, with limited opaque callback ABI compatibility.
 consumes that binding. Native lowering copies the literal or arena string into a
 heap payload owned by the mailbox, including rejected sends. Borrowed aliases
 remain valid; this boundary copy is not zero-copy ownership or lifetime checking.
-General `move` expressions, standard-library and binary-library signatures,
-ownership aliases and lifetimes remain unsupported by this check. Integer process
+Stage0 checks the argument counts, scalar argument types and return types of all
+mapped standard-library functions against an explicit SDK signature catalog.
+Duplicate local declarations and parameters in the same scope are rejected;
+nested block shadowing remains supported. General `move` expressions,
+binary-library signatures, ownership aliases and lifetimes remain unsupported
+by this check. Integer process
 handles still rely on the runtime/FFI contract. The separate `forge-fg` compiler
 checks names, scalar types, function signatures, loop control and reachable
 non-void function fallthrough within its documented subset before writing C or
