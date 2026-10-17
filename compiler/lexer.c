@@ -136,10 +136,8 @@ static Token read_string(Lexer *lx) {
     lx->pos++;
     lx->col++;
     size_t start = lx->pos;
-    bool has_escape = false;
     while (lx->pos < lx->len && lx->src[lx->pos] != '"') {
         if (lx->src[lx->pos] == '\\' && lx->pos + 1 < lx->len) {
-            has_escape = true;
             lx->pos += 2;
             lx->col += 2;
             continue;
@@ -154,28 +152,25 @@ static Token read_string(Lexer *lx) {
     }
     if (lx->pos >= lx->len) forge_die("unterminated string");
     size_t raw_len = lx->pos - start;
-    ForgeStr lex = { (char *)lx->src + start, raw_len };
-    if (has_escape) {
-        /* Store the decoded bytes, not the source spelling: consumers (codegen)
-         * re-escape on emit, so keeping "\n" verbatim here would produce a
-         * literal backslash-n in the output instead of a newline. The buffer
-         * outlives the lexer along with the rest of the AST. */
-        char *buf = (char *)malloc(raw_len + 1);
-        if (!buf) forge_die("out of memory");
-        size_t out_len = 0;
-        for (size_t i = 0; i < raw_len; i++) {
-            char c = lex.data[i];
-            if (c == '\\' && i + 1 < raw_len) {
-                i++;
-                buf[out_len++] = decode_escape(lex.data[i]);
-            } else {
-                buf[out_len++] = c;
-            }
+    /* Always copy the decoded bytes into memory owned by the AST. Consumers
+     * (codegen) re-escape on emit, so keeping "\n" verbatim here would produce
+     * a literal backslash-n in the output instead of a newline. A stable heap
+     * buffer also lets program_free release every string literal without
+     * guessing whether its bytes point into the source text. */
+    char *buf = (char *)malloc(raw_len + 1);
+    if (!buf) forge_die("out of memory");
+    size_t out_len = 0;
+    for (size_t i = 0; i < raw_len; i++) {
+        char c = lx->src[start + i];
+        if (c == '\\' && i + 1 < raw_len) {
+            i++;
+            buf[out_len++] = decode_escape(lx->src[start + i]);
+        } else {
+            buf[out_len++] = c;
         }
-        buf[out_len] = '\0';
-        lex.data = buf;
-        lex.len = out_len;
     }
+    buf[out_len] = '\0';
+    ForgeStr lex = { buf, out_len };
     lx->pos++;
     lx->col++;
     Token t = make_token(lx, TOK_STRING, lex);

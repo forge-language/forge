@@ -281,6 +281,9 @@ static void free_expr(Expr *e) {
     case EXPR_MOVE:
         free_expr(e->as.move_expr);
         break;
+    case EXPR_STRING:
+        free(e->as.string_val.data);
+        break;
     default:
         break;
     }
@@ -356,6 +359,8 @@ void program_free(Program *p) {
     }
     free(p->source_files);
     free(p->imports);
+    for (size_t i = 0; i < p->path_import_count; i++)
+        free(p->path_imports[i].data);
     free(p->path_imports);
     for (size_t i = 0; i < p->module_count; i++) {
         free(p->modules[i].path);
