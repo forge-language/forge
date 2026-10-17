@@ -11,7 +11,9 @@ typedef struct {
   unsigned indent;
   unsigned match_id;
   ForgeStr locals[1024];
+  ForgeTypeKind local_types[1024];
   size_t local_count;
+  ForgeTypeKind return_type;
   ForgeFunctionIndex *module_functions;
 } JS;
 static void expression(JS *g, Expr *e);
@@ -35,10 +37,24 @@ static int local(JS *g, ForgeStr name_) {
       return 1;
   return 0;
 }
-static void add_local(JS *g, ForgeStr name_) {
+static ForgeTypeKind local_type(JS *g, ForgeStr name_) {
+  for (size_t i = g->local_count; i > 0; i--)
+    if (forge_str_eq(g->locals[i - 1], name_))
+      return g->local_types[i - 1];
+  return TY_VOID;
+}
+static void add_local(JS *g, ForgeStr name_, ForgeTypeKind type) {
   if (g->local_count == 1024)
     forge_die("JavaScript function exceeds 1024 local bindings");
-  g->locals[g->local_count++] = name_;
+  g->locals[g->local_count] = name_;
+  g->local_types[g->local_count++] = type;
+}
+static void converted_expression(JS *g, Expr *e, ForgeTypeKind type) {
+  if (type == TY_FLOAT)
+    fputs("Number(", g->out);
+  expression(g, e);
+  if (type == TY_FLOAT)
+    fputc(')', g->out);
 }
 static void name(FILE *out, ForgeStr value) {
   fprintf(out, "fr_%.*s", (int)value.len, value.data);
@@ -235,18 +251,19 @@ static void inline_stmt(JS *g, Stmt *s) {
     name(g->out, s->as.let.name);
     fputc('=', g->out);
     if (s->as.let.init)
-      expression(g, s->as.let.init);
+      converted_expression(g, s->as.let.init, s->as.let.type.kind);
     else
       fputs(s->as.let.type.kind == TY_STRING  ? "\"\""
             : s->as.let.type.kind == TY_BOOL  ? "false"
             : s->as.let.type.kind == TY_FLOAT ? "0"
                                               : "0n",
             g->out);
-    add_local(g, s->as.let.name);
+    add_local(g, s->as.let.name, s->as.let.type.kind);
   } else if (s->kind == STMT_ASSIGN) {
     name(g->out, s->as.assign.name);
     fputc('=', g->out);
-    expression(g, s->as.assign.value);
+    converted_expression(g, s->as.assign.value,
+                         local_type(g, s->as.assign.name));
   } else
     forge_die("unsupported for-loop statement in JavaScript backend");
 }
@@ -265,7 +282,7 @@ static void statements(JS *g, Stmt *s) {
       break;
     case STMT_RETURN:
       fputs("return ", g->out);
-      expression(g, s->as.ret);
+      converted_expression(g, s->as.ret, g->return_type);
       fputs(";\n", g->out);
       break;
     case STMT_IF:
@@ -345,8 +362,9 @@ static void statements(JS *g, Stmt *s) {
 }
 static void function(JS *g, FnDecl *fn) {
   g->local_count = 0;
+  g->return_type = fn->ret_type.kind;
   for (Param *p = fn->params; p; p = p->next)
-    add_local(g, p->name);
+    add_local(g, p->name, p->type.kind);
   fputs("function ", g->out);
   if (g->module.len)
     module_name(g->out, g->module, fn->name);
@@ -363,17 +381,39 @@ static void function(JS *g, FnDecl *fn) {
     fputs("{ const f=globalThis.ForgeNative?.[", g->out);
     quote(g->out, fn->name);
     fputs("]; if(typeof f!=='function') throw new Error('Missing Forge "
-          "JavaScript FFI'); return f(",
+          "JavaScript FFI'); return ",
           g->out);
+    if (fn->ret_type.kind == TY_FLOAT)
+      fputs("Number(", g->out);
+    fputs("f(", g->out);
     for (Param *p = fn->params; p; p = p->next) {
       if (p != fn->params)
         fputc(',', g->out);
+      if (p->type.kind == TY_FLOAT)
+        fputs("Number(", g->out);
       name(g->out, p->name);
+      if (p->type.kind == TY_FLOAT)
+        fputc(')', g->out);
     }
-    fputs("); }\n", g->out);
+    fputc(')', g->out);
+    if (fn->ret_type.kind == TY_FLOAT)
+      fputc(')', g->out);
+    fputs("; }\n", g->out);
   } else {
-    block(g, &fn->body);
-    fputs("\n\n", g->out);
+    fputs("{\n", g->out);
+    g->indent++;
+    for (Param *p = fn->params; p; p = p->next)
+      if (p->type.kind == TY_FLOAT) {
+        pad(g);
+        name(g->out, p->name);
+        fputs("=Number(", g->out);
+        name(g->out, p->name);
+        fputs(");\n", g->out);
+      }
+    statements(g, fn->body.first);
+    g->indent--;
+    pad(g);
+    fputs("}\n\n", g->out);
   }
 }
 void codegen_emit_js(Program *prog, FILE *out) {
@@ -439,7 +479,7 @@ void codegen_emit_js(Program *prog, FILE *out) {
       "fr_str_builder_char:(h,c)=>{const b=builder(h);if(!b||c<=0n||c>255n)return 0n;reserve(b,b.len+1);b.data[b.len++]=Number(c);return h;},\n"
       "fr_str_builder_finish:h=>{const b=builder(h);return b?decode(b.data.subarray(0,b.len)):null;},"
       "fr_str_builder_finish_take:h=>{const b=builder(h);if(!b)return null;const s=decode(b.data.subarray(0,b.len));b.data=new Uint8Array(0);b.len=0;return s;},\n"
-      "fr_abs_i:x=>x<0n?-x:x,fr_abs_f:Math.abs,fr_min_i:(a,b)=>a<b?a:b,fr_max_"
+      "fr_abs_i:x=>x<0n?-x:x,fr_abs_f:x=>Math.abs(Number(x)),fr_min_i:(a,b)=>a<b?a:b,fr_max_"
       "i:(a,b)=>a>b?a:b,fr_clamp_i:(x,a,b)=>x<a?a:x>b?b:x,fr_pow_i:(a,b)=>{if("
       "b<0n)return 0n;let "
       "r=1n;while(b>0n){if(b&1n)r=wrap(r*a);a=wrap(a*a);b>>=1n;}return "
@@ -479,6 +519,7 @@ void codegen_emit_js(Program *prog, FILE *out) {
   }
   g.module = forge_str("");
   g.local_count=0;
+  g.return_type=TY_INT;
   for (size_t i = 0; i < prog->native_count; i++)
     if (forge_str_eq(prog->natives[i].name, forge_str("main"))) {
       fputs("function __forge_main() ", out);

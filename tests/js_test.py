@@ -19,6 +19,43 @@ class JavaScriptTest(unittest.TestCase):
  def test_mixed_float_and_strings(self):
   r=self.compile_run('import strings; native main {println(1.5+2);println(str_len("한글"));println(str_char_at("한글",0));println(str_char_at("a",9));println(str_sub("한글",3,3));return 0;}')
   self.assertEqual(r.returncode,0,r.stderr);self.assertEqual(r.stdout.splitlines(),['3.5','6','237','-1','글'])
+ def test_declared_floats_convert_integer_and_boolean_values(self) -> None:
+  result = self.compile_run('''import math;
+fn half(x: float): float {return x/2;}
+fn integer_return(): float {return 5;}
+fn bool_return(): float {return true;}
+fn once(): int {println("once");return 5;}
+native main {
+ let x: float=5;println(x/2==2.5);
+ x=7;println(x/2==3.5);
+ {let x: int=9;x=5;println(x/2==2);}
+ x=9;println(x/2==4.5);
+ {let x: float=5;x=7;println(x/2==3.5);}
+ println(half(5)==2.5);println(half(true)==0.5);
+ println(integer_return()/2==2.5);println(bool_return()/2==0.5);
+ let flag: float=true;println(flag/2==0.5);
+ for(let i: float=1;i<4;i=3){
+  println((i==1 && i/2==0.5)||(i==3 && i/2==1.5));if(i==3){break;}
+ }
+ println(abs_f(-5)/2==2.5);println(half(once())==2.5);
+ return 0;
+}''')
+  self.assertEqual(result.returncode, 0, result.stderr)
+  self.assertEqual(result.stdout.splitlines(), ['1'] * 13 + ['once', '1'])
+ def test_float_module_callbacks_and_extern_boundaries(self) -> None:
+  result = self.compile_run('''import helper;
+native main {println(helper.half(5)==2.5);println(helper.run()==2.5);return 0;}''',
+   {'helper': '''extern fn js_half(x: float): float;
+extern fn js_invoke(callback: int): float;
+fn callback(x: float): float {return x/2;}
+fn half(x: int): float {return js_half(x);}
+fn run(): float {return js_invoke(callback)/2;}'''},
+   '''globalThis.ForgeNative={
+js_half:x=>{if(typeof x!=='number')throw new Error('float argument is not Number');return x/2;},
+js_invoke:fn=>{if(fn(5n)!==2.5)throw new Error('float callback argument is not converted');return 5n;}
+};''')
+  self.assertEqual(result.returncode, 0, result.stderr)
+  self.assertEqual(result.stdout.splitlines(), ['1', '1'])
  def test_parameter_shadowing_module_function(self):
   r=self.compile_run('import helper;native main{println(helper.text("value"));return 0;}',{'helper':'fn text(text: string): string {let read: string=text;return read;}fn read(): string{return "wrong";}'})
   self.assertEqual(r.returncode,0,r.stderr);self.assertEqual(r.stdout.strip(),"value")

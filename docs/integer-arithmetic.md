@@ -37,3 +37,21 @@ separate models; neither is a proof of refinement of this wrapping implementatio
 against a Python oracle, checks native execution with UBSan at O0 and O3, and
 covers invalid division, floating promotion, boolean operations, suspended
 coroutines and exported library functions.
+
+## Floating-point boundaries and output
+
+Stage0 accepts integer and boolean values at declared `float` boundaries. Both
+backends convert these values for local initialization/assignment, function
+parameters and function results. JavaScript also converts float extern arguments
+and results to Number, so an integer literal passed to a float parameter does not
+silently select BigInt division. Conversion evaluates its operand once.
+
+Native `println` dispatches on the actual generated C type, including types from
+external library headers. Float values use `%.17g` rather than integer output,
+preserving double precision without narrowing to int64. JavaScript retains its
+Number string formatting. Decimal spelling (including exponent notation and
+special values) is not yet a shared cross-backend formatting contract.
+
+`tests/scalar_conformance_test.py` compares representative scalar programs across
+native O0/O3 with UBSan and JavaScript, and checks native float output across
+module calls, extern results and coroutine suspension.

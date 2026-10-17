@@ -683,14 +683,7 @@ static void emit_expr_inner(Codegen *cg, Expr *e) {
             for (size_t i = 0; i < e->as.call.arg_count; i++) {
                 Expr *arg = e->as.call.args[i];
                 if (i > 0) fputs(" ", cg->out);
-                switch (cg_expr_str_kind(cg, arg)) {
-                case CG_STR_YES: fputs("fr_print_str(", cg->out); break;
-                case CG_STR_NO: fputs("fr_print_int(", cg->out); break;
-                /* Declaration not visible here (external library function):
-                 * let the C compiler pick the printer from the real type
-                 * instead of guessing from the function's name. */
-                case CG_STR_UNKNOWN: fputs("FORGE_PRINT_AUTO(", cg->out); break;
-                }
+                fputs("FORGE_PRINT_AUTO(", cg->out);
                 emit_expr(cg, arg);
                 fputs("); ", cg->out);
             }
@@ -2783,12 +2776,13 @@ static void emit_enums(Program *prog, FILE *out) {
     }
 }
 
-/* Used for calls whose declaration this compilation cannot see (functions in a
- * prebuilt library). The C compiler knows their real prototype from the
- * generated header, so let it pick the printer rather than guessing here. */
+/* Select from the actual C type, including declarations supplied by binary
+ * library headers. _Generic's controlling expression is not evaluated. */
 static void emit_print_auto_macro(FILE *out) {
-    fputs("#define FORGE_PRINT_AUTO(x) _Generic((x), \\\n"
+    fputs("static inline void __forge_print_float(double value) { printf(\"%.17g\", value); }\n"
+          "#define FORGE_PRINT_AUTO(x) _Generic((x), \\\n"
           "    char*: fr_print_str, const char*: fr_print_str, \\\n"
+          "    float: __forge_print_float, double: __forge_print_float, \\\n"
           "    default: fr_print_int)(x)\n", out);
 }
 
