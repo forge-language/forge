@@ -1,6 +1,6 @@
 # Compiler regression runners
 
-Root `CMakeLists.txt` registers five C executables and nine Python unittest
+Root `CMakeLists.txt` registers five C executables and eleven Python unittest
 programs. There is no local CMake file, pytest setup or shared fixture directory.
 
 ## Choose a surface
@@ -13,6 +13,8 @@ programs. There is no local CMake file, pytest setup or shared fixture directory
 | `diagnostics_test.py` | Source positions, text and structured diagnostics |
 | `driver_test.py` | SDK discovery, toolchain argv and file/path handling |
 | `arithmetic_test.py` | Python int64 oracle, O0/O3 UBSan and JS parity |
+| `scalar_conformance_test.py` | Float conversions and native/JS output, O0/O3 UBSan |
+| `semantic_contract_test.py` | All mapped SDK signatures and lexical duplicate declarations |
 | `ownership_test.py` | ASan/UBSan generated programs and bridge lifetimes |
 | `module_merge_test.py` | Imported declarations and source metadata |
 | `org_integration_test.py` | HTTP/TLS, JSON/string and coroutine integration |

@@ -149,7 +149,7 @@ if(BUILD_TESTING)
     if(Python3_Interpreter_FOUND)
         add_test(NAME module_merge_regressions COMMAND "${Python3_EXECUTABLE}"
             "${CMAKE_CURRENT_SOURCE_DIR}/tests/module_merge_test.py" "$<TARGET_FILE:forge>")
-        foreach(name IN ITEMS compiler driver selfhost org_integration ownership arithmetic diagnostics)
+        foreach(name IN ITEMS compiler driver selfhost org_integration ownership arithmetic diagnostics semantic_contract)
             if((name STREQUAL "ownership" OR name STREQUAL "arithmetic" OR name STREQUAL "diagnostics") AND NOT UNIX)
                 continue()
             endif()
@@ -173,6 +173,13 @@ if(BUILD_TESTING)
         if(FORGE_NODE)
             add_test(NAME javascript_regressions COMMAND "${Python3_EXECUTABLE}"
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/js_test.py" "$<TARGET_FILE:forge>")
+            if(UNIX)
+                add_test(NAME scalar_conformance_regressions COMMAND "${Python3_EXECUTABLE}"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/tests/scalar_conformance_test.py"
+                    --forge "$<TARGET_FILE:forge>" --root "${FORGE_ROOT_DIR}"
+                    --lib-dir "${FORGE_LIB_DIR}" --cc "${CMAKE_C_COMPILER}" --node "${FORGE_NODE}")
+                set_tests_properties(scalar_conformance_regressions PROPERTIES TIMEOUT 120)
+            endif()
         endif()
     endif()
 endif()
