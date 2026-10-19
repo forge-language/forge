@@ -176,10 +176,10 @@ native main{println(bad(-9223372036854775807-1));return 0;}
 
 ```forge
 // floats.fg: parameters keep zero division out of literal folding
-fn div(a:float,b:float):float{return a/b;}
+fn fdiv(a:float,b:float):float{return a/b;}
 native main{println(0.1);println(18446744073709551616.0);
-println(div(0.0,-1.0));println(div(1.0,0.0));println(div(-1.0,0.0));
-let n:float=div(0.0,0.0);println(n);println(n==n);return 0;}
+println(fdiv(0.0,-1.0));println(fdiv(1.0,0.0));println(fdiv(-1.0,0.0));
+let n:float=fdiv(0.0,0.0);println(n);println(n==n);return 0;}
 ```
 
 ```forge
@@ -225,7 +225,7 @@ native main{println(1.5%1);return 0;}
 | conversion | Accepted | `2.5\n2.5\n3.5\n`; status 0 | Stage0 native/JS |
 | wrapping | Accepted | `-9223372036854775808\n-2\n-1\n0\n`; status 0, no divide trap in skipped operand | Stage0 native/JS |
 | trap and three variations | Accepted compilation, runtime failure | Nonzero status; stderr contains `Forge integer division` | Stage0 native/JS |
-| floats | **Corpus as written fails native compile** (see amendment); renamed variant Accepted on supported IEEE host | Same numeric classes; formatter differences described above, final comparison `0` | Stage0 native/JS; excluded selfhost |
+| floats | Accepted on supported IEEE host; current `fdiv` example verified 2026-10-19 | Native O0/O3 and JS exit 0; backend-specific float text below, final comparison `0` | Stage0 native/JS; excluded selfhost |
 | nested | Accepted | Distinct byte sequences recorded above | Stage0 native/JS; float example excluded selfhost |
 | bool | Accepted | First print retains 2; wide conversion is a portability probe, not an expected shared value. **Observed 2026-10-17**: native `2` then `0`; Node `2` then `4294967296` | Stage0 native/JS; same ABI issue relevant to selfhost |
 | mixed | Accepted | **Confirmed 2026-10-17**: native prints `0` (false), Node prints `1` (true). See runtime-evidence amendment below | Stage0 native/JS |
@@ -235,7 +235,8 @@ native main{println(1.5%1);return 0;}
 
 ### Runtime-evidence amendment (2026-10-17)
 
-The corpus above was executed on the current working tree; byte-exact results are
+The corpus version available on 2026-10-17 was executed on that working tree;
+its historical byte-exact results are
 recorded in [scalar-rfc.md](../../.omo/evidence/contracts-20261017/scalar-rfc.md)
 (compiler `642aea4c…` + priorities-1/2 fixes, native O0/O3 UBSan and Node). This
 amendment records observations only; every D1–D4 decision stays Proposed.
@@ -244,15 +245,32 @@ amendment records observations only; every D1–D4 decision stays Proposed.
   `-9223372036854775808\n-2\n-1\n0\n`; all four integer traps exit 1 with
   `Forge integer division`; nested interleaving exactly as stated; `mixed`
   native `0` / Node `1`; reject cases as listed; `context` accepted by `--check`.
-- Native float text now observed directly (renamed variant): `0.10000000000000001`,
+- Historical native float text (the separately renamed `fdiv` variant): `0.10000000000000001`,
   `1.8446744073709552e+19`, `-0`, `inf`, `-inf`, `-nan`, and `n==n` → `0`. Node
   text: `0.1`, `18446744073709552000`, `0`, `Infinity`, `-Infinity`, `NaN`, `0`.
   Native NaN spelling is `-nan` on this host, confirming the spelling/sign caveat.
-- **Corpus defect:** the `floats` case as written does **not** compile natively —
-  a user function named `div` collides with the C standard `div()`
-  (`conflicting types for 'div'`). The native float rows were obtained from a
-  renamed variant (`fdiv`). The `floats` row must be corrected before task 10
-  cites it; the failing and working translations are both in `raw/scalar/`.
+- **Historical corpus defect:** the original `floats` example used `div`, which
+  collided with the C standard `div()` (`conflicting types for 'div'`). The
+  historical native float rows came from a separately renamed `fdiv` variant,
+  not the original runnable block. The earlier ledger identifies those failing
+  and working translations in `raw/scalar/`.
+
+### Runnable float corpus repair (2026-10-19)
+
+The authoritative `floats.fg` block above now uses `fdiv` for its declaration and
+all calls. Fresh execution reproduced the original `div` conflict at native
+O0/O3, then compiled and ran the corrected block at native O0/O3 with UBSan and
+under Node. All corrected runs exited 0 with empty stderr. Exact current bytes:
+
+- Native O0 and O3: `0.10000000000000001\n1.8446744073709552e+19\n-0\ninf\n-inf\n-nan\n0\n`.
+- Node: `0.1\n18446744073709552000\n0\nInfinity\n-Infinity\nNaN\n0\n`.
+
+The current host observations match the historical float spellings, including
+`n==n` printing `0`; they do not establish a portable NaN spelling or shared
+formatter policy. Compiler identity, complete commands, generated sources, and
+captured bytes are in [scalar-corpus.md](../../.omo/evidence/resume-20261019/scalar-corpus.md).
+Only the executable example and its evidence description are repaired. The RFC
+remains Draft / Proposed, and D1–D4 remain Proposed pending maintainer decisions.
 
 For FFI, use `extern fn read_value():float; native main{println(read_value());return 0;}`
 and a bridge `double read_value(void){return 1.5;}`; add `bridge.c` to the C command.
