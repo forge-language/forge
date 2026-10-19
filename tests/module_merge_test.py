@@ -1,4 +1,6 @@
+import json
 import pathlib
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -55,6 +57,68 @@ class ModuleMergeTest(unittest.TestCase):
             result = subprocess.run([str(root / 'main')], capture_output=True, text=True, timeout=10)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(result.stdout, '1444\n')
+
+
+class NestedQuotedImportTest(unittest.TestCase):
+    def setUp(self) -> None:
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = pathlib.Path(directory.name)
+        self.source = self.root / 'main.fg'
+        self.source.write_text('import "parent.fg"; native main { '
+                               'println(parent.wrapper()); println(leaf.value()); return 0; }')
+        (self.root / 'parent.fg').write_text('import "leaf.fg"; '
+                                            'fn wrapper(): int { return leaf.value() + 1; }')
+        (self.root / 'leaf.fg').write_text('fn value(): int { return 41; }')
+
+    def test_qualified_calls_pass_check_after_parent_cleanup(self) -> None:
+        result = subprocess.run([str(FORGE), str(self.source), '--check'],
+                                capture_output=True, text=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_symbol_containers_survive_parent_cleanup(self) -> None:
+        result = subprocess.run([str(FORGE), str(self.source), '--symbols-json'],
+                                capture_output=True, text=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        symbols = json.loads(result.stdout)
+        self.assertIn({'kind': 'function', 'name': 'value', 'container': 'leaf'}, symbols)
+        self.assertIn({'kind': 'function', 'name': 'wrapper', 'container': 'parent'}, symbols)
+
+    def test_direct_imports_share_one_module(self) -> None:
+        for imports in ('import leaf;', 'import "leaf.fg";',
+                        'import leaf; import "leaf.fg"; import leaf;'):
+            with self.subTest(imports=imports):
+                self.source.write_text(imports + ' import "parent.fg"; native main { '
+                                       'println(parent.wrapper()); println(leaf.value()); return 0; }')
+                result = subprocess.run([str(FORGE), str(self.source), '--symbols-json'],
+                                        capture_output=True, text=True, timeout=20)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                symbols = json.loads(result.stdout)
+                self.assertEqual(symbols.count({'kind': 'function', 'name': 'value',
+                                                'container': 'leaf'}), 1)
+                self.assertEqual(symbols.count({'kind': 'function', 'name': 'wrapper',
+                                                'container': 'parent'}), 1)
+
+    def test_native_calls_survive_parent_cleanup(self) -> None:
+        output = self.root / 'main'
+        result = subprocess.run([str(FORGE), str(self.source), '-o', str(output),
+                                 '--forge-root', str(FORGE.parent.parent),
+                                 '--lib-dir', str(FORGE.parent.parent / 'lib')],
+                                capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        result = subprocess.run([str(output)], capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, '42\n41\n')
+
+    @unittest.skipUnless(shutil.which('node'), 'Node is required for JavaScript execution')
+    def test_javascript_calls_survive_parent_cleanup(self) -> None:
+        output = self.root / 'main.js'
+        result = subprocess.run([str(FORGE), str(self.source), '--emit-js', '-o', str(output)],
+                                capture_output=True, text=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        result = subprocess.run(['node', str(output)], capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, '42\n41\n')
 
 
 if __name__ == '__main__':

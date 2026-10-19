@@ -363,6 +363,7 @@ void program_free(Program *p) {
         free(p->path_imports[i].data);
     free(p->path_imports);
     for (size_t i = 0; i < p->module_count; i++) {
+        free(p->modules[i].name.data);
         free(p->modules[i].path);
         free(p->modules[i].source);
         for (size_t j = 0; j < p->modules[i].fn_count; j++) {

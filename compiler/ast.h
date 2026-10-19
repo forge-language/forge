@@ -245,7 +245,7 @@ typedef struct {
 } LibraryDecl;
 
 typedef struct {
-    ForgeStr name;
+    ForgeStr name; /* Owned copy, released by program_free. */
     char *path;
     char *source;
     FnDecl *functions;

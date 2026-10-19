@@ -250,7 +250,9 @@ static void load_parsed_module(ModuleResolver *r, Program *prog, ForgeStr name,
     if (!fm) {
         prog->modules = extend_decls(prog->modules, prog->module_count, 1, sizeof(*prog->modules));
         fm = &prog->modules[prog->module_count++];
-        fm->name = name;
+        /* Quoted import names can borrow a temporary parent's path string. */
+        fm->name = (ForgeStr){forge_strdup(name), name.len};
+        if (!fm->name.data) forge_die("out of memory");
         fm->path = strdup(resolved_path);
         if (!fm->path) forge_die("out of memory");
         fm->source = src;
