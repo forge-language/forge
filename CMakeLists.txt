@@ -44,7 +44,7 @@ foreach(component IN ITEMS runtime stdlib)
 endforeach()
 set(FORGE_CC_ARGS --cc "${CMAKE_C_COMPILER}")
 add_executable(forge compiler/main.c compiler/source.c compiler/lexer.c compiler/parser.c
-    compiler/ast.c compiler/semantic.c compiler/codegen.c compiler/codegen_js.c compiler/mod_registry.c
+    compiler/ast.c compiler/typed_ast.c compiler/semantic.c compiler/codegen.c compiler/codegen_js.c compiler/mod_registry.c
     compiler/module_loader.c compiler/symbols.c compiler/optimize.c compiler/driver.c)
 target_include_directories(forge PRIVATE compiler "${FORGE_ROOT_DIR}/include")
 target_link_libraries(forge PRIVATE forge_runtime)
@@ -133,10 +133,12 @@ install(FILES LICENSE DESTINATION ${CMAKE_INSTALL_DATADIR}/forge)
 if(BUILD_TESTING)
     add_executable(optimizer_test tests/optimizer_test.c compiler/ast.c compiler/optimize.c)
     add_executable(parser_test tests/parser_test.c compiler/parser.c compiler/lexer.c compiler/ast.c compiler/source.c)
+    add_executable(typed_ast_test tests/typed_ast_test.c compiler/typed_ast.c compiler/semantic.c
+        compiler/mod_registry.c compiler/parser.c compiler/lexer.c compiler/ast.c compiler/source.c compiler/optimize.c)
     add_executable(function_index_test tests/function_index_test.c)
     add_executable(local_index_test tests/local_index_test.c)
     add_executable(const_index_test tests/const_index_test.c)
-    foreach(name IN ITEMS optimizer parser function_index local_index const_index)
+    foreach(name IN ITEMS optimizer parser function_index local_index const_index typed_ast)
         target_include_directories(${name}_test PRIVATE compiler)
         if(MSVC)
             target_compile_options(${name}_test PRIVATE /UNDEBUG)

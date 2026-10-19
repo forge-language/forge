@@ -226,14 +226,18 @@ int main(int argc, char **argv) {
     forge_load_modules(&prog, &mcfg);
     forge_check_program(&prog);
     optimize_program(&prog);
+    ForgeTypedProgram typed = forge_type_program(&prog);
+    if (!forge_typed_verify(&typed)) forge_die("invalid typed expression graph");
 
     if (symbols_json) {
         forge_emit_symbols_json(&prog, stdout);
+        forge_typed_free(&typed);
         program_free(&prog);
         free(src);
         return 0;
     }
     if (check_only) {
+        forge_typed_free(&typed);
         program_free(&prog);
         free(src);
         return 0;
@@ -280,6 +284,7 @@ int main(int argc, char **argv) {
         rc = forge_driver_compile_program(&prog, output, &cfg);
     }
 
+    forge_typed_free(&typed);
     program_free(&prog);
     free(src);
     free(inferred_output);

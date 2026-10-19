@@ -8,10 +8,12 @@
  * APIs do not expose a typed Forge AST. Never guess signatures from names. */
 #define UNKNOWN ((ForgeTypeKind)-1)
 #define FUNCTION_REFERENCE ((ForgeTypeKind)-2)
-typedef struct { ForgeStr name; ForgeType type; bool initialized, owned; } Local;
+typedef struct { ForgeStr name; ForgeType type; bool initialized, owned; size_t binding; } Local;
 _Static_assert(offsetof(Local, name) == 0, "local index requires a leading name");
 typedef struct {
     Program *program;
+    ForgeTypedProgram *typed;
+    size_t parent, last_expression, scope;
     ForgeStr module;
     ProcessDecl *process;
     Local *locals;
@@ -51,8 +53,12 @@ static bool compatible(ForgeType to, ForgeType from) {
     return to.kind == from.kind &&
         (to.kind != TY_STRUCT || forge_str_eq(to.struct_name, from.struct_name));
 }
-static void require(ForgeType to, ForgeType from, ForgeStr name, SourceSpan location) {
+static void require(Check *c, ForgeType to, ForgeType from, ForgeStr name, SourceSpan location) {
     if (!compatible(to, from)) error(name, "type mismatch for");
+    if (c->typed && c->last_expression != FORGE_TYPED_NONE && to.kind != UNKNOWN) {
+        ForgeTypedExpr *node = &c->typed->expressions[c->last_expression];
+        node->has_expected = true; node->expected = to;
+    }
 }
 static Local *local(Check *c, ForgeStr name) {
     /* Borrow only until the next declare(): expression checking never declares
@@ -65,7 +71,8 @@ static void declare(Check *c, ForgeStr name, ForgeType t, bool initialized, Sour
     if (existing != SIZE_MAX && existing >= c->scope_start)
         error(name, "duplicate declaration of");
     c->locals = forge_array_reserve(c->locals, c->count, &c->capacity, sizeof(*c->locals), 16);
-    c->locals[c->count++] = (Local){name, t, initialized, false};
+    c->locals[c->count++] = (Local){name, t, initialized, false, c->typed ?
+        forge_typed_binding(c->typed, name, t, location, c->scope) : FORGE_TYPED_NONE};
     forge_local_push(&c->local_index, name);
 }
 static FnDecl *resolve(Check *c, ForgeStr module, ForgeStr name) {
@@ -175,10 +182,11 @@ static void arguments(Check *c, ForgeStr name, Param *params, Expr **args, size_
             c->module=saved;
             if (callback) continue;
         }
-        require(params->type,value,name,args[i]->span);
+        require(c, params->type,value,name,args[i]->span);
     }
 }
 static ForgeType call(Check *c, ForgeStr module, ForgeStr name, Expr **args, size_t count, SourceSpan location) {
+    size_t call_node = c->parent;
     if (!module.len && (forge_str_eq(name, forge_str("thread_spawn")) ||
                         forge_str_eq(name, forge_str("thread_spawn_indexed")))) {
         if (count != 2) error(name, "wrong argument count for");
@@ -195,7 +203,16 @@ static ForgeType call(Check *c, ForgeStr module, ForgeStr name, Expr **args, siz
         }
         size_t required = forge_str_eq(name, forge_str("thread_spawn")) ? 1 : 2;
         if (arity != required) error(name, "wrong callback argument count for");
-        require(forge_type_int(), expression(c, args[1]), name, args[1]->span);
+        if (c->typed) {
+            c->typed->expressions[call_node].call = FORGE_CALL_BUILTIN;
+            /* This builtin resolves a function directly, even when a constant
+             * has the same name. Preserve that lookup instead of reinterpreting
+             * its callback as an ordinary value expression. */
+            size_t callback_node = forge_typed_expression(c->typed, args[0], call_node, c->scope);
+            c->typed->expressions[callback_node].type.kind = FORGE_TYPED_FUNCTION;
+            c->typed->expressions[callback_node].function = callback;
+        }
+        require(c, forge_type_int(), expression(c, args[1]), name, args[1]->span);
         return required == 1 ? forge_type_int() : forge_type_void();
     }
     FnDecl *fn = NULL;
@@ -208,6 +225,10 @@ static ForgeType call(Check *c, ForgeStr module, ForgeStr name, Expr **args, siz
         if (!fn && !module.len) fn = resolve(c, forge_str(""), name);
     }
     if (fn) {
+        if (c->typed) {
+            c->typed->expressions[call_node].call = FORGE_CALL_SOURCE;
+            c->typed->expressions[call_node].function = fn;
+        }
         arguments(c, name, fn->params, args, count, fn, module, location);
         return fn->ret_type;
     }
@@ -216,6 +237,10 @@ static ForgeType call(Check *c, ForgeStr module, ForgeStr name, Expr **args, siz
         forge_str_eq(name, forge_str("print_str")) || forge_str_eq(name, forge_str("eprint")) ||
         forge_str_eq(name, forge_str("eprintln")));
     if (standard || builtin) {
+        if (c->typed) {
+            c->typed->expressions[call_node].call = standard ? FORGE_CALL_STANDARD : FORGE_CALL_BUILTIN;
+            c->typed->expressions[call_node].standard = standard;
+        }
         bool scalar_print = builtin && forge_str_eq(name,forge_str("println"));
         size_t expected = builtin ? 1 : strlen(standard->signature) - 1;
         if (!scalar_print && count != expected) error(name, "wrong argument count for");
@@ -232,7 +257,7 @@ static ForgeType call(Check *c, ForgeStr module, ForgeStr name, Expr **args, siz
                 ForgeType expected_type = builtin ?
                     (forge_str_eq(name,forge_str("print_int")) ? forge_type_int() : forge_type_string()) :
                     signature_type(standard->signature[i+1]);
-                require(expected_type,value,name,args[i]->span);
+                require(c, expected_type,value,name,args[i]->span);
             }
         }
         return builtin ? forge_type_void() : signature_type(standard->signature[0]);
@@ -243,6 +268,7 @@ static ForgeType call(Check *c, ForgeStr module, ForgeStr name, Expr **args, siz
             if (forge_str_eq(module, c->program->imports[i]) && !forge_import_is_stdlib(module)) binary = true;
     }
     if (!binary) error(name, "unknown function");
+    if (c->typed) c->typed->expressions[call_node].call = FORGE_CALL_OPAQUE;
     for (size_t i = 0; i < count; ++i) {
         ForgeType t = expression(c, args[i]);
         if (t.kind == TY_VOID) error(name, "void argument for");
@@ -251,8 +277,11 @@ static ForgeType call(Check *c, ForgeStr module, ForgeStr name, Expr **args, siz
 }
 static ForgeType expression(Check *c, Expr *e) {
     SourceSpan location = e ? (e->focus.file ? e->focus : e->span) : (SourceSpan){0};
-    if (!e) return forge_type_void();
+    if (!e) { c->last_expression = FORGE_TYPED_NONE; return forge_type_void(); }
     if (++c->depth > 2000) forge_die("semantic expression nesting limit exceeded");
+    size_t parent = c->parent;
+    size_t node = c->typed ? forge_typed_expression(c->typed,e,parent,c->scope) : FORGE_TYPED_NONE;
+    c->parent = node;
     ForgeType t = unknown();
     switch (e->kind) {
     case EXPR_INT: t = forge_type_int(); break;
@@ -262,17 +291,27 @@ static ForgeType expression(Check *c, Expr *e) {
     case EXPR_IDENT: {
         Local *l = local(c, e->as.ident);
         if (l) {
-            if (!l->initialized) error(e->as.ident, l->owned ? "use of moved owned value" : "uninitialized value");
+            if (!c->typed && !l->initialized) error(e->as.ident, l->owned ? "use of moved owned value" : "uninitialized value");
+            if (c->typed) c->typed->expressions[node].binding = l->binding;
             t = l->type; break;
         }
         ConstDecl *constant = forge_const_index_get(&c->constants, e->as.ident);
         if (constant) {
             /* Recheck in this caller's context: constant initializers may refer
              * to names shadowed by live locals. Do not memoize their types. */
-            t = expression(c, constant->value); goto done;
+            if (c->typed) c->typed->expressions[node].constant = constant;
+            t = expression(c, constant->value);
+            if (c->typed && t.kind == FUNCTION_REFERENCE)
+                c->typed->expressions[node].function = c->typed->expressions[c->last_expression].function;
+            goto done;
         }
         /* Function identifiers are accepted as callback references. */
-        if (resolve(c, c->module, e->as.ident) || resolve(c, forge_str(""), e->as.ident)) { t.kind=FUNCTION_REFERENCE; break; }
+        FnDecl *fn = resolve(c, c->module, e->as.ident);
+        if (!fn) fn = resolve(c, forge_str(""), e->as.ident);
+        if (fn) {
+            if (c->typed) c->typed->expressions[node].function = fn;
+            t.kind=FUNCTION_REFERENCE; break;
+        }
         error(e->as.ident, "unknown value"); break;
     }
     case EXPR_CALL:
@@ -294,7 +333,7 @@ static ForgeType expression(Check *c, Expr *e) {
         t = forge_type_int(); break;
     case EXPR_INDEX: {
         ForgeType base = expression(c, e->as.index.base);
-        require(forge_type_int(), expression(c, e->as.index.index), forge_str("index"), e->as.index.index->span);
+        require(c, forge_type_int(), expression(c, e->as.index.index), forge_str("index"), e->as.index.index->span);
         if (base.kind != TY_STRING && base.kind != TY_PTR && base.kind != UNKNOWN)
             error(forge_str("index"), "invalid base for");
         t = forge_type_int(); break;
@@ -303,7 +342,11 @@ static ForgeType expression(Check *c, Expr *e) {
         /* JS callbacks use module.function field syntax in expression position. */
         if (e->as.field.base->kind == EXPR_IDENT &&
             !local(c, e->as.field.base->as.ident) &&
-            resolve(c, e->as.field.base->as.ident, e->as.field.field)) { t.kind=FUNCTION_REFERENCE; break; }
+            resolve(c, e->as.field.base->as.ident, e->as.field.field)) {
+            if (c->typed) c->typed->expressions[node].function =
+                resolve(c,e->as.field.base->as.ident,e->as.field.field);
+            t.kind=FUNCTION_REFERENCE; break;
+        }
         ForgeType base = expression(c, e->as.field.base);
         if (base.kind == UNKNOWN) break;
         if (base.kind != TY_STRUCT) error(e->as.field.field, "field access on non-struct");
@@ -319,6 +362,11 @@ static ForgeType expression(Check *c, Expr *e) {
         error(forge_str("move"), "ownership move expressions require unsupported ownership result types; use send-move for"); break;
     }
 done:
+    if (c->typed) c->typed->expressions[node].type = (ForgeTypedType){
+        .kind = t.kind == UNKNOWN ? FORGE_TYPED_UNKNOWN :
+            t.kind == FUNCTION_REFERENCE ? FORGE_TYPED_FUNCTION : FORGE_TYPED_VALUE,
+        .value = t};
+    c->parent = parent; c->last_expression = node;
     --c->depth;
     return t;
 }
@@ -343,7 +391,7 @@ static void statement(Check *c, Stmt *s) {
     SourceSpan location = s->focus.file ? s->focus : s->span;
     switch (s->kind) {
     case STMT_LET:
-        if (s->as.let.init) require(s->as.let.type, expression(c, s->as.let.init), s->as.let.name, s->as.let.init->span);
+        if (s->as.let.init) require(c, s->as.let.type, expression(c, s->as.let.init), s->as.let.name, s->as.let.init->span);
         if (s->as.let.owned_ && (s->as.let.type.kind!=TY_STRING || !s->as.let.init))
             error(s->as.let.name,"owned bindings require initialized strings for");
         declare(c, s->as.let.name, s->as.let.type, s->as.let.init != NULL, location);
@@ -351,11 +399,11 @@ static void statement(Check *c, Stmt *s) {
     case STMT_ASSIGN: {
         Local *l = local(c, s->as.assign.name);
         if (!l) error(s->as.assign.name, "assignment to unknown value");
-        require(l->type, expression(c, s->as.assign.value), s->as.assign.name, s->as.assign.value->span);
+        require(c, l->type, expression(c, s->as.assign.value), s->as.assign.name, s->as.assign.value->span);
         l->initialized = true; break;
     }
     case STMT_EXPR: expression(c, s->as.expr); break;
-    case STMT_RETURN: require(c->result, expression(c, s->as.ret), forge_str("return"), s->as.ret ? s->as.ret->span : location); break;
+    case STMT_RETURN: require(c, c->result, expression(c, s->as.ret), forge_str("return"), s->as.ret ? s->as.ret->span : location); break;
     case STMT_IF: {
         condition(c, s->as.if_stmt.cond);
         size_t n = c->count;
@@ -384,7 +432,7 @@ static void statement(Check *c, Stmt *s) {
         ++c->loops; block(c, s->as.while_stmt.body);
         bool *after=snapshot(c); bool consumed=false;
         for (size_t i=0;i<n;++i) consumed|=c->locals[i].owned && before[i] && !after[i];
-        if (consumed && (flow_block(s->as.while_stmt.body,0)&(FLOW_NEXT|FLOW_CONTINUE))) {
+        if (!c->typed && consumed && (flow_block(s->as.while_stmt.body,0)&(FLOW_NEXT|FLOW_CONTINUE))) {
             condition(c,s->as.while_stmt.cond);
             block(c,s->as.while_stmt.body);
         }
@@ -394,6 +442,8 @@ static void statement(Check *c, Stmt *s) {
     }
     case STMT_FOR: {
         size_t outer = c->count;
+        size_t typed_scope = c->scope;
+        if (c->typed) c->scope = forge_typed_scope(c->typed,typed_scope);
         size_t saved_scope = c->scope_start; c->scope_start = outer;
         if (s->as.for_stmt.init) statement(c, s->as.for_stmt.init);
         condition(c, s->as.for_stmt.cond);
@@ -402,7 +452,7 @@ static void statement(Check *c, Stmt *s) {
         if (s->as.for_stmt.step) statement(c, s->as.for_stmt.step);
         bool *after=snapshot(c); bool consumed=false;
         for (size_t i=0;i<n;++i) consumed|=c->locals[i].owned && before[i] && !after[i];
-        if (consumed && (flow_block(s->as.for_stmt.body,0)&(FLOW_NEXT|FLOW_CONTINUE))) {
+        if (!c->typed && consumed && (flow_block(s->as.for_stmt.body,0)&(FLOW_NEXT|FLOW_CONTINUE))) {
             condition(c,s->as.for_stmt.cond);
             block(c,s->as.for_stmt.body);
             if (s->as.for_stmt.step) statement(c,s->as.for_stmt.step);
@@ -410,7 +460,7 @@ static void statement(Check *c, Stmt *s) {
         --c->loops;
         for (size_t i=0;i<n;++i) c->locals[i].initialized=before[i] && after[i];
         free(after); free(before); forge_local_truncate(&c->local_index, outer); c->count = outer;
-        c->scope_start = saved_scope; break;
+        c->scope_start = saved_scope; c->scope = typed_scope; break;
     }
     case STMT_BREAK: case STMT_CONTINUE:
         if (!c->loops) error(forge_str("loop control"), "outside loop");
@@ -444,7 +494,7 @@ static void statement(Check *c, Stmt *s) {
         if (s->kind == STMT_AWAIT) expression(c, s->as.await_expr);
         break;
     case STMT_MATCH: {
-        require(forge_type_int(), expression(c, s->as.match_stmt.scrutinee), forge_str("match"), s->as.match_stmt.scrutinee->span);
+        require(c, forge_type_int(), expression(c, s->as.match_stmt.scrutinee), forge_str("match"), s->as.match_stmt.scrutinee->span);
         size_t n = c->count; bool *before = snapshot(c);
         if (n >= SIZE_MAX / sizeof(bool)) forge_die("too many semantic locals");
         bool *joined=malloc((n+1)*sizeof(bool));
@@ -473,15 +523,18 @@ static void block(Check *c, Block *b) {
     if (!b) return;
     if (++c->depth > 2000) forge_die("semantic block nesting limit exceeded");
     size_t count = c->count;
+    size_t typed_scope = c->scope;
+    if (c->typed) c->scope = forge_typed_scope(c->typed,typed_scope);
     size_t saved_scope = c->scope_start; c->scope_start = count;
     for (Stmt *s = b->first; s; s = s->next) statement(c, s);
     forge_local_truncate(&c->local_index, count); c->count = count;
-    c->scope_start = saved_scope;
+    c->scope_start = saved_scope; c->scope = typed_scope;
     --c->depth;
 }
 static void body(Check *c, Param *params, Block *b, ForgeType result) {
     forge_local_truncate(&c->local_index, 0); c->count = 0; c->scope_start = 0;
     c->loops = 0; c->result = result;
+    if (c->typed) c->scope = forge_typed_scope(c->typed,0);
     for (Param *p = params; p; p = p->next) declare(c, p->name, p->type, true, p->span);
     if (b) for (Stmt *s=b->first; s; s=s->next) statement(c,s);
 }
@@ -535,14 +588,16 @@ static unsigned flow_block(Block *b,unsigned depth) {
 static void functions(Check *c, FnDecl *fns, size_t count) {
     for (size_t i = 0; i < count; ++i) {
         body(c, fns[i].params, fns[i].is_extern ? NULL : &fns[i].body, fns[i].ret_type);
-        if (!fns[i].is_extern) {
+        if (!c->typed && !fns[i].is_extern) {
             if (fns[i].ret_type.kind!=TY_VOID && (flow_block(&fns[i].body,0)&FLOW_NEXT))
                 error_at(fns[i].body.closing,fns[i].name,"reachable end of non-void function");
         }
     }
 }
-void forge_check_program(Program *p) {
-    Check c = {.program = p};
+static void interpret_program(Program *p, ForgeTypedProgram *typed) {
+    Check c = {.program = p, .typed = typed, .parent = FORGE_TYPED_NONE,
+        .last_expression = FORGE_TYPED_NONE};
+    if (typed) forge_typed_scope(typed,FORGE_TYPED_NONE);
     c.constants = forge_const_index_build(p->consts, p->const_count);
     c.functions = forge_function_index_build(p->functions, p->fn_count);
     if (p->library.present)
@@ -580,4 +635,14 @@ void forge_check_program(Program *p) {
     for (size_t i = 0; i < p->module_count; i++)
         forge_function_index_free(&c.module_functions[i]);
     free(c.module_functions);
+}
+
+void forge_check_program(Program *p) { interpret_program(p, NULL); }
+
+ForgeTypedProgram forge_type_program(Program *p) {
+    ForgeTypedProgram typed = {0};
+    /* Validation already ran before optimization. Reinterpret values and names
+     * on the current AST, without reapplying flow policy to newly folded tests. */
+    interpret_program(p, &typed);
+    return typed;
 }
