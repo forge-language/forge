@@ -450,6 +450,17 @@ static int cg_expr_is_string(Codegen *cg, Expr *e) {
     return cg_expr_str_kind(cg, e) == CG_STR_YES;
 }
 
+static bool cg_integer_comparison_atom(Codegen *cg, Expr *e) {
+    return e->kind == EXPR_INT || e->kind == EXPR_BOOL ||
+        (e->kind == EXPR_IDENT && cg_is_local(cg, e->as.ident) &&
+         cg_expr_known_int(cg, e));
+}
+
+static bool cg_canonical_bool_expression(Expr *e) {
+    return e->kind == EXPR_BOOL ||
+        (e->kind == EXPR_BINARY && e->as.binary.op >= BIN_EQ);
+}
+
 static void cg_indent(Codegen *cg) {
     for (int i = 0; i < cg->indent; i++) fputs("    ", cg->out);
 }
@@ -628,8 +639,20 @@ static void emit_expr_inner(Codegen *cg, Expr *e) {
         case BIN_MUL: helper = "FORGE_MUL"; break;
         case BIN_DIV: helper = "FORGE_DIV"; break;
         case BIN_MOD: helper = "FORGE_MOD"; break;
+        case BIN_EQ: helper = "FORGE_EQ"; break;
+        case BIN_NE: helper = "FORGE_NE"; break;
+        case BIN_LT: helper = "FORGE_LT"; break;
+        case BIN_LE: helper = "FORGE_LE"; break;
+        case BIN_GT: helper = "FORGE_GT"; break;
+        case BIN_GE: helper = "FORGE_GE"; break;
         default: break;
         }
+        if (e->as.binary.op >= BIN_EQ && e->as.binary.op <= BIN_GE &&
+            ((cg_integer_comparison_atom(cg, e->as.binary.left) &&
+              cg_integer_comparison_atom(cg, e->as.binary.right)) ||
+             cg_canonical_bool_expression(e->as.binary.left) ||
+             cg_canonical_bool_expression(e->as.binary.right)))
+            helper = NULL;
         if (helper) {
             Expr *right = e->as.binary.right;
             bool direct_positive_division =
@@ -2865,6 +2888,39 @@ static void emit_arithmetic_helpers(FILE *out) {
     /* An external header can reveal a float return type that the semantic
      * checker could not resolve. Preserve C's rejection of float remainder. */
     fputs("#define FORGE_MOD(a, b) ({ _Static_assert(_Generic((a), float: 0, double: 0, default: _Generic((b), float: 0, double: 0, default: 1)), \"Forge remainder requires integer operands\"); __forge_mod_i64((a), (b)); })\n\n", out);
+    fputs("#include <float.h>\n"
+          "_Static_assert(FLT_RADIX == 2 && DBL_MANT_DIG == 53 && DBL_MAX_EXP == 1024, \"Forge float requires binary64\");\n"
+          "static inline int __forge_compare_i64_f64(int64_t i, double f) {\n"
+          "    if (f != f) return 2; /* unordered */\n"
+          "    if (f < -0x1p63) return 1;\n"
+          "    if (f >= 0x1p63) return -1;\n"
+          "    int64_t t = (int64_t)f;\n"
+          "    if (i < t) return -1;\n"
+          "    if (i > t) return 1;\n"
+          "    /* t came from f: integral f is exactly recoverable; for\n"
+          "     * fractional f, t is smaller than 2^53 and exact as double. */\n"
+          "    double integral = (double)t;\n"
+          "    return integral < f ? -1 : integral > f ? 1 : 0;\n"
+          "}\n"
+          "#define __FORGE_IS_INT(x) _Generic((x), int64_t: 1, default: _Generic((x), int: 1, default: 0))\n"
+          "#define __FORGE_IS_DOUBLE(x) _Generic((x), double: 1, default: 0)\n"
+          "#define __FORGE_INT_VALUE(x) _Generic((x), int64_t: (x), default: _Generic((x), int: (x), default: INT64_C(0)))\n"
+          "#define __FORGE_DOUBLE_VALUE(x) _Generic((x), double: (x), default: 0.0)\n", out);
+    const char *comparison_names[] = {"EQ", "NE", "LT", "LE", "GT", "GE"};
+    const char *comparison_ops[] = {"==", "!=", "<", "<=", ">", ">="};
+    const char *predicates[] = {"order == 0", "order != 0", "order == -1",
+                                "order <= 0", "order == 1", "order == 0 || order == 1"};
+    const size_t reverse[] = {0, 1, 4, 5, 2, 3};
+    for (size_t i = 0; i < 6; i++)
+        fprintf(out, "static inline int __forge_compare_%s(int order) { return %s; }\n",
+                comparison_names[i], predicates[i]);
+    /* Generic controls never evaluate x. Extractors keep unselected branches
+     * valid for opaque pointers/unsigned values; the raw fallback preserves C
+     * comparisons outside Forge's int64/bool versus binary64 domain. */
+    for (size_t i = 0; i < 6; i++)
+        fprintf(out, "#define FORGE_%s(a, b) ((__FORGE_IS_INT(a) && __FORGE_IS_DOUBLE(b)) ? __forge_compare_%s(__forge_compare_i64_f64(__FORGE_INT_VALUE(a), __FORGE_DOUBLE_VALUE(b))) : (__FORGE_IS_DOUBLE(a) && __FORGE_IS_INT(b)) ? __forge_compare_%s(__forge_compare_i64_f64(__FORGE_INT_VALUE(b), __FORGE_DOUBLE_VALUE(a))) : ((a) %s (b)))\n",
+                comparison_names[i], comparison_names[i], comparison_names[reverse[i]], comparison_ops[i]);
+    fputc('\n', out);
 }
 
 static bool cg_mersenne_modmul(Codegen *cg, Expr *e, Expr **value,

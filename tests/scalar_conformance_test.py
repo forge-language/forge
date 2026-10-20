@@ -1,5 +1,7 @@
 """Execute scalar conversion and printing through both stage0 backends."""
 import argparse
+import math
+import operator
 from pathlib import Path
 import subprocess
 import sys
@@ -38,7 +40,7 @@ class ScalarConformanceTests(unittest.TestCase):
                     binary = work / 'program'
                     compiled = subprocess.run(
                         [config.cc, '-std=c11', optimization, '-Werror',
-                         '-fsanitize=undefined', '-fno-sanitize-recover=all',
+                         '-fsanitize=undefined,float-cast-overflow', '-fno-sanitize-recover=all',
                          '-I', str(Path(config.root) / 'include'), str(generated),
                          *extra, '-L', config.lib_dir, '-lforge_std',
                          '-lforge_runtime', '-pthread', '-lm', '-o', str(binary)],
@@ -47,7 +49,7 @@ class ScalarConformanceTests(unittest.TestCase):
                     result = subprocess.run([str(binary)], capture_output=True,
                                             text=True, timeout=20)
                     self.assertEqual(result.returncode, 0, result.stderr)
-                    self.assertEqual(result.stdout, expected)
+                    self.assertEqual(result.stdout.encode(), expected.encode())
                     self.assertEqual(result.stderr, '')
             if javascript:
                 script = work / 'main.js'
@@ -58,7 +60,95 @@ class ScalarConformanceTests(unittest.TestCase):
                 result = subprocess.run([config.node, str(script)], capture_output=True,
                                         text=True, timeout=20)
                 self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertEqual(result.stdout, expected)
+                self.assertEqual(result.stdout.encode(), expected.encode())
+
+    def test_mixed_comparisons_preserve_integer_precision(self) -> None:
+        comparisons = (('==', operator.eq), ('!=', operator.ne),
+                       ('<', operator.lt), ('<=', operator.le),
+                       ('>', operator.gt), ('>=', operator.ge))
+        body = ''.join(f'println(i{op}f);println(f{op}i);' for op, _ in comparisons)
+        source = ('fn ratio(a:float,b:float):float{return a/b;}'
+                  'fn compare(i:int,f:float){' + body + '}native main{')
+        expected: list[str] = []
+        cases: list[tuple[int, float]] = []
+        for integer in (-(1 << 63), -(1 << 63)+1, (1 << 63)-2, (1 << 63)-1,
+                        -(1 << 53)-1, -(1 << 53), -(1 << 53)+1,
+                        (1 << 53)-1, 1 << 53, (1 << 53)+1):
+            rounded = float(integer)
+            cases.extend((integer, value) for value in (
+                math.nextafter(rounded, -math.inf), rounded,
+                math.nextafter(rounded, math.inf)))
+        for integer in (-1, 0, 1, -(1 << 63), (1 << 63)-1):
+            cases.extend((integer, value) for value in (
+                -0.0, 0.0, -math.ulp(0.0), math.ulp(0.0), -0.5, 0.5,
+                -1.5, 1.5, -math.inf, math.inf, math.nan))
+        for integer, value in cases:
+            int_text = '(-9223372036854775807-1)' if integer == -(1 << 63) else str(integer)
+            float_text = format(value, '.1f')
+            if math.isnan(value):
+                float_text = 'ratio(0.0,0.0)'
+            elif math.isinf(value):
+                float_text = 'ratio(-1.0,0.0)' if value < 0 else 'ratio(1.0,0.0)'
+            elif abs(value) == math.ulp(0.0):
+                float_text = ('-' if value < 0 else '') + (
+                    f'ratio(ratio(1.0,{1 << 1022}.0),4503599627370496.0)')
+            source += f'compare({int_text},{float_text});'
+            for _, compare in comparisons:
+                expected.extend((str(int(compare(integer, value))),
+                                 str(int(compare(value, integer)))))
+        source += 'println(9007199254740993==9007199254740992.0);'
+        source += 'println(9007199254740993>9007199254740992.0);return 0;}'
+        self.execute(source, '\n'.join([*expected, '0', '1'])+'\n')
+
+    def test_mixed_comparisons_evaluate_once_and_short_circuit(self) -> None:
+        self.execute('''fn integer():int{println("integer");return 9007199254740993;}
+fn floating():float{println("float");return 9007199254740992.0;}
+fn fail():int{return 1/0;}
+native main{
+ let a:bool=integer()>9007199254740992.0;println(a);
+ let b:bool=9007199254740993>floating();println(b);
+ println(false && (fail()>0.5));println(true || (fail()==0.5));
+ println(true==1.0);println(false<0.5);return 0;
+}''', 'integer\n1\nfloat\n1\n0\n1\n1\n1\n')
+
+    def test_mixed_module_and_suspended_coroutine_comparisons(self) -> None:
+        module = 'fn greater(i:int,f:float):bool{return i>f;}'
+        self.execute('import sample;native main{println(sample.greater('
+                     '9007199254740993,9007199254740992.0));return 0;}', '1\n',
+                     modules={'sample.fg': module})
+        self.execute('''process main{coroutine task(){
+ let i:int=9007199254740993;let f:float=9007199254740992.0;
+ yield;println(i==f);println(i>f);}
+ spawn task();}''', '0\n1\n', javascript=False)
+
+    def test_mixed_comparisons_preserve_opaque_c_domains(self) -> None:
+        self.execute('''import opaque;
+native main{
+ println(opaque.integer()==opaque.floating());
+ println(opaque.integer()>opaque.floating());
+ println(opaque.pointer()==opaque.pointer());
+ println(opaque.pointer()==opaque.other_pointer());
+ println(opaque.pointer()!=opaque.other_pointer());
+ println(opaque.unsigned_value()>0.0);println(opaque.unsigned_value()>0);
+ println(opaque.wide_float()>0);println(opaque.single_float()>0);return 0;
+}''', '0\n1\n1\n0\n1\n1\n1\n1\n1\n', javascript=False, modules={
+            'opaque.h': '''#include <stdint.h>
+static inline int64_t frlib_opaque_integer(void){return INT64_C(9007199254740993);}
+static inline double frlib_opaque_floating(void){return 9007199254740992.0;}
+static inline void *frlib_opaque_pointer(void){static int value;return &value;}
+static inline void *frlib_opaque_other_pointer(void){static int other;return &other;}
+static inline uint64_t frlib_opaque_unsigned_value(void){return UINT64_MAX;}
+static inline long double frlib_opaque_wide_float(void){return 0.5L;}
+static inline float frlib_opaque_single_float(void){return 0.5f;}
+'''})
+
+    def test_nested_mixed_comparisons(self) -> None:
+        expression = 'i>f'
+        for _ in range(16):
+            expression = f'({expression})>0.0'
+        self.execute('native main{let i:int=9007199254740993;'
+                     'let f:float=9007199254740992.0;'
+                     f'println({expression});return 0;}}', '1\n')
 
     def test_float_printing_and_conversion_boundaries(self) -> None:
         self.execute('''import math;

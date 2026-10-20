@@ -443,7 +443,7 @@ void codegen_emit_js(Program *prog, FILE *out) {
       "TextDecoder('utf-8',{fatal:true}).decode(b);\n"
       "const eq=(a,b)=>{a=numeric(a);b=numeric(b);return typeof "
       "a==='number'&&typeof b==='bigint'||typeof a==='bigint'&&typeof "
-      "b==='number'?Number(a)===Number(b):a===b;},index=(s,n)=>{if(typeof "
+      "b==='number'?a<=b&&a>=b:a===b;},index=(s,n)=>{if(typeof "
       "s!=='string')return s[Number(n)];const b=bytes(s),j=Number(n);return "
       "j<0||j>=b.length?-1n:BigInt(b[j]);},i=v=>BigInt(v);\n"
       "const cbytes=s=>{s=s==null?'':s;const end=s.indexOf(String.fromCharCode(0));return bytes(end<0?s:s.slice(0,end));};\n"
