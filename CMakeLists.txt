@@ -25,7 +25,11 @@ endif()
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
+include(cmake/Sanitizers.cmake)
 include(cmake/Dependencies.cmake)
+if(FORGE_INSTRUMENT_FLAGS)
+    target_link_options(forge_runtime INTERFACE ${FORGE_INSTRUMENT_FLAGS})
+endif()
 
 # Assemble the build SDK from the two repositories' exported headers. Compiler
 # invocations and installed consumers use the same bin/include/lib layout.
@@ -42,9 +46,12 @@ foreach(component IN ITEMS runtime stdlib)
         configure_file("${header}" "${FORGE_ROOT_DIR}/include/${relative_header}" COPYONLY)
     endforeach()
 endforeach()
-set(FORGE_CC_ARGS --cc "${CMAKE_C_COMPILER}")
-add_executable(forge compiler/main.c compiler/source.c compiler/lexer.c compiler/parser.c
-    compiler/ast.c compiler/typed_ast.c compiler/semantic.c compiler/codegen.c compiler/codegen_js.c compiler/mod_registry.c
+include(cmake/FloatFormat.cmake)
+set(FORGE_CC_ARGS --cc "${FORGE_TEST_CC}")
+add_executable(forge compiler/main.c compiler/cleanup.c compiler/source.c compiler/lexer.c compiler/parser.c
+    compiler/ast.c compiler/typed_ast.c compiler/typed_lookup.c compiler/semantic.c compiler/ownership.c compiler/resource_contracts.c
+    compiler/safety.c compiler/safety_expr.c compiler/safety_calls.c compiler/safety_flow.c compiler/safety_loop.c
+    compiler/codegen.c compiler/codegen_js.c compiler/mod_registry.c
     compiler/module_loader.c compiler/symbols.c compiler/optimize.c compiler/driver.c)
 target_include_directories(forge PRIVATE compiler "${FORGE_ROOT_DIR}/include")
 target_link_libraries(forge PRIVATE forge_runtime)
@@ -71,7 +78,7 @@ set(FORGE_BOOTSTRAP_SRC "${CMAKE_CURRENT_SOURCE_DIR}/bootstrap/compiler.fg")
 set(FORGE_STAGE1_BIN "${CMAKE_BINARY_DIR}/bin/forge-stage1")
 set(FORGE_STAGE2_C "${CMAKE_BINARY_DIR}/generated/forge-stage2.c")
 set(FORGE_STAGE2_BIN "${CMAKE_BINARY_DIR}/bin/forge-stage2")
-set(FORGE_BOOTSTRAP_LINK -lforge_std -lforge_runtime -lm)
+set(FORGE_BOOTSTRAP_LINK -lforge_std -lforge_runtime -lm ${FORGE_INSTRUMENT_FLAGS})
 if(WIN32)
     list(APPEND FORGE_BOOTSTRAP_LINK -lws2_32)
 else()
@@ -129,16 +136,20 @@ install(FILES "${CMAKE_CURRENT_BINARY_DIR}/ForgeConfig.cmake"
 install(PROGRAMS "${FORGE_STAGE2_BIN}" DESTINATION ${CMAKE_INSTALL_BINDIR} RENAME forge-fg OPTIONAL)
 install(FILES bootstrap/compiler.fg DESTINATION ${CMAKE_INSTALL_DATADIR}/forge/bootstrap)
 install(FILES LICENSE DESTINATION ${CMAKE_INSTALL_DATADIR}/forge)
+include(cmake/Fuzzing.cmake)
 
 if(BUILD_TESTING)
     add_executable(optimizer_test tests/optimizer_test.c compiler/ast.c compiler/optimize.c)
     add_executable(parser_test tests/parser_test.c compiler/parser.c compiler/lexer.c compiler/ast.c compiler/source.c)
-    add_executable(typed_ast_test tests/typed_ast_test.c compiler/typed_ast.c compiler/semantic.c
+    add_executable(typed_ast_test tests/typed_ast_test.c compiler/typed_ast.c compiler/semantic.c compiler/ownership.c compiler/resource_contracts.c
+        compiler/mod_registry.c compiler/parser.c compiler/lexer.c compiler/ast.c compiler/source.c compiler/optimize.c)
+    add_executable(typed_lookup_test tests/typed_lookup_test.c compiler/typed_lookup.c compiler/typed_ast.c compiler/semantic.c compiler/ownership.c compiler/resource_contracts.c
         compiler/mod_registry.c compiler/parser.c compiler/lexer.c compiler/ast.c compiler/source.c compiler/optimize.c)
     add_executable(function_index_test tests/function_index_test.c)
     add_executable(local_index_test tests/local_index_test.c)
     add_executable(const_index_test tests/const_index_test.c)
-    foreach(name IN ITEMS optimizer parser function_index local_index const_index typed_ast)
+    add_executable(resource_contracts_test tests/resource_contracts_test.c compiler/resource_contracts.c compiler/mod_registry.c)
+    foreach(name IN ITEMS optimizer parser function_index local_index const_index typed_ast typed_lookup resource_contracts)
         target_include_directories(${name}_test PRIVATE compiler)
         if(MSVC)
             target_compile_options(${name}_test PRIVATE /UNDEBUG)
@@ -151,14 +162,14 @@ if(BUILD_TESTING)
     if(Python3_Interpreter_FOUND)
         add_test(NAME module_merge_regressions COMMAND "${Python3_EXECUTABLE}"
             "${CMAKE_CURRENT_SOURCE_DIR}/tests/module_merge_test.py" "$<TARGET_FILE:forge>")
-        foreach(name IN ITEMS compiler driver selfhost org_integration ownership arithmetic diagnostics semantic_contract)
+        foreach(name IN ITEMS compiler driver selfhost selfhost_arithmetic org_integration ownership arithmetic diagnostics semantic_contract safety)
             if((name STREQUAL "ownership" OR name STREQUAL "arithmetic" OR name STREQUAL "diagnostics") AND NOT UNIX)
                 continue()
             endif()
             if(name STREQUAL "org_integration" AND NOT UNIX)
                 continue()
             endif()
-            if(name STREQUAL "selfhost")
+            if(name STREQUAL "selfhost" OR name STREQUAL "selfhost_arithmetic")
                 set(test_compiler "${FORGE_STAGE2_BIN}")
                 set(extra_args --source-root "${CMAKE_CURRENT_SOURCE_DIR}" --stage0 "$<TARGET_FILE:forge>")
             else()
@@ -168,19 +179,37 @@ if(BUILD_TESTING)
             add_test(NAME ${name}_regressions COMMAND "${Python3_EXECUTABLE}"
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/${name}_test.py"
                 --forge "${test_compiler}" --root "${FORGE_ROOT_DIR}"
-                --lib-dir "${FORGE_LIB_DIR}" --cc "${CMAKE_C_COMPILER}" ${extra_args})
+                --lib-dir "${FORGE_LIB_DIR}" --cc "${FORGE_TEST_CC}" ${extra_args})
             set_tests_properties(${name}_regressions PROPERTIES TIMEOUT 120)
         endforeach()
+        if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+            add_test(NAME resource_cleanup_regressions COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/resource_cleanup_test.py"
+                --forge "$<TARGET_FILE:forge>" --root "${FORGE_ROOT_DIR}"
+                --lib-dir "${FORGE_LIB_DIR}" --cc "${FORGE_TEST_CC}")
+            set_tests_properties(resource_cleanup_regressions PROPERTIES TIMEOUT 120)
+        endif()
         find_program(FORGE_NODE node)
         if(FORGE_NODE)
+            if(UNIX)
+                add_test(NAME float_format_regressions COMMAND "${Python3_EXECUTABLE}"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/tests/float_format_test.py"
+                    --root "${FORGE_ROOT_DIR}" --cc "${FORGE_TEST_CC}" --node "${FORGE_NODE}")
+                set_tests_properties(float_format_regressions PROPERTIES TIMEOUT 120)
+            endif()
             add_test(NAME javascript_regressions COMMAND "${Python3_EXECUTABLE}"
                 "${CMAKE_CURRENT_SOURCE_DIR}/tests/js_test.py" "$<TARGET_FILE:forge>")
             if(UNIX)
                 add_test(NAME scalar_conformance_regressions COMMAND "${Python3_EXECUTABLE}"
                     "${CMAKE_CURRENT_SOURCE_DIR}/tests/scalar_conformance_test.py"
                     --forge "$<TARGET_FILE:forge>" --root "${FORGE_ROOT_DIR}"
-                    --lib-dir "${FORGE_LIB_DIR}" --cc "${CMAKE_C_COMPILER}" --node "${FORGE_NODE}")
+                    --lib-dir "${FORGE_LIB_DIR}" --cc "${FORGE_TEST_CC}" --node "${FORGE_NODE}")
                 set_tests_properties(scalar_conformance_regressions PROPERTIES TIMEOUT 120)
+                add_test(NAME string_conformance_regressions COMMAND "${Python3_EXECUTABLE}"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/tests/string_conformance_test.py"
+                    --forge "$<TARGET_FILE:forge>" --root "${FORGE_ROOT_DIR}"
+                    --lib-dir "${FORGE_LIB_DIR}" --cc "${FORGE_TEST_CC}" --node "${FORGE_NODE}")
+                set_tests_properties(string_conformance_regressions PROPERTIES TIMEOUT 120)
             endif()
         endif()
     endif()

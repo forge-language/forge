@@ -4,7 +4,7 @@ Forge is an experimental systems language exploring safe ownership, lightweight 
 
 ## Native compilation
 
-Source .fg → lexer → parser / AST → source module loading → semantic checks → optimizer → C generation → system C compiler / linker → executable.
+Source .fg → lexer → parser / AST → source module loading → semantic checks → optimizer → typed occurrence graph and verification → C generation → system C compiler / linker → executable.
 
 | Area | Source | Responsibility |
 |---|---|---|
@@ -12,14 +12,23 @@ Source .fg → lexer → parser / AST → source module loading → semantic che
 | Parsing | compiler/lexer.c, compiler/parser.c, compiler/ast.c | Tokens, declarations and syntax |
 | Modules | compiler/module_loader.c, compiler/mod_registry.c | Source imports and standard function mapping |
 | Semantic checks | compiler/semantic.c | Visible names/types, initialization, function flow and scoped ownership-send checks |
+| Ownership state | compiler/ownership.c | Append-only binding identities and branch/match state joins |
+| Scoped resources | compiler/cleanup.c | Verified command factories, borrowed uses and owner escape restrictions |
+| Typed graph | compiler/typed_ast.c, compiler/typed_lookup.c | Per-use types/conversions, bindings, effects and backend occurrence lookup |
+| Resource metadata | compiler/resource_contracts.c | SDK resource effects and explicit opaque boundaries |
 | Optimization | compiler/optimize.c | Constant folding and expression simplification |
-| Native output | compiler/codegen.c | C code and partial ownership diagnostics |
+| Native output | compiler/codegen.c | C generation from the checked AST and typed graph |
 | Browser output | compiler/codegen_js.c | JavaScript functions and 64-bit BigInt operations |
 | Runtime | forge-runtime repository | Worker scheduling, mailboxes, events and ownership primitives |
 | Standard APIs | forge-stdlib repository | Native I/O, strings, networking and other builtins |
 | Bootstrap | bootstrap/compiler.fg | Self-hosted subset compiler; fixed-point verification |
 
---check parses, loads modules, runs the stage0 semantic checks and optimizes. Its visible-signature and initialization checks are not a complete type or ownership checker. There is no complete borrow-checking or IR verification phase in this pipeline.
+--check parses, loads modules, runs stage0 semantic checks, optimizes and verifies
+the typed occurrence graph. Verification checks graph consistency and conversion
+metadata; it does not establish complete borrow checking or external ABI safety.
+Both backends consume the same immutable post-optimization graph. Shared constant
+ASTs receive distinct occurrences for each interpretation, preserving caller-scope
+resolution without caching a single type on the AST address.
 
 The [design principles](docs/design-principles.md) require optimizations to preserve
 observable behavior, including traps and resource failures. Guarded specializations
@@ -34,9 +43,12 @@ point of use in the current scope and flow state. It is freed before optimizatio
 can rewrite the initializer AST.
 Semantic checking and native emission also use a private local-name stack index.
 Its push/pop protocol restores outer bindings after shadowing; types and flow or
-ownership state remain in the current binding array. Unpromoted small/cheap
+ownership qualifiers are associated with append-only binding IDs. Unpromoted small/cheap
 stacks stay linear; promoted indexes remain active until the stack reaches zero
 and reuse scratch capacity across functions in one pass.
+
+Current scalar and selfhost contracts, exclusions and their executable evidence
+are listed in the [backend support matrix](docs/backend-conformance.md).
 
 ## Execution model
 

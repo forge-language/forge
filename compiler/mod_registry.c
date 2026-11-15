@@ -238,6 +238,11 @@ static const ForgeModule MODULES[] = {
     { .name = { "lsprpc", 6 }, .header = "forge/lsprpc.h", .fns = LSPRPC_FNS, .fn_count = sizeof(LSPRPC_FNS) / sizeof(LSPRPC_FNS[0]) },
 };
 
+size_t forge_std_module_count(void) { return sizeof(MODULES) / sizeof(*MODULES); }
+const ForgeModule *forge_std_module_at(size_t index) {
+    return index < forge_std_module_count() ? &MODULES[index] : NULL;
+}
+
 const ForgeModule *forge_std_module(ForgeStr name) {
     for (size_t i = 0; i < sizeof(MODULES) / sizeof(MODULES[0]); i++) {
         if (forge_str_eq(MODULES[i].name, name)) return &MODULES[i];

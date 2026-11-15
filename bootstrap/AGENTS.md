@@ -19,8 +19,11 @@ Keep top-level `fn`/`const` in the line-start form recognized by its scanners.
 The supported scalar types are int, bool, string and void; imports are
 strings/fs/os/io. Coroutine lowering, arbitrary modules and full ownership
 checking are outside this compiler's supported subset.
-Stage0 wrapping/division semantics are not automatically implemented here;
-self-hosted arithmetic still emits C operators. Document parity claims by case.
+Integer addition/subtraction/multiplication and unary negation lower through
+wrapping helpers; division/remainder use stage0's guarded int64 contract.
+Expression lowering preserves precedence and logical short circuit. Keep
+supported-subset parity cases in selfhost_arithmetic_test.py; convergence alone
+does not establish arithmetic correctness.
 Validate names/types/flow before output creation. CLI failures must preserve an
 existing output; source and output may not identify the same file.
 Strings/views borrow arena storage; avoid resetting it while scans still refer

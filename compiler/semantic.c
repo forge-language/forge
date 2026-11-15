@@ -3,12 +3,13 @@
 #include "function_index.h"
 #include "const_index.h"
 #include "local_index.h"
+#include "ownership.h"
 
 /* Unknown is deliberately distinct from every language type: imported binary
  * APIs do not expose a typed Forge AST. Never guess signatures from names. */
 #define UNKNOWN ((ForgeTypeKind)-1)
 #define FUNCTION_REFERENCE ((ForgeTypeKind)-2)
-typedef struct { ForgeStr name; ForgeType type; bool initialized, owned; size_t binding; } Local;
+typedef struct { ForgeStr name; ForgeType type; size_t ownership, binding; } Local;
 _Static_assert(offsetof(Local, name) == 0, "local index requires a leading name");
 typedef struct {
     Program *program;
@@ -19,6 +20,7 @@ typedef struct {
     Local *locals;
     size_t count, capacity, scope_start;
     ForgeLocalIndex local_index;
+    ForgeOwnership ownership;
     ForgeType result;
     unsigned loops, depth;
     bool coroutine;
@@ -53,11 +55,11 @@ static bool compatible(ForgeType to, ForgeType from) {
     return to.kind == from.kind &&
         (to.kind != TY_STRUCT || forge_str_eq(to.struct_name, from.struct_name));
 }
-static void require(Check *c, ForgeType to, ForgeType from, ForgeStr name, SourceSpan location) {
+static void require(Check *c, ForgeType to, ForgeType from, ForgeStr name, SourceSpan location,
+                    ForgeTypedUse use) {
     if (!compatible(to, from)) error(name, "type mismatch for");
     if (c->typed && c->last_expression != FORGE_TYPED_NONE && to.kind != UNKNOWN) {
-        ForgeTypedExpr *node = &c->typed->expressions[c->last_expression];
-        node->has_expected = true; node->expected = to;
+        forge_typed_expect(c->typed, c->last_expression, to, use);
     }
 }
 static Local *local(Check *c, ForgeStr name) {
@@ -71,7 +73,7 @@ static void declare(Check *c, ForgeStr name, ForgeType t, bool initialized, Sour
     if (existing != SIZE_MAX && existing >= c->scope_start)
         error(name, "duplicate declaration of");
     c->locals = forge_array_reserve(c->locals, c->count, &c->capacity, sizeof(*c->locals), 16);
-    c->locals[c->count++] = (Local){name, t, initialized, false, c->typed ?
+    c->locals[c->count++] = (Local){name, t, forge_ownership_bind(&c->ownership, initialized), c->typed ?
         forge_typed_binding(c->typed, name, t, location, c->scope) : FORGE_TYPED_NONE};
     forge_local_push(&c->local_index, name);
 }
@@ -180,9 +182,12 @@ static void arguments(Check *c, ForgeStr name, Param *params, Expr **args, size_
             ForgeStr saved=c->module; if (module.len) c->module=module;
             bool callback=callee->is_extern || callback_forwarded(c,&callee->body,params->name,0);
             c->module=saved;
-            if (callback) continue;
+            if (callback) {
+                if (c->typed) forge_typed_expect(c->typed, c->last_expression, params->type, FORGE_USE_ARGUMENT);
+                continue;
+            }
         }
-        require(c, params->type,value,name,args[i]->span);
+        require(c, params->type,value,name,args[i]->span,FORGE_USE_ARGUMENT);
     }
 }
 static ForgeType call(Check *c, ForgeStr module, ForgeStr name, Expr **args, size_t count, SourceSpan location) {
@@ -212,7 +217,7 @@ static ForgeType call(Check *c, ForgeStr module, ForgeStr name, Expr **args, siz
             c->typed->expressions[callback_node].type.kind = FORGE_TYPED_FUNCTION;
             c->typed->expressions[callback_node].function = callback;
         }
-        require(c, forge_type_int(), expression(c, args[1]), name, args[1]->span);
+        require(c, forge_type_int(), expression(c, args[1]), name, args[1]->span,FORGE_USE_ARGUMENT);
         return required == 1 ? forge_type_int() : forge_type_void();
     }
     FnDecl *fn = NULL;
@@ -240,6 +245,7 @@ static ForgeType call(Check *c, ForgeStr module, ForgeStr name, Expr **args, siz
         if (c->typed) {
             c->typed->expressions[call_node].call = standard ? FORGE_CALL_STANDARD : FORGE_CALL_BUILTIN;
             c->typed->expressions[call_node].standard = standard;
+            if (standard) c->typed->expressions[call_node].resource_contract = forge_resource_contract(standard);
         }
         bool scalar_print = builtin && forge_str_eq(name,forge_str("println"));
         size_t expected = builtin ? 1 : strlen(standard->signature) - 1;
@@ -257,7 +263,7 @@ static ForgeType call(Check *c, ForgeStr module, ForgeStr name, Expr **args, siz
                 ForgeType expected_type = builtin ?
                     (forge_str_eq(name,forge_str("print_int")) ? forge_type_int() : forge_type_string()) :
                     signature_type(standard->signature[i+1]);
-                require(c, expected_type,value,name,args[i]->span);
+                require(c, expected_type,value,name,args[i]->span,FORGE_USE_ARGUMENT);
             }
         }
         return builtin ? forge_type_void() : signature_type(standard->signature[0]);
@@ -269,6 +275,7 @@ static ForgeType call(Check *c, ForgeStr module, ForgeStr name, Expr **args, siz
     }
     if (!binary) error(name, "unknown function");
     if (c->typed) c->typed->expressions[call_node].call = FORGE_CALL_OPAQUE;
+    if (c->typed) c->typed->expressions[call_node].resource_contract = forge_resource_contract(NULL);
     for (size_t i = 0; i < count; ++i) {
         ForgeType t = expression(c, args[i]);
         if (t.kind == TY_VOID) error(name, "void argument for");
@@ -291,7 +298,8 @@ static ForgeType expression(Check *c, Expr *e) {
     case EXPR_IDENT: {
         Local *l = local(c, e->as.ident);
         if (l) {
-            if (!c->typed && !l->initialized) error(e->as.ident, l->owned ? "use of moved owned value" : "uninitialized value");
+            if (!c->typed && !forge_ownership_live(&c->ownership, l->ownership))
+                error(e->as.ident, forge_ownership_owned(&c->ownership, l->ownership) ? "use of moved owned value" : "uninitialized value");
             if (c->typed) c->typed->expressions[node].binding = l->binding;
             t = l->type; break;
         }
@@ -319,13 +327,36 @@ static ForgeType expression(Check *c, Expr *e) {
     case EXPR_QUAL_CALL:
         t = call(c, e->as.qual_call.module, e->as.qual_call.name, e->as.qual_call.args, e->as.qual_call.arg_count, location); break;
     case EXPR_BINARY: {
-        ForgeType a = expression(c, e->as.binary.left), b = expression(c, e->as.binary.right);
+        ForgeType a = expression(c, e->as.binary.left);
+        size_t left = c->last_expression;
+        ForgeType b = expression(c, e->as.binary.right);
+        size_t right = c->last_expression;
         if (!numeric(a) || !numeric(b)) error(forge_str("operator"), "non-numeric operand for");
         if (e->as.binary.op == BIN_MOD && (a.kind == TY_FLOAT || b.kind == TY_FLOAT))
             error(forge_str("%"), "non-integer operand for");
         t = e->as.binary.op >= BIN_EQ ? forge_type_bool() :
             a.kind == TY_FLOAT || b.kind == TY_FLOAT ? forge_type_float() :
             a.kind == UNKNOWN || b.kind == UNKNOWN ? unknown() : forge_type_int();
+        if (c->typed) {
+            ForgeTypedExpr *binary = &c->typed->expressions[node];
+            binary->left = left; binary->right = right;
+            BinOp op = e->as.binary.op;
+            bool logical = op == BIN_AND || op == BIN_OR;
+            bool comparison = op >= BIN_EQ && op <= BIN_GE;
+            if (comparison) binary->comparison = forge_typed_comparison(
+                c->typed->expressions[left].type, c->typed->expressions[right].type);
+            c->typed->expressions[right].conditional = logical;
+            size_t operands[] = {left, right};
+            ForgeType values[] = {a, b};
+            for (size_t i = 0; i < 2; ++i) {
+                ForgeTypedUse use = logical ? FORGE_USE_TRUTH :
+                    comparison ? FORGE_USE_COMPARISON : FORGE_USE_ARITHMETIC;
+                ForgeType expected = logical ? forge_type_bool() : comparison ? values[i] : t;
+                c->typed->expressions[operands[i]].use = use;
+                if (expected.kind != UNKNOWN)
+                    forge_typed_expect(c->typed, operands[i], expected, use);
+            }
+        }
         break;
     }
     case EXPR_RECV:
@@ -333,7 +364,7 @@ static ForgeType expression(Check *c, Expr *e) {
         t = forge_type_int(); break;
     case EXPR_INDEX: {
         ForgeType base = expression(c, e->as.index.base);
-        require(c, forge_type_int(), expression(c, e->as.index.index), forge_str("index"), e->as.index.index->span);
+        require(c, forge_type_int(), expression(c, e->as.index.index), forge_str("index"), e->as.index.index->span,FORGE_USE_INDEX);
         if (base.kind != TY_STRING && base.kind != TY_PTR && base.kind != UNKNOWN)
             error(forge_str("index"), "invalid base for");
         t = forge_type_int(); break;
@@ -371,39 +402,43 @@ done:
     return t;
 }
 static void block(Check *, Block *);
-enum { FLOW_NEXT=1, FLOW_RETURN=2, FLOW_BREAK=4, FLOW_CONTINUE=8 };
 static unsigned flow_block(Block *, unsigned);
 static bool *snapshot(Check *c) {
     if (c->count >= SIZE_MAX / sizeof(bool)) forge_die("too many semantic locals");
     bool *state = malloc((c->count + 1) * sizeof(bool));
     if (!state) forge_die("out of memory");
-    for (size_t i = 0; i < c->count; ++i) state[i] = c->locals[i].initialized;
+    for (size_t i = 0; i < c->count; ++i) state[i] = forge_ownership_live(&c->ownership, c->locals[i].ownership);
     return state;
 }
 static void restore(Check *c, bool *state, size_t count) {
-    for (size_t i = 0; i < count; ++i) c->locals[i].initialized = state[i];
+    for (size_t i = 0; i < count; ++i) forge_ownership_set_live(&c->ownership, c->locals[i].ownership, state[i]);
 }
 static void condition(Check *c, Expr *e) {
     SourceSpan location = e ? e->span : (SourceSpan){0};
     if (e && !numeric(expression(c, e))) error(forge_str("condition"), "non-numeric");
+    if (e && c->typed) forge_typed_expect(c->typed, c->last_expression, forge_type_bool(), FORGE_USE_TRUTH);
 }
 static void statement(Check *c, Stmt *s) {
     SourceSpan location = s->focus.file ? s->focus : s->span;
     switch (s->kind) {
     case STMT_LET:
-        if (s->as.let.init) require(c, s->as.let.type, expression(c, s->as.let.init), s->as.let.name, s->as.let.init->span);
-        if (s->as.let.owned_ && (s->as.let.type.kind!=TY_STRING || !s->as.let.init))
+        if (s->as.let.init) require(c, s->as.let.type, expression(c, s->as.let.init), s->as.let.name, s->as.let.init->span,FORGE_USE_INITIALIZER);
+        if (s->as.let.owned_ && (!s->as.let.init ||
+            (s->as.let.type.kind!=TY_STRING && !(s->as.let.type.kind==TY_INT &&
+             (s->as.let.init->kind==EXPR_CALL || s->as.let.init->kind==EXPR_QUAL_CALL)))))
             error(s->as.let.name,"owned bindings require initialized strings for");
         declare(c, s->as.let.name, s->as.let.type, s->as.let.init != NULL, location);
-        c->locals[c->count-1].owned=s->as.let.owned_; break;
+        if (c->typed && s->as.let.owned_ && s->as.let.type.kind==TY_INT)
+            c->typed->bindings[c->locals[c->count-1].binding].cleanup_origin=s;
+        forge_ownership_qualify(&c->ownership, c->locals[c->count-1].ownership, s->as.let.owned_); break;
     case STMT_ASSIGN: {
         Local *l = local(c, s->as.assign.name);
         if (!l) error(s->as.assign.name, "assignment to unknown value");
-        require(c, l->type, expression(c, s->as.assign.value), s->as.assign.name, s->as.assign.value->span);
-        l->initialized = true; break;
+        require(c, l->type, expression(c, s->as.assign.value), s->as.assign.name, s->as.assign.value->span,FORGE_USE_ASSIGNMENT);
+        forge_ownership_set_live(&c->ownership, l->ownership, true); break;
     }
     case STMT_EXPR: expression(c, s->as.expr); break;
-    case STMT_RETURN: require(c, c->result, expression(c, s->as.ret), forge_str("return"), s->as.ret ? s->as.ret->span : location); break;
+    case STMT_RETURN: require(c, c->result, expression(c, s->as.ret), forge_str("return"), s->as.ret ? s->as.ret->span : location,FORGE_USE_RETURN); break;
     case STMT_IF: {
         condition(c, s->as.if_stmt.cond);
         size_t n = c->count;
@@ -415,14 +450,12 @@ static void statement(Check *c, Stmt *s) {
         unsigned then_flow=flow_block(s->as.if_stmt.then_br,0);
         unsigned else_flow=s->as.if_stmt.else_br ? flow_block(s->as.if_stmt.else_br,0) : FLOW_NEXT;
         for (size_t i = 0; i < n; ++i) {
-            /* A moved handle on a break/continue path must survive until the
-             * surrounding loop join. Keeping those exits here is conservative
-             * for reads before the join, but never forgets a possible move. */
-            unsigned exits=c->locals[i].owned ? FLOW_NEXT|FLOW_BREAK|FLOW_CONTINUE : FLOW_NEXT;
-            bool then_next=(then_flow&exits)!=0,else_next=(else_flow&exits)!=0;
-            if (then_next && else_next) c->locals[i].initialized &= then[i];
-            else if (then_next) c->locals[i].initialized=then[i];
-            else if (!else_next) c->locals[i].initialized=before[i];
+            size_t id = c->locals[i].ownership;
+            ForgeOwnershipJoin join = {0};
+            forge_ownership_join_add(&join, c->ownership.bindings[id], then[i], then_flow);
+            forge_ownership_join_add(&join, c->ownership.bindings[id],
+                                     forge_ownership_live(&c->ownership, id), else_flow);
+            forge_ownership_join_finish(&c->ownership, id, join, before[i]);
         }
         free(before); free(then); break;
     }
@@ -431,13 +464,13 @@ static void statement(Check *c, Stmt *s) {
         size_t n = c->count; bool *before = snapshot(c);
         ++c->loops; block(c, s->as.while_stmt.body);
         bool *after=snapshot(c); bool consumed=false;
-        for (size_t i=0;i<n;++i) consumed|=c->locals[i].owned && before[i] && !after[i];
+        for (size_t i=0;i<n;++i) consumed|=forge_ownership_owned(&c->ownership, c->locals[i].ownership) && before[i] && !after[i];
         if (!c->typed && consumed && (flow_block(s->as.while_stmt.body,0)&(FLOW_NEXT|FLOW_CONTINUE))) {
             condition(c,s->as.while_stmt.cond);
             block(c,s->as.while_stmt.body);
         }
         --c->loops;
-        for (size_t i=0;i<n;++i) c->locals[i].initialized=before[i] && after[i];
+        for (size_t i=0;i<n;++i) forge_ownership_loop_join(&c->ownership, c->locals[i].ownership, before[i], after[i]);
         free(after); free(before); break;
     }
     case STMT_FOR: {
@@ -451,14 +484,14 @@ static void statement(Check *c, Stmt *s) {
         ++c->loops; block(c, s->as.for_stmt.body);
         if (s->as.for_stmt.step) statement(c, s->as.for_stmt.step);
         bool *after=snapshot(c); bool consumed=false;
-        for (size_t i=0;i<n;++i) consumed|=c->locals[i].owned && before[i] && !after[i];
+        for (size_t i=0;i<n;++i) consumed|=forge_ownership_owned(&c->ownership, c->locals[i].ownership) && before[i] && !after[i];
         if (!c->typed && consumed && (flow_block(s->as.for_stmt.body,0)&(FLOW_NEXT|FLOW_CONTINUE))) {
             condition(c,s->as.for_stmt.cond);
             block(c,s->as.for_stmt.body);
             if (s->as.for_stmt.step) statement(c,s->as.for_stmt.step);
         }
         --c->loops;
-        for (size_t i=0;i<n;++i) c->locals[i].initialized=before[i] && after[i];
+        for (size_t i=0;i<n;++i) forge_ownership_loop_join(&c->ownership, c->locals[i].ownership, before[i], after[i]);
         free(after); free(before); forge_local_truncate(&c->local_index, outer); c->count = outer;
         c->scope_start = saved_scope; c->scope = typed_scope; break;
     }
@@ -482,9 +515,9 @@ static void statement(Check *c, Stmt *s) {
             if (s->as.send.value->kind!=EXPR_IDENT)
                 error(forge_str("send"),"send-move requires a named owned string for");
             Local *binding=local(c,s->as.send.value->as.ident);
-            if (!binding || !binding->owned || value.kind!=TY_STRING)
+            if (!binding || !forge_ownership_owned(&c->ownership, binding->ownership) || value.kind!=TY_STRING)
                 error(forge_str("send"),"send-move requires a named owned string for");
-            binding->initialized=false;
+            forge_ownership_set_live(&c->ownership, binding->ownership, false);
         } else if (value.kind!=TY_INT && value.kind!=TY_BOOL && value.kind!=UNKNOWN)
             error_at(s->as.send.value->span,forge_str("send"),"ordinary send requires an integer value for");
         break;
@@ -494,27 +527,27 @@ static void statement(Check *c, Stmt *s) {
         if (s->kind == STMT_AWAIT) expression(c, s->as.await_expr);
         break;
     case STMT_MATCH: {
-        require(c, forge_type_int(), expression(c, s->as.match_stmt.scrutinee), forge_str("match"), s->as.match_stmt.scrutinee->span);
+        require(c, forge_type_int(), expression(c, s->as.match_stmt.scrutinee), forge_str("match"), s->as.match_stmt.scrutinee->span,FORGE_USE_MATCH);
         size_t n = c->count; bool *before = snapshot(c);
-        if (n >= SIZE_MAX / sizeof(bool)) forge_die("too many semantic locals");
-        bool *joined=malloc((n+1)*sizeof(bool));
-        if (!joined) forge_die("out of memory");
-        for (size_t i=0;i<n;++i) joined[i]=true;
-        bool exhaustive=false,continuing=false,owned_continuing=false;
+        ForgeOwnershipJoin *joined=forge_calloc_array(n+1,sizeof(*joined));
+        bool exhaustive=false;
         for (MatchArm *a = s->as.match_stmt.arms; a; a = a->next) {
             restore(c, before, n); block(c, a->body);
             unsigned exits=flow_block(a->body,0);
-            continuing|=(exits&FLOW_NEXT)!=0;
-            owned_continuing|=(exits&(FLOW_NEXT|FLOW_BREAK|FLOW_CONTINUE))!=0;
-            for (size_t i=0;i<n;++i)
-                if (exits&(c->locals[i].owned ? FLOW_NEXT|FLOW_BREAK|FLOW_CONTINUE : FLOW_NEXT))
-                    joined[i]&=c->locals[i].initialized;
+            for (size_t i=0;i<n;++i) {
+                size_t id=c->locals[i].ownership;
+                forge_ownership_join_add(&joined[i], c->ownership.bindings[id],
+                                         forge_ownership_live(&c->ownership,id), exits);
+            }
             exhaustive|=a->wildcard;
             if (a->wildcard && a->next) error(forge_str("match"), "wildcard must be final in");
         }
-        for (size_t i=0;i<n;++i)
-            c->locals[i].initialized=(!exhaustive ? before[i]&&joined[i] :
-                (c->locals[i].owned ? owned_continuing : continuing) ? joined[i] : before[i]);
+        for (size_t i=0;i<n;++i) {
+            size_t id=c->locals[i].ownership;
+            if (!exhaustive)
+                forge_ownership_join_add(&joined[i], c->ownership.bindings[id], before[i], FLOW_NEXT);
+            forge_ownership_join_finish(&c->ownership,id,joined[i],before[i]);
+        }
         free(joined); free(before); break;
     }
     }
@@ -628,6 +661,7 @@ static void interpret_program(Program *p, ForgeTypedProgram *typed) {
         c.coroutine = false;
     }
     free(c.locals);
+    forge_ownership_free(&c.ownership);
     forge_local_free(&c.local_index);
     forge_const_index_free(&c.constants);
     forge_function_index_free(&c.functions);
@@ -644,5 +678,6 @@ ForgeTypedProgram forge_type_program(Program *p) {
     /* Validation already ran before optimization. Reinterpret values and names
      * on the current AST, without reapplying flow policy to newly folded tests. */
     interpret_program(p, &typed);
+    forge_typed_summarize(&typed);
     return typed;
 }

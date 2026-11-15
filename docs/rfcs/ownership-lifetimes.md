@@ -1,6 +1,6 @@
 # Ownership, loans, and resource lifetimes
 
-Status: **Draft / Proposed**, 2026-10-17. Owner: Forge maintainers (decision owner unassigned); drafting agent: ownership contract lane. Human decision: **pending** under [RFC_PROCESS.md](../../RFC_PROCESS.md). This document does not accept or implement plan tasks 6–9 or 11–14. No issue was posted by this drafting task.
+Status: **Accepted policy**, 2026-10-22. Decision owner: the human user maintaining this work. Drafted 2026-10-17; accepted under [RFC_PROCESS.md](../../RFC_PROCESS.md) by the explicit reply "권장안으로 확정하고 진행" (adopt the recommendations and proceed). Implementation and validation of tasks 6–9 and 11–14 remain separately tracked. No issue was posted by this drafting task.
 
 ## Problem and recommendation
 
@@ -9,6 +9,14 @@ Forge's current owned-string check is a binding-consumption check, not a general
 `LANGUAGE_SPEC.md` currently describes owned heap strings and general move too broadly. `compiler/semantic.c:expression` rejects `EXPR_MOVE`; `statement:STMT_SEND` accepts send-move only for an initialized, named `own` string and clears that binding's initialized state. Ordinary send accepts integer/bool/opaque values rather than strings. `compiler/codegen.c:emit_owned_send_helper` emits `__forge_send_owned_string`: clone bytes with `fr_own_clone`, abort on clone failure for a non-null source, clear the source binding, then call `fr_send_move`. An `own` literal or arena string is therefore not proof of heap allocation. Existing aliases remain valid until their original backing region expires.
 
 ## Current resource transitions (native stage0)
+
+Implementation checkpoint, 2026-11-06: explicit `own let command: int =
+os_command(...)` bindings now have native scope cleanup, including returns,
+loop exits and replacement. Escaping aliases, arbitrary owner factories and
+process/coroutine owners are rejected. This implements a supported resource
+slice of the accepted cleanup policy; the historical transition tables below
+do not imply that all proposed resource and cancellation rules are implemented.
+See [resource lifetimes](../resource-lifetimes.md) and `resource_cleanup_test.py`.
 
 These are source-grounded implementation facts, not new safety guarantees. Runtime and stdlib paths refer to their separate repositories, whose identities are recorded in the accompanying evidence. JS and the self-hosted subset need separate conformance evidence; native pointer, allocator, and thread claims do not transfer to them.
 
@@ -89,6 +97,15 @@ Expected with successful allocations: stdout `a\nab\n`, exit 0. These legacy fun
 Future accepted/rejected cases are specified as behavior, not invented executable syntax: permit view use followed by last-use reset; reject reset followed by view use; permit return of a borrow tied to a live argument; reject return of a local owner's borrow; permit synchronized shared access; reject concurrent mutable aliases; permit yield with proven surviving migration-safe owner; reject thread-affine loan migration. Compiler tests for these guarantees must fail before and pass after their later implementation.
 
 ## Decisions requiring human acceptance
+
+On 2026-10-22 the user explicitly accepted preserving copying send, unsupported
+general move, the existing ABI and cleanup limited to verified resource kinds.
+The same decision authorizes errors for forged handles, lifetime violations and
+unhandled failures in new safety checks. Existing opaque ABI adapters remain
+outside checked guarantees. This acceptance is policy authorization, not a claim
+that the analysis or cleanup below has already been implemented. Additive
+internal metadata and opt-in checking may stage migration without inventing
+public borrow syntax or treating an arbitrary scalar as a verified resource.
 
 | Decision | Recommendation | Alternative / unresolved detail |
 | --- | --- | --- |

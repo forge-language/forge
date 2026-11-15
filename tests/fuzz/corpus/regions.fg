@@ -1,0 +1,2 @@
+import strings;
+native main{let view:int=str_view("bytes");println(str_view_at(view,0));str_reset_arena();return 0;}

@@ -10,6 +10,48 @@ FORGE = pathlib.Path(sys.argv.pop(1)).resolve()
 
 
 class ModuleMergeTest(unittest.TestCase):
+    def test_nul_import_paths_are_rejected_without_loading_prefix(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            (root / 'leaf.fg').write_text('fn value():int{return 41;}')
+            source = root / 'main.fg'
+            for prefix in ('', 'import "leaf.fg"; '):
+                for path in ('leaf.fg\\0ignored', 'leaf.fg\x00ignored', 'leaf.fg\\0/leaf.fg'):
+                    with self.subTest(prefix=prefix, path=path):
+                        source.write_text(prefix + f'import "{path}"; native main {{}}')
+                        result = subprocess.run([str(FORGE), str(source), '--check'],
+                                                capture_output=True, text=True, timeout=20)
+                        self.assertEqual(result.returncode, 1, result.stderr)
+                        self.assertIn('NUL byte in module path', result.stderr)
+            (root / 'parent.fg').write_text('import "leaf.fg\\0ignored";')
+            source.write_text('import "parent.fg"; native main {}')
+            result = subprocess.run([str(FORGE), str(source), '--check'],
+                                    capture_output=True, text=True, timeout=20)
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertIn('NUL byte in module path', result.stderr)
+
+    @unittest.skipUnless(sys.platform.startswith('linux'), 'Linux PATH_MAX regression')
+    def test_overlong_import_does_not_load_truncated_prefix(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            # The existing prefix occupies exactly PATH_MAX-1 bytes. Appending
+            # a suffix must fail rather than loading that different file.
+            leaf = 'x.fg'
+            if (4095 - len(str(root)) - 1 - len(leaf)) % 2:
+                leaf = 'xx.fg'
+            (root / leaf).write_text('fn value():int{return 41;}')
+            path = './' * ((4095 - len(str(root)) - 1 - len(leaf)) // 2) + leaf
+            source = root / 'main.fg'
+            source.write_text(f'import "{path}"; native main {{}}')
+            result = subprocess.run([str(FORGE), str(source), '--check'],
+                                    capture_output=True, text=True, timeout=20)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            source.write_text(f'import "{path}ignored"; native main {{}}')
+            result = subprocess.run([str(FORGE), str(source), '--check'],
+                                    capture_output=True, text=True, timeout=20)
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertIn('cannot find module', result.stderr)
+
     def test_failed_imported_read_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)

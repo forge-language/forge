@@ -1,19 +1,20 @@
 #include "codegen.h"
 #include "mod_registry.h"
 #include "function_index.h"
+#include "typed_lookup.h"
 #include <inttypes.h>
 #include <string.h>
 
 typedef struct {
   FILE *out;
   Program *prog;
+  ForgeTypedIndex typed_index;
+  size_t typed_context;
   ForgeStr module;
   unsigned indent;
   unsigned match_id;
   ForgeStr locals[1024];
-  ForgeTypeKind local_types[1024];
   size_t local_count;
-  ForgeTypeKind return_type;
   ForgeFunctionIndex *module_functions;
 } JS;
 static void expression(JS *g, Expr *e);
@@ -37,24 +38,10 @@ static int local(JS *g, ForgeStr name_) {
       return 1;
   return 0;
 }
-static ForgeTypeKind local_type(JS *g, ForgeStr name_) {
-  for (size_t i = g->local_count; i > 0; i--)
-    if (forge_str_eq(g->locals[i - 1], name_))
-      return g->local_types[i - 1];
-  return TY_VOID;
-}
-static void add_local(JS *g, ForgeStr name_, ForgeTypeKind type) {
+static void add_local(JS *g, ForgeStr name_) {
   if (g->local_count == 1024)
     forge_die("JavaScript function exceeds 1024 local bindings");
-  g->locals[g->local_count] = name_;
-  g->local_types[g->local_count++] = type;
-}
-static void converted_expression(JS *g, Expr *e, ForgeTypeKind type) {
-  if (type == TY_FLOAT)
-    fputs("Number(", g->out);
-  expression(g, e);
-  if (type == TY_FLOAT)
-    fputc(')', g->out);
+  g->locals[g->local_count++] = name_;
 }
 static void name(FILE *out, ForgeStr value) {
   fprintf(out, "fr_%.*s", (int)value.len, value.data);
@@ -130,11 +117,26 @@ static int supported_standard(const char *name_) {
       return 1;
   return 0;
 }
+static void expression_inner(JS *g, Expr *e);
 static void expression(JS *g, Expr *e) {
   if (!e) {
     fputs("undefined", g->out);
     return;
   }
+  size_t saved = g->typed_context;
+  size_t node = forge_typed_find(&g->typed_index, e, saved);
+  if (node == FORGE_TYPED_NONE) forge_die("missing typed expression during JavaScript emission");
+  g->typed_context = node;
+  ForgeTypedConversion conversion = g->typed_index.program->expressions[node].conversion;
+  bool floating = conversion == FORGE_CONVERT_INT_FLOAT || conversion == FORGE_CONVERT_BOOL_FLOAT;
+  bool integer = conversion == FORGE_CONVERT_BOOL_INT;
+  if (floating) fputs("Number(", g->out);
+  if (integer) fputs("BigInt(", g->out);
+  expression_inner(g, e);
+  if (floating || integer) fputc(')', g->out);
+  g->typed_context = saved;
+}
+static void expression_inner(JS *g, Expr *e) {
   switch (e->kind) {
   case EXPR_INT:
     fprintf(g->out, "(%" PRId64 "n)", e->as.int_val);
@@ -176,11 +178,18 @@ static void expression(JS *g, Expr *e) {
   }
   case EXPR_CALL: {
     ForgeStr fn = e->as.call.name;
-    const char *standard =
-        forge_std_c_name(fn, g->prog->imports, g->prog->import_count);
-    if (forge_str_eq(fn, forge_str("println")))
-      fputs("__forge.println", g->out);
-    else if (standard) {
+    const ForgeTypedExpr *typed = &g->typed_index.program->expressions[g->typed_context];
+    const char *standard = typed->standard ? typed->standard->c_name : NULL;
+    if (forge_str_eq(fn, forge_str("println")) && typed->call == FORGE_CALL_BUILTIN) {
+      fputs("(()=>{", g->out);
+      for (size_t i = 0; i < e->as.call.arg_count; ++i) {
+        fputs("__forge.write(__forge.text(", g->out);
+        expression(g, e->as.call.args[i]);
+        fputs("));", g->out);
+      }
+      fputs("__forge.write('\\n');})()", g->out);
+      break;
+    } else if (standard) {
       if (!supported_standard(standard)) {
         fprintf(
             stderr,
@@ -251,19 +260,18 @@ static void inline_stmt(JS *g, Stmt *s) {
     name(g->out, s->as.let.name);
     fputc('=', g->out);
     if (s->as.let.init)
-      converted_expression(g, s->as.let.init, s->as.let.type.kind);
+      expression(g, s->as.let.init);
     else
       fputs(s->as.let.type.kind == TY_STRING  ? "\"\""
             : s->as.let.type.kind == TY_BOOL  ? "false"
             : s->as.let.type.kind == TY_FLOAT ? "0"
                                               : "0n",
             g->out);
-    add_local(g, s->as.let.name, s->as.let.type.kind);
+    add_local(g, s->as.let.name);
   } else if (s->kind == STMT_ASSIGN) {
     name(g->out, s->as.assign.name);
     fputc('=', g->out);
-    converted_expression(g, s->as.assign.value,
-                         local_type(g, s->as.assign.name));
+    expression(g, s->as.assign.value);
   } else
     forge_die("unsupported for-loop statement in JavaScript backend");
 }
@@ -282,7 +290,7 @@ static void statements(JS *g, Stmt *s) {
       break;
     case STMT_RETURN:
       fputs("return ", g->out);
-      converted_expression(g, s->as.ret, g->return_type);
+      expression(g, s->as.ret);
       fputs(";\n", g->out);
       break;
     case STMT_IF:
@@ -362,9 +370,8 @@ static void statements(JS *g, Stmt *s) {
 }
 static void function(JS *g, FnDecl *fn) {
   g->local_count = 0;
-  g->return_type = fn->ret_type.kind;
   for (Param *p = fn->params; p; p = p->next)
-    add_local(g, p->name, p->type.kind);
+    add_local(g, p->name);
   fputs("function ", g->out);
   if (g->module.len)
     module_name(g->out, g->module, fn->name);
@@ -416,19 +423,25 @@ static void function(JS *g, FnDecl *fn) {
     fputs("}\n\n", g->out);
   }
 }
-void codegen_emit_js(Program *prog, FILE *out) {
+void codegen_emit_js(Program *prog, const ForgeTypedProgram *typed, FILE *out) {
   if (prog->process_count || prog->supervisor_count || prog->library.present ||
       prog->struct_count)
     forge_die(
         "JavaScript backend supports functions, enums, source modules and "
         "native main; native process/struct declarations are unavailable");
-  JS g = {.out = out, .prog = prog};
+  JS g = {.out = out, .prog = prog, .typed_index = forge_typed_index(typed),
+          .typed_context = FORGE_TYPED_NONE};
   if (prog->module_count)
     g.module_functions = forge_calloc_array(prog->module_count, sizeof(*g.module_functions));
   for (size_t i = 0; i < prog->module_count; i++)
     g.module_functions[i] = forge_function_index_build(prog->modules[i].functions, prog->modules[i].fn_count);
   fputs(
       "\"use strict\";\nconst __forge=(()=>{\n"
+      "let pending='';const write=s=>{if(typeof globalThis.ForgeWrite==='function'){globalThis.ForgeWrite(s);return;}"
+      "if(typeof process!=='undefined'&&process.stdout&&typeof process.stdout.write==='function'){process.stdout.write(s);return;}"
+      "pending+=s;let end;while((end=pending.indexOf('\\n'))>=0){console.log(pending.slice(0,end));pending=pending.slice(end+1);}};\n"
+      "const ctext=s=>{if(s==null)return '';const end=s.indexOf(String.fromCharCode(0));return end<0?s:s.slice(0,end);};\n"
+      "const text=x=>x==null?'':typeof x==='string'?ctext(x):typeof x==='boolean'?(x?'1':'0'):Object.is(x,-0)?'-0':String(x);\n"
       "const wrap=v=>BigInt.asIntN(64,v),numeric=v=>typeof "
       "v==='boolean'?BigInt(v):v;\n"
       "const arithmetic=(a,b,op)=>{a=numeric(a);b=numeric(b);if(typeof "
@@ -443,10 +456,10 @@ void codegen_emit_js(Program *prog, FILE *out) {
       "TextDecoder('utf-8',{fatal:true}).decode(b);\n"
       "const eq=(a,b)=>{a=numeric(a);b=numeric(b);return typeof "
       "a==='number'&&typeof b==='bigint'||typeof a==='bigint'&&typeof "
-      "b==='number'?a<=b&&a>=b:a===b;},index=(s,n)=>{if(typeof "
-      "s!=='string')return s[Number(n)];const b=bytes(s),j=Number(n);return "
+      "b==='number'?a<=b&&a>=b:a===b;},index=(s,n)=>{if(s==null)return -1n;if(typeof "
+      "s!=='string')return s[Number(n)];const b=cbytes(s),j=Number(n);return "
       "j<0||j>=b.length?-1n:BigInt(b[j]);},i=v=>BigInt(v);\n"
-      "const cbytes=s=>{s=s==null?'':s;const end=s.indexOf(String.fromCharCode(0));return bytes(end<0?s:s.slice(0,end));};\n"
+      "const cbytes=s=>bytes(ctext(s));\n"
       "const handles=new Map();let next=1n;const store=v=>{const h=next++;handles.set(h,v);return h;};\n"
       "const view=h=>handles.get(h),builder=h=>{const b=handles.get(h);return b&&b.kind==='builder'?b:null;};\n"
       "const reserve=(b,n)=>{if(n<=b.data.length)return;let cap=Math.max(64,b.data.length);while(cap<n)cap*=2;const d=new Uint8Array(cap);d.set(b.data.subarray(0,b.len));b.data=d;};\n"
@@ -456,15 +469,14 @@ void codegen_emit_js(Program *prog, FILE *out) {
       "b==='string'?a+b:arithmetic(a,b,'add'),sub:(a,b)=>arithmetic(a,b,'sub'),"
       "mul:(a,b)=>arithmetic(a,b,'mul'),div:(a,b)=>arithmetic(a,b,'div'),mod:("
       "a,b)=>arithmetic(a,b,'mod'),eq,ne:(a,b)=>!eq(a,b),lt:(a,b)=>a<b,le:(a,b)"
-      "=>a<=b,gt:(a,b)=>a>b,ge:(a,b)=>a>=b,index,println:(...v)=>console.log(v."
-      "map(x=>typeof x==='boolean'?(x?'1':'0'):String(x)).join('')),\n"
-      "fr_str_len:s=>i(bytes(s).length),fr_str_concat:(a,b)=>a+b,fr_str_eq:(a,"
-      "b)=>i(a===b),fr_str_sub:(s,a,n)=>{if(a<0n||n<0n)return null;return "
-      "decode(bytes(s).slice(Number(a),Number(a+n)));},fr_str_contains:(s,x)=>"
-      "i(s.includes(x)),fr_str_trim:s=>s.trim(),fr_str_char_at:index,fr_str_"
+      "=>a<=b,gt:(a,b)=>a>b,ge:(a,b)=>a>=b,index,text,write,\n"
+      "fr_str_len:s=>i(cbytes(s).length),fr_str_concat:(a,b)=>ctext(a)+ctext(b),fr_str_eq:(a,"
+      "b)=>i(a==null||b==null?a===b:ctext(a)===ctext(b)),fr_str_sub:(s,a,n)=>{if(s==null||a<0n||n<0n)return null;return "
+      "decode(cbytes(s).slice(Number(a),Number(a+n)));},fr_str_contains:(s,x)=>"
+      "i(s!=null&&x!=null&&ctext(s).includes(ctext(x))),fr_str_trim:s=>s==null?null:ctext(s).replace(/^[ \\t\\n\\r\\v\\f]+|[ \\t\\n\\r\\v\\f]+$/g,''),fr_str_char_at:index,fr_str_"
       "append:(s,c)=>{if(c<0n||c>127n)throw new RangeError('JavaScript strings "
       "require valid UTF-8');return "
-      "s+String.fromCharCode(Number(c));},fr_str_append_str:(s,t)=>s+t,fr_str_"
+      "ctext(s)+String.fromCharCode(Number(c));},fr_str_append_str:(s,t)=>ctext(s)+ctext(t),fr_str_"
       "from_int:String,fr_str_arena_reset:()=>{handles.clear();return 0n;},\n"
       "fr_str_view:s=>store({kind:'view',data:cbytes(s)}),fr_str_view_len:h=>{const v=view(h);return i(v&&v.kind==='view'?v.data.length:0);},\n"
       "fr_str_view_at:(h,n)=>{const v=view(h);return !v||v.kind!=='view'||n<0n||n>=BigInt(v.data.length)?-1n:BigInt(v.data[Number(n)]);},\n"
@@ -519,7 +531,6 @@ void codegen_emit_js(Program *prog, FILE *out) {
   }
   g.module = forge_str("");
   g.local_count=0;
-  g.return_type=TY_INT;
   for (size_t i = 0; i < prog->native_count; i++)
     if (forge_str_eq(prog->natives[i].name, forge_str("main"))) {
       fputs("function __forge_main() ", out);
@@ -529,4 +540,5 @@ void codegen_emit_js(Program *prog, FILE *out) {
   for (size_t i = 0; i < prog->module_count; i++)
     forge_function_index_free(&g.module_functions[i]);
   free(g.module_functions);
+  forge_typed_index_free(&g.typed_index);
 }

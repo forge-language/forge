@@ -194,7 +194,119 @@ static void annotation_growth(void) {
     program_free(&p);
     puts("PASS expected types survive nested expression-array growth");
 }
+static void arithmetic_conversion_inputs(void) {
+    Program p=parse("fn half(x:float):float{return x/2;}native main{half(5);return 0;}");
+    forge_check_program(&p);
+    optimize_program(&p);
+    ForgeTypedProgram t=forge_type_program(&p);
+    CHECK(forge_typed_verify(&t));
+    size_t promoted=0;
+    for (size_t i=0;i<t.expression_count;++i) {
+        ForgeTypedExpr *e=&t.expressions[i];
+        if (e->kind==EXPR_INT && e->origin->as.int_val==2 &&
+            e->parent!=FORGE_TYPED_NONE) {
+            CHECK(e->has_expected && e->expected.kind==TY_FLOAT);
+            promoted++;
+        }
+    }
+    CHECK(promoted==1);
+    forge_typed_free(&t);
+    program_free(&p);
+    puts("PASS arithmetic operand promotion is explicit in typed graph");
+}
+static void conversions_and_effects(void) {
+    Program p=parse("import opaque;const C=5;"
+        "fn produce():int{return 7;}fn callback(x:int):int{return x;}"
+        "extern fn consume(cb:int):int;"
+        "fn convert(x:float):float{return x+true;}"
+        "fn boundaries(x:int):float{let f:float=x;f=produce();return true;}"
+        "native main{let b:bool=2;let i:int=true;let f:float=C;convert(produce());"
+        "let u:float=opaque.value();let j:int=true+false;if(i){}"
+        "false && (produce()/0==0);println(i<1.5);println(1.5<2.5);"
+        "println(opaque.value()<1.0);println(opaque.value()+1.5);"
+        "consume(callback);return 0;}"
+        "process p{coroutine task(){let n:int=recv();yield;}spawn task();}");
+    forge_check_program(&p);
+    optimize_program(&p);
+    ForgeTypedProgram t=forge_type_program(&p);
+    CHECK(forge_typed_verify(&t));
+    bool init=false, assign=false, argument=false, result=false, arithmetic=false;
+    bool legacy=false, widen_bool=false, opaque=false, callback=false, truth=false;
+    bool exact=false, floating=false, opaque_compare=false, receive=false, constant=false;
+    size_t converted=FORGE_TYPED_NONE, conditional=FORGE_TYPED_NONE, mixed=FORGE_TYPED_NONE;
+    for (size_t i=0;i<t.expression_count;++i) {
+        ForgeTypedExpr *e=&t.expressions[i];
+        if (e->conversion==FORGE_CONVERT_INT_FLOAT) {
+            if (e->use==FORGE_USE_INITIALIZER) init=true;
+            if (e->use==FORGE_USE_ASSIGNMENT) assign=true;
+            if (e->use==FORGE_USE_ARGUMENT) argument=true;
+            converted=i;
+        }
+        if (e->conversion==FORGE_CONVERT_BOOL_FLOAT) {
+            if (e->use==FORGE_USE_RETURN) result=true;
+            if (e->use==FORGE_USE_ARITHMETIC) arithmetic=true;
+        }
+        legacy |= e->conversion==FORGE_CONVERT_INT_BOOL_LEGACY;
+        widen_bool |= e->conversion==FORGE_CONVERT_BOOL_INT;
+        opaque |= e->conversion==FORGE_CONVERT_OPAQUE;
+        callback |= e->conversion==FORGE_CONVERT_CALLBACK;
+        truth |= e->conversion==FORGE_CONVERT_TRUTH;
+        if (e->comparison==FORGE_COMPARE_EXACT_MIXED) {
+            CHECK(t.expressions[e->left].conversion==FORGE_CONVERT_NONE);
+            CHECK(t.expressions[e->right].conversion==FORGE_CONVERT_NONE);
+            exact=true; mixed=i;
+        }
+        floating |= e->comparison==FORGE_COMPARE_FLOAT;
+        opaque_compare |= e->comparison==FORGE_COMPARE_OPAQUE;
+        receive |= (e->effects&FORGE_TYPED_RECEIVE_EFFECT)!=0;
+        if (e->effects&FORGE_TYPED_SHORT_CIRCUIT) {
+            CHECK(!t.expressions[e->left].conditional && t.expressions[e->right].conditional);
+            CHECK((e->subtree_effects&(FORGE_TYPED_CALL_EFFECT|FORGE_TYPED_MAY_TRAP))==
+                  (FORGE_TYPED_CALL_EFFECT|FORGE_TYPED_MAY_TRAP));
+            conditional=e->right;
+        }
+        if (e->constant && e->use==FORGE_USE_INITIALIZER) {
+            CHECK(e->conversion==FORGE_CONVERT_INT_FLOAT);
+            CHECK(t.expressions[i+1].parent==i);
+            CHECK(t.expressions[i+1].conversion==FORGE_CONVERT_NONE);
+            CHECK(!t.expressions[i+1].has_expected);
+            constant=true;
+        }
+    }
+    CHECK(init && assign && argument && result && arithmetic);
+    CHECK(legacy && widen_bool && opaque && callback && truth);
+    CHECK(exact && floating && opaque_compare && receive && constant);
+    CHECK(converted!=FORGE_TYPED_NONE && conditional!=FORGE_TYPED_NONE && mixed!=FORGE_TYPED_NONE);
+    ForgeTypedExpr saved=t.expressions[converted];
+    t.expressions[converted].conversion=FORGE_CONVERT_NONE;
+    CHECK(!forge_typed_verify(&t));
+    t.expressions[converted]=saved;
+    t.expressions[conditional].conditional=false;
+    CHECK(!forge_typed_verify(&t));
+    t.expressions[conditional].conditional=true;
+    saved=t.expressions[mixed];
+    t.expressions[mixed].subtree_effects^=FORGE_TYPED_CALL_EFFECT;
+    CHECK(!forge_typed_verify(&t));
+    t.expressions[mixed]=saved;
+    t.expressions[mixed].comparison=FORGE_COMPARE_FLOAT;
+    CHECK(!forge_typed_verify(&t));
+    t.expressions[mixed]=saved;
+    t.expressions[mixed].right=t.expressions[mixed].left;
+    CHECK(!forge_typed_verify(&t));
+    t.expressions[mixed]=saved;
+    size_t left=t.expressions[mixed].left;
+    saved=t.expressions[left];
+    forge_typed_expect(&t,left,forge_type_float(),FORGE_USE_COMPARISON);
+    CHECK(!forge_typed_verify(&t));
+    t.expressions[left]=saved;
+    CHECK(forge_typed_verify(&t));
+    forge_typed_free(&t);
+    program_free(&p);
+    puts("PASS boundary conversions, exact comparisons, conditional effects and malformed graph controls");
+}
 int main(void) {
+    arithmetic_conversion_inputs();
+    conversions_and_effects();
     contextual_types();
     callback_resolution();
     annotation_growth();

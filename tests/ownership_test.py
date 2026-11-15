@@ -31,6 +31,12 @@ int64_t verify_receiver(int64_t handle, const char *expected) {
     fr_process_destroy(process);
     return result ? 0 : 1;
 }
+void seed_owned_payload(void) {
+    void *payload = malloc(8);
+    if (!payload) abort();
+    memcpy(payload, "owned", 6);
+    if (!fr_send(fr_coro_process(fr_coro_current()), 1, 42, payload, 8)) abort();
+}
 '''
 
 
@@ -107,6 +113,13 @@ native main {
     }
     spawn sender();
 }''', 'sent\n')
+
+    def test_scalar_receive_releases_owned_payload_before_suspension(self) -> None:
+        self.run_source('''extern fn seed_owned_payload();
+process main{coroutine consumer(){
+ seed_owned_payload();let first:int=recv();println(first);yield;
+ seed_owned_payload();let second:int=recv();println(second);
+}spawn consumer();}''', '42\n42\n')
 
     def test_promoted_scope_restores_owned_outer_binding(self):
         padding = ''.join(f'let p{i}:int=seed+{i};' for i in range(80))

@@ -189,7 +189,7 @@ fn builtin_prefix_at(view: int, start: int): bool {
     return false;
 }
 
-fn compile_expr(expr: string): string {
+fn compile_atom(expr: string): string {
     let expr_view: int = str_view(expr);
     let out: int = str_builder();
     out = str_builder_append(out, "");
@@ -243,6 +243,111 @@ fn compile_expr(expr: string): string {
     return str_builder_finish(out);
 }
 
+// The semantic checker bounds nesting before emission. Lower operators by
+// precedence instead of copying C's signed arithmetic into generated programs.
+fn compile_expr_range(view: int, start: int, end: int, depth: int): string {
+    if (depth > 128) { semantic_error("expression lowering nesting limit exceeded"); os_exit(1); }
+    start = skip_ws(view, start);
+    if (start >= end) { return "1"; }
+    let split: int = -1;
+    let width: int = 0;
+    let weakest: int = 6;
+    let operand: bool = true;
+    let i: int = start;
+    while (i < end) {
+        i = skip_ws(view, i);
+        if (i >= end) { break; }
+        let ch: int = str_view_at(view, i);
+        let next: int = str_view_at(view, i + 1);
+        if (ch == 34) {
+            i = i + 1;
+            while (i < end && str_view_at(view, i) != 34) {
+                if (str_view_at(view, i) == 92) { i = i + 1; }
+                i = i + 1;
+            }
+            i = i + 1; operand = false; continue;
+        }
+        if (ch == 40) { i = matching_paren(view, i) + 1; operand = false; continue; }
+        if (is_ident(ch)) {
+            while (i < end && is_ident(str_view_at(view, i))) { i = i + 1; }
+            operand = false; continue;
+        }
+        if (operand && (ch == 45 || (ch == 33 && next != 61))) { i = i + 1; continue; }
+        if ((ch == 61 && next != 61) || (next == 61 && (ch == 43 || ch == 45 || ch == 42 || ch == 47 || ch == 37))) {
+            let lhs: string = compile_atom(str_trim(str_view_sub(view, start, i - start)));
+            let rhs_start: int = i + 1;
+            if (ch != 61) { rhs_start = i + 2; }
+            let rhs: string = compile_expr_range(view, rhs_start, end, depth + 1);
+            if (ch != 61) {
+                let helper: string = "__forge_add_i64";
+                if (ch == 45) { helper = "__forge_sub_i64"; }
+                if (ch == 42) { helper = "__forge_mul_i64"; }
+                if (ch == 47) { helper = "__forge_div_i64"; }
+                if (ch == 37) { helper = "__forge_mod_i64"; }
+                rhs = str_concat(str_concat(str_concat(str_concat(helper, "("), lhs), ","), str_concat(rhs, ")"));
+            }
+            return str_concat(str_concat(lhs, "="), rhs);
+        }
+        let priority: int = 0;
+        let size: int = 1;
+        if (ch == 124 && next == 124) { priority = 1; size = 2; }
+        if (ch == 38 && next == 38) { priority = 2; size = 2; }
+        if ((ch == 61 || ch == 33) && next == 61) { priority = 3; size = 2; }
+        if (ch == 60 || ch == 62) { priority = 3; if (next == 61) { size = 2; } }
+        if (ch == 43 || ch == 45) { priority = 4; }
+        if (ch == 42 || ch == 47 || ch == 37) { priority = 5; }
+        if (priority > 0 && priority <= weakest) { split = i; width = size; weakest = priority; }
+        operand = true; i = i + size;
+    }
+    if (split >= 0) {
+        let left: string = compile_expr_range(view, start, split, depth + 1);
+        let right: string = compile_expr_range(view, split + width, end, depth + 1);
+        if (weakest <= 3) {
+            return str_concat(str_concat(str_concat(str_concat("(", left), str_view_sub(view, split, width)), right), ")");
+        }
+        let ch: int = str_view_at(view, split);
+        let helper: string = "__forge_add_i64";
+        if (ch == 45) { helper = "__forge_sub_i64"; }
+        if (ch == 42) { helper = "__forge_mul_i64"; }
+        if (ch == 47) { helper = "__forge_div_i64"; }
+        if (ch == 37) { helper = "__forge_mod_i64"; }
+        return str_concat(str_concat(str_concat(str_concat(helper, "("), left), ","), str_concat(right, ")"));
+    }
+    let ch: int = str_view_at(view, start);
+    if (ch == 45) { return str_concat("__forge_sub_i64(0,", str_concat(compile_expr_range(view, start + 1, end, depth + 1), ")")); }
+    if (ch == 33) { return str_concat("(!", str_concat(compile_expr_range(view, start + 1, end, depth + 1), ")")); }
+    if (ch == 40) { return str_concat("(", str_concat(compile_expr_range(view, start + 1, matching_paren(view, start), depth + 1), ")")); }
+    let name_end: int = identifier_end(view, start);
+    let open: int = skip_ws(view, name_end);
+    if (name_end > start && open < end && str_view_at(view, open) == 40) {
+        let close: int = matching_paren(view, open);
+        let out: int = str_builder();
+        out = str_builder_append(out, compile_atom(str_view_sub(view, start, name_end - start)));
+        out = str_builder_append(out, "(");
+        i = skip_ws(view, open + 1);
+        while (i < close) {
+            let comma: int = find_separator_at(view, i, close, 44);
+            if (comma < 0) { comma = close; }
+            out = str_builder_append(out, compile_expr_range(view, i, comma, depth + 1));
+            i = skip_ws(view, comma + 1);
+            if (i < close) { out = str_builder_append(out, ","); }
+        }
+        out = str_builder_append(out, ")");
+        return str_builder_finish(out);
+    }
+    if (ch >= 48 && ch <= 57) {
+        let number_end: int = start;
+        while (number_end < end && str_view_at(view, number_end) >= 48 && str_view_at(view, number_end) <= 57) { number_end = number_end + 1; }
+        return str_concat("INT64_C(", str_concat(str_view_sub(view, start, number_end - start), ")"));
+    }
+    return compile_atom(str_view_sub(view, start, end - start));
+}
+
+fn compile_expr(expr: string): string {
+    let view: int = str_view(expr);
+    return compile_expr_range(view, 0, str_view_len(view), 0);
+}
+
 fn emit_header(src: string): string {
     let out: int = str_builder();
     out = str_builder_append(out, "// Generated by Forge self-hosted compiler");
@@ -263,6 +368,13 @@ fn emit_header(src: string): string {
     out = str_builder_append(out, nl());
     out = str_builder_append(out, "#include <string.h>");
     out = str_builder_append(out, nl());
+    out = str_builder_append(out, "static inline int64_t __forge_i64_bits(uint64_t bits){int64_t value;memcpy(&value,&bits,sizeof(value));return value;}\n");
+    out = str_builder_append(out, "static inline int64_t __forge_add_i64(int64_t a,int64_t b){return __forge_i64_bits((uint64_t)a+(uint64_t)b);}\n");
+    out = str_builder_append(out, "static inline int64_t __forge_sub_i64(int64_t a,int64_t b){return __forge_i64_bits((uint64_t)a-(uint64_t)b);}\n");
+    out = str_builder_append(out, "static inline int64_t __forge_mul_i64(int64_t a,int64_t b){return __forge_i64_bits((uint64_t)a*(uint64_t)b);}\n");
+    out = str_builder_append(out, "static inline void __forge_check_div_i64(int64_t a,int64_t b){if(b==0||(a==INT64_MIN&&b==-1)){fputs(\"Forge integer division\\n\",stderr);exit(EXIT_FAILURE);}}\n");
+    out = str_builder_append(out, "static inline int64_t __forge_div_i64(int64_t a,int64_t b){__forge_check_div_i64(a,b);return a/b;}\n");
+    out = str_builder_append(out, "static inline int64_t __forge_mod_i64(int64_t a,int64_t b){__forge_check_div_i64(a,b);return a%b;}\n");
     out = str_builder_append(out, "#include ");
     out = str_builder_append(out, q());
     out = str_builder_append(out, "forge/os.h");

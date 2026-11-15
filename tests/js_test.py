@@ -103,7 +103,8 @@ println(show("parameter"));{let TEXT:int=9;println(TEXT);}println(TEXT);return 0
   r=self.compile_run('''import strings;native main{
 let v: int=str_view("한글😀");println(str_view_sub(v,3,3));println(str_view_sub(v,6,9223372036854775807));println(str_view_sub(v,9223372036854775807,1));println(str_view_sub(v,-1,1));println(str_view_sub(0,0,1));println(str_view_matches(v,3,"글"));println(str_view_matches(v,6,"😀!"));println(str_view_matches(v,10,""));println(str_view_matches(v,11,""));println(str_view_matches(v,-1,""));
 let b: int=str_builder();str_builder_append_view(b,v,3,3);let snapshot: string=str_builder_finish(b);let saved: int=str_view(snapshot);str_builder_append_view(b,v,6,1);str_builder_append_view(b,v,7,9223372036854775807);println(str_builder_append_view(b,v,-1,1));println(str_builder_append_view(b,v,0,-1));println(str_builder_append_view(b,0,0,1));println(str_builder_finish(b));let i: int=0;while(i<1000){str_builder_append_view(b,saved,0,3);i=i+1;}println(str_len(str_builder_finish(b)));println(snapshot);str_reset_arena();println(str_view_matches(v,0,""));println(str_builder_append_view(b,saved,0,1));return 0;}''')
-  self.assertEqual(r.returncode,0,r.stderr);self.assertEqual(r.stdout.splitlines(),['글','😀','','null','null','1','0','1','0','0','0','0','0','글😀','3007','글','0','0'])
+  # Failed string results print no characters, matching native fr_print_str(NULL).
+  self.assertEqual(r.returncode,0,r.stderr);self.assertEqual(r.stdout.splitlines(),['글','😀','','','','1','0','1','0','0','0','0','0','글😀','3007','글','0','0'])
  def test_view_sub_invalid_utf8_rejected(self):
   r=self.compile_run('import strings;native main{let v: int=str_view("😀");println(str_view_sub(v,0,1));return 0;}')
   self.assertNotEqual(r.returncode,0)

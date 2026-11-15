@@ -38,6 +38,15 @@ class DriverTest(unittest.TestCase):
         self.assertEqual(subprocess.check_output([str(binary)], text=True), 'native\n')
         self.assertIn('native main', self.source.read_text())
 
+    def test_backend_rejection_preserves_existing_c_output(self) -> None:
+        self.source.write_text('const VALUE=read();fn read():int{return 1;}native main{}')
+        output = self.root / 'result.c'
+        output.write_text('existing artifact')
+        result = self.compile('--emit-c', '-o', str(output))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('must be an int, float, bool or string literal', result.stderr)
+        self.assertEqual(output.read_text(), 'existing artifact')
+
     def test_explicit_root_overrides_environment(self):
         result = self.compile(env={**os.environ, 'FORGE_ROOT': str(self.root / 'missing')})
         self.assertEqual(result.returncode, 0, result.stderr)

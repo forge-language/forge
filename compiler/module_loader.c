@@ -62,6 +62,7 @@ static char *read_file(const char *path, size_t *out_len) {
 }
 
 static void dirname_of(const char *path, char *out, size_t cap) {
+    if (strlen(path) >= cap) forge_die("entry path too long");
     strncpy(out, path, cap - 1);
     out[cap - 1] = '\0';
     char *slash = strrchr(out, '/');
@@ -111,14 +112,16 @@ static bool try_candidate(const char *path, char *out, size_t cap) {
 
 static bool is_prebuilt_lib(const char *lib_dir, ForgeStr name) {
     if (!lib_dir) return false;
+    if (name.len >= PATH_MAX) return false;
     char path[PATH_MAX];
-    snprintf(path, sizeof(path), "%s/libforge_%.*s.a", lib_dir, (int)name.len, name.data);
-    return fr_path_exists(path) != 0;
+    int length = snprintf(path, sizeof(path), "%s/libforge_%.*s.a", lib_dir, (int)name.len, name.data);
+    return length >= 0 && (size_t)length < sizeof(path) && fr_path_exists(path) != 0;
 }
 
 static bool resolve_module_path(ModuleResolver *r, ForgeStr name, ForgeStr rel_path,
                               char *out, size_t cap) {
     char candidate[PATH_MAX];
+    if (name.len >= PATH_MAX || rel_path.len >= PATH_MAX) return false;
     const char *bases[257];
     size_t base_count = 0;
     bases[base_count++] = r->entry_dir;
@@ -127,24 +130,29 @@ static bool resolve_module_path(ModuleResolver *r, ForgeStr name, ForgeStr rel_p
 
     if (rel_path.len > 0) {
         for (size_t i = 0; i < base_count; i++) {
-            snprintf(candidate, sizeof(candidate), "%s/%.*s", bases[i], (int)rel_path.len, rel_path.data);
-            if (try_candidate(candidate, out, cap)) return true;
+            int length = snprintf(candidate, sizeof(candidate), "%s/%.*s", bases[i], (int)rel_path.len, rel_path.data);
+            if (length >= 0 && (size_t)length < sizeof(candidate) &&
+                try_candidate(candidate, out, cap)) return true;
         }
         if (rel_path.len > 0 &&
             (rel_path.data[0] == '/' || memchr(rel_path.data, ':', rel_path.len))) {
             char abs_path[PATH_MAX];
-            snprintf(abs_path, sizeof(abs_path), "%.*s", (int)rel_path.len, rel_path.data);
+            /* rel_path.len is bounded above, so this copy cannot truncate. */
+            memcpy(abs_path, rel_path.data, rel_path.len);
+            abs_path[rel_path.len] = '\0';
             return try_candidate(abs_path, out, cap);
         }
         return false;
     }
 
     for (size_t i = 0; i < base_count; i++) {
-        snprintf(candidate, sizeof(candidate), "%s/%.*s.fg", bases[i], (int)name.len, name.data);
-        if (try_candidate(candidate, out, cap)) return true;
-        snprintf(candidate, sizeof(candidate), "%s/%.*s/%.*s.fg",
+        int length = snprintf(candidate, sizeof(candidate), "%s/%.*s.fg", bases[i], (int)name.len, name.data);
+        if (length >= 0 && (size_t)length < sizeof(candidate) &&
+            try_candidate(candidate, out, cap)) return true;
+        length = snprintf(candidate, sizeof(candidate), "%s/%.*s/%.*s.fg",
                  bases[i], (int)name.len, name.data, (int)name.len, name.data);
-        if (try_candidate(candidate, out, cap)) return true;
+        if (length >= 0 && (size_t)length < sizeof(candidate) &&
+            try_candidate(candidate, out, cap)) return true;
     }
     return false;
 }
@@ -291,6 +299,10 @@ static void load_parsed_module(ModuleResolver *r, Program *prog, ForgeStr name,
 }
 
 static void load_module_file(ModuleResolver *r, Program *prog, ForgeStr name, ForgeStr rel_path) {
+    /* ForgeStr paths are decoded byte strings; filesystem APIs stop at NUL.
+     * Validate before lookup/deduplication so an alias cannot bypass this. */
+    if (rel_path.len && memchr(rel_path.data, '\0', rel_path.len))
+        forge_die("NUL byte in module path");
     if (find_module(prog, name)) return;
 
     char resolved[PATH_MAX];

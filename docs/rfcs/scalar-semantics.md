@@ -13,6 +13,13 @@ unrelated ABI changes and other RFCs, including ownership, are outside this appr
 Policy acceptance does not establish implementation completion or satisfy the
 executable evidence requirements below.
 
+Implementation checkpoint, 2026-10-22: D1 shortest binary64 output, D2 streamed
+println arguments and D4 exact mixed comparison are implemented in stage0.
+`scalar_conformance_test.py`, `float_format_test.py` and `arithmetic_test.py`
+exercise native/JS behavior; `selfhost_arithmetic_test.py` covers the independent
+integer subset. Baseline observations below retain their original chronology.
+See [backend conformance](../backend-conformance.md) for current support limits.
+
 ## Problem and evidence boundary
 
 The semantic checker accepts scalar combinations that independent backend
@@ -338,16 +345,22 @@ binary library APIs.
 
 ## Selfhost subset and compatibility
 
-`bootstrap/compiler.fg` is independent. Its `compile_expr` emits raw C arithmetic;
+The original baseline described below has been superseded for arithmetic:
+on 2026-10-22, task 5 introduced precedence-aware wrapping helpers and guarded
+division/remainder for the supported int/bool subset. Compound updates, loop
+steps and short circuit are covered by `tests/selfhost_arithmetic_test.py` at
+O0/O3 with UBSan; fixed-point verification remains a separate convergence check.
+
+At the RFC baseline, `bootstrap/compiler.fg` was independent and emitted raw C arithmetic;
 [bootstrap/AGENTS.md](../../bootstrap/AGENTS.md) limits scalar types to int, bool,
 string and void. Floats, arbitrary modules and coroutine lowering are outside
-its supported subset. Do not run overflowing selfhost arithmetic as if stage0's
-wrapping contract applied. A safe non-overflow example is
+its supported subset. At that baseline overflowing selfhost arithmetic did not
+have stage0's wrapping contract. A non-overflow baseline example was
 `native main{println(7/3);return 0;}`; it is only a subset case.
 Selfhost constants use macros and its checker rejects local constant-name
 shadowing, unlike the stage0 contextual-check example. A fixed point establishes
-compiler output convergence, not scalar semantic parity. Plan task 5 must add
-explicit supported-subset differential cases before extending this RFC's claims.
+compiler output convergence, not scalar semantic parity. Task 5's differential
+cases establish the narrower arithmetic claims recorded above.
 
 Adoption should leave wrapping, copy/value semantics, accepted float boundaries,
 and contextual checking intact. D1/D2/D3/D4 are separate decisions so a formatter

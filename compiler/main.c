@@ -1,4 +1,5 @@
 #include "semantic.h"
+#include "cleanup.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -16,6 +17,7 @@
 #include "driver.h"
 #include "symbols.h"
 #include "source.h"
+#include "safety.h"
 
 static char *read_file(const char *path, size_t *out_len) {
     FILE *f = fopen(path, "rb");
@@ -52,6 +54,7 @@ static void usage(const char *prog) {
     fprintf(stderr, "  -l NAME             Link libforge_NAME.a (repeatable)\n");
     fprintf(stderr, "  --cc PATH          C compiler for native output (default: CC, clang, gcc, or cc)\n");
     fprintf(stderr, "  --check            Parse and check visible types; exit 0 on success (for LSP / CI)\n");
+    fprintf(stderr, "  --safe             Enforce checked resource/arena/FFI contracts; reject opaque boundaries\n");
     fprintf(stderr, "  --symbols-json     Print document symbols as JSON to stdout\n");
     fprintf(stderr, "  --diagnostics-json Emit parse/semantic errors as JSON lines on stderr\n");
     fprintf(stderr, "  --keep-temp        Keep intermediate object files\n");
@@ -118,6 +121,7 @@ int main(int argc, char **argv) {
     bool emit_js = false;
     bool lib_mode = false;
     bool check_only = false;
+    bool safe_mode = false;
     bool symbols_json = false;
     bool diagnostics_json = false;
     bool explicit_lib_dir = false;
@@ -166,6 +170,8 @@ int main(int argc, char **argv) {
             cfg.cc = option_value(argc, argv, &i);
         } else if (strcmp(argv[i], "--check") == 0) {
             check_only = true;
+        } else if (strcmp(argv[i], "--safe") == 0) {
+            safe_mode = true;
         } else if (strcmp(argv[i], "--symbols-json") == 0) {
             symbols_json = true;
         } else if (strcmp(argv[i], "--diagnostics-json") == 0) {
@@ -228,6 +234,9 @@ int main(int argc, char **argv) {
     optimize_program(&prog);
     ForgeTypedProgram typed = forge_type_program(&prog);
     if (!forge_typed_verify(&typed)) forge_die("invalid typed expression graph");
+    forge_check_cleanup(&prog, &typed);
+    if (safe_mode) forge_check_safety(&prog, &typed);
+    cfg.typed = &typed;
 
     if (symbols_json) {
         forge_emit_symbols_json(&prog, stdout);
@@ -260,7 +269,7 @@ int main(int argc, char **argv) {
          * does not truncate a user's existing JavaScript file. */
         FILE *staged_js = tmpfile();
         if (!staged_js) forge_die("cannot stage JavaScript output");
-        codegen_emit_js(&prog, staged_js);
+        codegen_emit_js(&prog, &typed, staged_js);
         if (fflush(staged_js) != 0 || ferror(staged_js) || fseek(staged_js, 0, SEEK_SET) != 0)
             forge_die("cannot stage JavaScript output");
         FILE *out_js = fopen(output, "wb");

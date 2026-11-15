@@ -93,6 +93,9 @@ from scalar values, with limited opaque callback ABI compatibility.
 consumes that binding. Native lowering copies the literal or arena string into a
 heap payload owned by the mailbox, including rejected sends. Borrowed aliases
 remain valid; this boundary copy is not zero-copy ownership or lifetime checking.
+Current native/JS/selfhost behavior and regression coverage are listed in the
+[backend support matrix](docs/backend-conformance.md).
+
 Stage0 checks the argument counts, scalar argument types and return types of all
 mapped standard-library functions against an explicit SDK signature catalog.
 Duplicate local declarations and parameters in the same scope are rejected;

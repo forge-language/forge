@@ -1,0 +1,28 @@
+# Preserve pristine upstream Ryu sources; adapt linkage and local include paths
+# for the compiler-owned header-only formatter installed with the SDK.
+set(ryu_source "${CMAKE_CURRENT_SOURCE_DIR}/compiler/vendor/ryu")
+set(ryu_output "${CMAKE_BINARY_DIR}/include/forge/detail/ryu")
+file(MAKE_DIRECTORY "${ryu_output}")
+foreach(header IN ITEMS common.h digit_table.h d2s_intrinsics.h d2s_full_table.h d2s_small_table.h)
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${ryu_source}/${header}")
+    file(READ "${ryu_source}/${header}" contents)
+    string(REPLACE "\"ryu/" "\"" contents "${contents}")
+    file(WRITE "${ryu_output}/${header}" "${contents}")
+endforeach()
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${ryu_source}/d2s.c")
+file(READ "${ryu_source}/d2s.c" contents)
+string(FIND "${contents}" "void d2s_buffered(" allocating_api)
+if(allocating_api LESS 0)
+    message(FATAL_ERROR "Unexpected Ryu source: cannot isolate buffered formatter")
+endif()
+string(SUBSTRING "${contents}" 0 ${allocating_api} contents)
+string(REPLACE "#include \"ryu/ryu.h\"" "" contents "${contents}")
+string(REPLACE "\"ryu/" "\"" contents "${contents}")
+string(REPLACE "int d2s_buffered_n(" "static inline int d2s_buffered_n(" contents "${contents}")
+file(WRITE "${ryu_output}/d2s_impl.h" "${contents}")
+configure_file(compiler/float_format.h "${CMAKE_BINARY_DIR}/include/forge/float_format.h" COPYONLY)
+install(FILES "${CMAKE_BINARY_DIR}/include/forge/float_format.h"
+    DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/forge")
+install(DIRECTORY "${ryu_output}/" DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/forge/detail/ryu")
+install(FILES compiler/vendor/LICENSE-Boost compiler/vendor/LICENSE-Apache2
+    DESTINATION "${CMAKE_INSTALL_DATADIR}/forge/licenses/ryu")

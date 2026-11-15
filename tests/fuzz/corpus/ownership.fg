@@ -1,0 +1,1 @@
+process main{coroutine work(){own let payload:string="copy";yield;send 0,Drop,move payload;}spawn work();}

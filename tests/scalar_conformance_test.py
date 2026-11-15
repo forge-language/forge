@@ -166,7 +166,7 @@ native main{
         self.execute('''fn first():float{println("first");return 1.5;}
 fn second():float{println("second");return 2.5;}
 native main{println(first(),second());return 0;}''',
-                     'first\n1.5second\n2.5\n', javascript=False)
+                     'first\n1.5second\n2.5\n')
 
     def test_float_module_result_printing(self) -> None:
         self.execute('''import sample;
@@ -187,7 +187,14 @@ native main{println(read_value());return 0;}''', '1.5\n', javascript=False,
     def test_native_float_print_preserves_precision_and_large_magnitudes(self) -> None:
         self.execute('''native main{
  println(1.2345678901234567);println(18446744073709551616.0);return 0;
-}''', '1.2345678901234567\n1.8446744073709552e+19\n', javascript=False)
+}''', '1.2345678901234567\n18446744073709552000\n')
+
+    def test_shortest_float_text_and_special_values(self) -> None:
+        self.execute('''fn ratio(a:float,b:float):float{return a/b;}
+native main{println(0.1);println(ratio(0.0,-1.0));
+println(ratio(1.0,0.0));println(ratio(-1.0,0.0));println(ratio(0.0,0.0));
+println(ratio(1.0,1000000.0));println(ratio(1.0,10000000.0));return 0;}''',
+                     '0.1\n-0\nInfinity\n-Infinity\nNaN\n0.000001\n1e-7\n')
 
 
 if __name__ == '__main__':

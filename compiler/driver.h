@@ -1,10 +1,11 @@
 #ifndef FORGE_DRIVER_H
 #define FORGE_DRIVER_H
 
-#include "ast.h"
+#include "typed_ast.h"
 #include <stdbool.h>
 
 typedef struct {
+    const ForgeTypedProgram *typed;
     const char *forge_root;
     const char *lib_dir;
     const char *include_dir;

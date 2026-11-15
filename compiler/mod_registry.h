@@ -22,6 +22,8 @@ typedef struct {
 } ForgeModule;
 
 const ForgeModule *forge_std_module(ForgeStr name);
+size_t forge_std_module_count(void);
+const ForgeModule *forge_std_module_at(size_t index);
 const char *forge_std_c_name(ForgeStr fr_name, ForgeStr *imports, size_t import_count);
 const ForgeStdFn *forge_std_function(ForgeStr name, ForgeStr *imports, size_t import_count);
 const char *forge_std_header(ForgeStr module);

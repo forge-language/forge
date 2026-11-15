@@ -1,0 +1,1 @@
+native main{println(fs l&ea& (1/0));return 0;}

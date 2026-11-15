@@ -1,6 +1,8 @@
 #include "codegen.h"
 #include "mod_registry.h"
 #include "local_index.h"
+#include "typed_lookup.h"
+#include "cleanup.h"
 #include <limits.h>
 #include <stdarg.h>
 #include <string.h>
@@ -31,15 +33,16 @@ typedef struct {
     FILE *out;
     int indent;
     Program *prog;
+    ForgeTypedIndex typed_index;
+    size_t typed_context;
     const char *state_prefix;
-    struct ForgeLocal { ForgeStr name; ForgeType type; } *locals;
+    struct ForgeLocal { ForgeStr name; ForgeType type; int cleanup_slot; const char *release; } *locals;
     size_t local_count;
     size_t local_cap;
     ForgeLocalIndex local_index;
     ForgeStr *imports;
     size_t import_count;
     CgMap fn_map;      /* (module, name) -> FnDecl*  */
-    CgMap const_map;   /* ("", name)      -> ConstDecl* */
     ForgeStr *moved_locals;
     size_t moved_count;
     size_t moved_cap;
@@ -56,6 +59,8 @@ typedef struct {
     ForgeStr safe_view_at_index;
     struct { ForgeStr parameter; char name[64]; } invariant_mods[8];
     size_t invariant_mod_count;
+    size_t cleanup_loop_base;
+    ForgeType return_type;
 } Codegen;
 _Static_assert(offsetof(struct ForgeLocal, name) == 0, "local index requires a leading name");
 
@@ -89,6 +94,8 @@ static void cg_begin_function(Codegen *cg) {
     cg->safe_view_at_view = (ForgeStr){0};
     cg->safe_view_at_index = (ForgeStr){0};
     cg->invariant_mod_count = 0;
+    cg->cleanup_loop_base = 0;
+    cg->return_type = forge_type_void();
 }
 
 static uint64_t cg_key_hash(ForgeStr module, ForgeStr name) {
@@ -256,14 +263,6 @@ static int emit_thread_call(Codegen *cg, ForgeStr name, Expr **args, size_t arg_
     return 0;
 }
 
-static ConstDecl *cg_find_const(Codegen *cg, ForgeStr name) {
-    return (ConstDecl *)cg_map_get(&cg->const_map, forge_str(""), name);
-}
-
-static int cg_lookup_const(Codegen *cg, ForgeStr name) {
-    return cg_find_const(cg, name) != NULL;
-}
-
 static int cg_is_local(Codegen *cg, ForgeStr name) {
     return forge_local_find(&cg->local_index, cg->locals, cg->local_count, sizeof(*cg->locals), name) != SIZE_MAX;
 }
@@ -282,7 +281,6 @@ static void cg_build_symbols(Codegen *cg) {
         n += prog->modules[i].fn_count;
     }
     cg_map_init(&cg->fn_map, n);
-    cg_map_init(&cg->const_map, prog->const_count);
 
     /* externs are included too: their declared return type is what tells us
      * how to print/consume their result. */
@@ -298,21 +296,18 @@ static void cg_build_symbols(Codegen *cg) {
         for (size_t j = 0; j < mod->fn_count; j++)
             cg_map_put(&cg->fn_map, mod->name, mod->functions[j].name, &mod->functions[j]);
     }
-    for (size_t i = 0; i < prog->const_count; i++)
-        cg_map_put(&cg->const_map, top, prog->consts[i].name, &prog->consts[i]);
 }
 
 static void cg_free_symbols(Codegen *cg) {
     cg_map_free(&cg->fn_map);
-    cg_map_free(&cg->const_map);
     forge_local_free(&cg->local_index);
+    forge_typed_index_free(&cg->typed_index);
 }
 
 static void cg_push_local(Codegen *cg, ForgeStr name, ForgeType ty) {
     cg->locals = forge_array_reserve(cg->locals, cg->local_count,
         &cg->local_cap, sizeof(*cg->locals), 8);
-    cg->locals[cg->local_count].name = name;
-    cg->locals[cg->local_count].type = ty;
+    cg->locals[cg->local_count] = (struct ForgeLocal){.name=name, .type=ty};
     cg->local_count++;
     forge_local_push(&cg->local_index, name);
 }
@@ -324,52 +319,6 @@ static void cg_push_params(Codegen *cg, Param *params) {
 static ForgeType cg_lookup_local(Codegen *cg, ForgeStr name) {
     size_t i = forge_local_find(&cg->local_index, cg->locals, cg->local_count, sizeof(*cg->locals), name);
     return i == SIZE_MAX ? forge_type_int() : cg->locals[i].type;
-}
-
-/* Sorted for bsearch: the C names of the stdlib functions that return a
- * string. Keep in strcmp order. */
-static const char *const STDLIB_STRING_FNS[] = {
-    "fr_doc_get",
-    "fr_fs_list_dir", "fr_fs_read", "fr_fs_temp_path",
-    "fr_gpu_backend", "fr_gpu_device_name",
-    "fr_http_get", "fr_http_post",
-    "fr_http_req_body", "fr_http_req_method", "fr_http_req_path",
-    "fr_io_prompt", "fr_io_read_fd", "fr_io_read_line", "fr_io_read_stdin",
-    "fr_json_array_item", "fr_json_get_path_raw", "fr_json_get_path_string",
-    "fr_json_get_string", "fr_json_stringify_int", "fr_json_stringify_str",
-    "fr_lsp_message", "fr_lsp_read_message",
-    "fr_os_argv", "fr_os_executable_path", "fr_os_getenv", "fr_os_temp_file",
-    "fr_proc_output", "fr_proc_stderr", "fr_proc_stdout",
-    "fr_str_append", "fr_str_append_str", "fr_str_builder_finish", "fr_str_builder_finish_take", "fr_str_concat", "fr_str_from_int",
-    "fr_str_sub", "fr_str_trim", "fr_str_view_sub",
-    "fr_tcp_recv",
-    "fr_udp_peer", "fr_udp_recv",
-};
-
-static int cg_str_fn_cmp(const void *key, const void *elem) {
-    return strcmp((const char *)key, *(const char *const *)elem);
-}
-
-static int cg_c_name_returns_string(const char *mapped) {
-    if (!mapped) return 0;
-    return bsearch(mapped, STDLIB_STRING_FNS,
-                   sizeof(STDLIB_STRING_FNS) / sizeof(STDLIB_STRING_FNS[0]),
-                   sizeof(STDLIB_STRING_FNS[0]), cg_str_fn_cmp) != NULL;
-}
-
-/* Resolve a `module.fn(...)` target to its real declaration. File modules and
- * the library currently being compiled are known; a prebuilt library imported
- * as a binary + header is not, and resolution then fails (see CG_STR_UNKNOWN). */
-static FnDecl *cg_resolve_qual_fn(Codegen *cg, ForgeStr module, ForgeStr name) {
-    FnDecl *fn = lookup_module_fn(cg, module, name);
-    if (fn) return fn;
-    LibraryDecl *lib = &cg->prog->library;
-    if (lib->present && forge_str_eq(lib->name, module)) {
-        for (size_t i = 0; i < lib->fn_count; i++) {
-            if (forge_str_eq(lib->functions[i].name, name)) return &lib->functions[i];
-        }
-    }
-    return NULL;
 }
 
 /* Tri-state: whether an expression yields a C string. UNKNOWN means the
@@ -384,66 +333,20 @@ static CgStrKind cg_type_str_kind(ForgeType ty) {
 
 static CgStrKind cg_expr_str_kind(Codegen *cg, Expr *e) {
     if (!e) return CG_STR_NO;
-    switch (e->kind) {
-    case EXPR_STRING:
-        return CG_STR_YES;
-    case EXPR_MOVE:
-        return cg_expr_str_kind(cg, e->as.move_expr);
-    case EXPR_IDENT: {
-        if (cg_is_local(cg, e->as.ident))
-            return cg_type_str_kind(cg_lookup_local(cg, e->as.ident));
-        ConstDecl *c = cg_find_const(cg, e->as.ident);
-        if (c) return (c->value && c->value->kind == EXPR_STRING) ? CG_STR_YES : CG_STR_NO;
-        return cg_type_str_kind(cg_lookup_local(cg, e->as.ident));
-    }
-    case EXPR_CALL: {
-        const char *mapped = forge_std_c_name(e->as.call.name, cg->imports, cg->import_count);
-        if (mapped) return cg_c_name_returns_string(mapped) ? CG_STR_YES : CG_STR_NO;
-        /* Covers top-level, library and module-internal functions alike. */
-        FnDecl *fn = cg_resolve_fn_ref(cg, e->as.call.name);
-        if (fn) return cg_type_str_kind(fn->ret_type);
-        return CG_STR_UNKNOWN;
-    }
-    case EXPR_QUAL_CALL: {
-        FnDecl *fn = cg_resolve_qual_fn(cg, e->as.qual_call.module, e->as.qual_call.name);
-        if (fn) return cg_type_str_kind(fn->ret_type);
-        return CG_STR_UNKNOWN;
-    }
-    default:
-        return cg_type_str_kind(e->type);
-    }
+    size_t node = forge_typed_find(&cg->typed_index, e, cg->typed_context);
+    if (node == FORGE_TYPED_NONE) forge_die("missing typed string interpretation");
+    ForgeTypedType type = cg->typed_index.program->expressions[node].type;
+    return type.kind == FORGE_TYPED_VALUE ? cg_type_str_kind(type.value) : CG_STR_UNKNOWN;
 }
 
-/* The semantic pass does not cache all inferred expression types. Restrict
- * direct arithmetic lowering to expressions whose integer type is explicit. */
+/* Consume the post-optimization interpretation, including contextual constants. */
 static bool cg_expr_known_int(Codegen *cg, Expr *e) {
     if (!e) return false;
-    switch (e->kind) {
-    case EXPR_INT: case EXPR_BOOL: case EXPR_RECV: case EXPR_INDEX:
-        return true;
-    case EXPR_IDENT: {
-        if (cg_is_local(cg, e->as.ident)) {
-            ForgeTypeKind kind = cg_lookup_local(cg, e->as.ident).kind;
-            return kind == TY_INT || kind == TY_BOOL;
-        }
-        ConstDecl *constant = cg_find_const(cg, e->as.ident);
-        return constant && constant->value &&
-               (constant->value->kind == EXPR_INT || constant->value->kind == EXPR_BOOL);
-    }
-    case EXPR_BINARY:
-        return cg_expr_known_int(cg, e->as.binary.left) &&
-               cg_expr_known_int(cg, e->as.binary.right);
-    case EXPR_CALL: {
-        FnDecl *fn = cg_resolve_fn_ref(cg, e->as.call.name);
-        return fn && (fn->ret_type.kind == TY_INT || fn->ret_type.kind == TY_BOOL);
-    }
-    case EXPR_QUAL_CALL: {
-        FnDecl *fn = cg_resolve_qual_fn(cg, e->as.qual_call.module, e->as.qual_call.name);
-        return fn && (fn->ret_type.kind == TY_INT || fn->ret_type.kind == TY_BOOL);
-    }
-    default:
-        return e->type.kind == TY_INT || e->type.kind == TY_BOOL;
-    }
+    size_t node = forge_typed_find(&cg->typed_index, e, cg->typed_context);
+    if (node == FORGE_TYPED_NONE) forge_die("missing typed integer interpretation");
+    ForgeTypedType type = cg->typed_index.program->expressions[node].type;
+    return type.kind == FORGE_TYPED_VALUE &&
+        (type.value.kind == TY_INT || type.value.kind == TY_BOOL);
 }
 
 static int cg_expr_is_string(Codegen *cg, Expr *e) {
@@ -530,7 +433,17 @@ static void emit_expr_inner(Codegen *cg, Expr *e);
 
 static void emit_expr(Codegen *cg, Expr *e) {
     cg_enter(cg);
+    size_t saved = cg->typed_context;
+    cg->typed_context = forge_typed_find(&cg->typed_index, e, saved);
+    if (cg->typed_context == FORGE_TYPED_NONE) forge_die("missing typed expression during native emission");
+    ForgeTypedConversion conversion = cg->typed_index.program->expressions[cg->typed_context].conversion;
+    const char *cast = conversion == FORGE_CONVERT_INT_FLOAT || conversion == FORGE_CONVERT_BOOL_FLOAT ?
+        "((double)(" : conversion == FORGE_CONVERT_BOOL_INT ? "((int64_t)(" :
+        conversion == FORGE_CONVERT_INT_BOOL_LEGACY ? "((int)(" : NULL;
+    if (cast) fputs(cast, cg->out);
     emit_expr_inner(cg, e);
+    if (cast) fputs("))", cg->out);
+    cg->typed_context = saved;
     cg_leave(cg);
 }
 
@@ -564,11 +477,20 @@ static void emit_expr_inner(Codegen *cg, Expr *e) {
                     (int)e->as.ident.len, e->as.ident.data);
             exit(1);
         }
-        if (!cg_is_local(cg, e->as.ident) && cg_lookup_const(cg, e->as.ident)) {
+        if (cg->typed_index.program->expressions[cg->typed_context].constant) {
             fprintf(cg->out, "forge_const_%.*s", (int)e->as.ident.len, e->as.ident.data);
             break;
         }
-        if (cg->state_prefix) fputs(cg->state_prefix, cg->out);
+        if (cg->typed_index.program->expressions[cg->typed_context].type.kind == FORGE_TYPED_FUNCTION &&
+            cg->current_module.len && lookup_module_fn(cg, cg->current_module, e->as.ident) ==
+            cg->typed_index.program->expressions[cg->typed_context].function) {
+            char symbol[128];
+            forge_mod_mangle(symbol, sizeof(symbol), cg->current_module, e->as.ident);
+            fputs(symbol, cg->out);
+            break;
+        }
+        if (cg->state_prefix && cg->typed_index.program->expressions[cg->typed_context].binding != FORGE_TYPED_NONE)
+            fputs(cg->state_prefix, cg->out);
         fprintf(cg->out, "%.*s", (int)e->as.ident.len, e->as.ident.data);
         break;
     case EXPR_MOVE:
@@ -686,8 +608,9 @@ static void emit_expr_inner(Codegen *cg, Expr *e) {
     }
     case EXPR_CALL: {
         ForgeStr name = e->as.call.name;
+        const ForgeTypedExpr *typed = &cg->typed_index.program->expressions[cg->typed_context];
         if (emit_thread_call(cg, name, e->as.call.args, e->as.call.arg_count)) break;
-        const char *mapped_name = forge_std_c_name(name, cg->imports, cg->import_count);
+        const char *mapped_name = typed->standard ? typed->standard->c_name : NULL;
         if (mapped_name && strcmp(mapped_name, "fr_str_view_at") == 0 &&
             cg->safe_view_at_view.len && e->as.call.arg_count == 2 &&
             e->as.call.args[0]->kind == EXPR_IDENT &&
@@ -701,7 +624,7 @@ static void emit_expr_inner(Codegen *cg, Expr *e) {
             fputc(')', cg->out);
             break;
         }
-        if (forge_str_eq(name, forge_str("println"))) {
+        if (typed->call == FORGE_CALL_BUILTIN && forge_str_eq(name, forge_str("println"))) {
             fputs("({ ", cg->out);
             for (size_t i = 0; i < e->as.call.arg_count; i++) {
                 Expr *arg = e->as.call.args[i];
@@ -713,20 +636,17 @@ static void emit_expr_inner(Codegen *cg, Expr *e) {
             fputs("fr_println(); })", cg->out);
             break;
         }
-        const char *c_fn = forge_std_c_name(name, cg->imports, cg->import_count);
+        const char *c_fn = mapped_name;
         FnDecl *mod_fn = cg->current_module.len > 0
                              ? lookup_module_fn(cg, cg->current_module, name)
                              : NULL;
         if (c_fn) {
             fprintf(cg->out, "%s(", c_fn);
-        } else if (mod_fn) {
+        } else if (mod_fn && typed->function == mod_fn) {
             char sym[128];
             forge_mod_mangle(sym, sizeof(sym), cg->current_module, name);
             fprintf(cg->out, "%s(", sym);
-            e->type = mod_fn->ret_type;
         } else {
-            FnDecl *fn = cg_lookup_fn(cg, name);
-            if (fn) e->type = fn->ret_type;
             fprintf(cg->out, "%.*s(", (int)name.len, name.data);
         }
         for (size_t i = 0; i < e->as.call.arg_count; i++) {
@@ -737,12 +657,10 @@ static void emit_expr_inner(Codegen *cg, Expr *e) {
         break;
     }
     case EXPR_RECV:
-        fputs("(fr_recv(fr_coro_process(__coro), &__recv_msg), __recv_msg.value)", cg->out);
+        fputs("__forge_recv_value(fr_coro_process(__coro))", cg->out);
         break;
     case EXPR_QUAL_CALL: {
         char sym[128];
-        FnDecl *qfn = cg_resolve_qual_fn(cg, e->as.qual_call.module, e->as.qual_call.name);
-        if (qfn) e->type = qfn->ret_type;
         if (forge_import_is_file_module(cg->prog, e->as.qual_call.module))
             forge_mod_mangle(sym, sizeof(sym), e->as.qual_call.module, e->as.qual_call.name);
         else
@@ -756,8 +674,7 @@ static void emit_expr_inner(Codegen *cg, Expr *e) {
         break;
     }
     case EXPR_INDEX: {
-        ForgeType base_ty = e->as.index.base->type;
-        if (base_ty.kind == TY_STRING || cg_expr_is_string(cg, e->as.index.base)) {
+        if (cg_expr_is_string(cg, e->as.index.base)) {
             fputs("fr_str_char_at(", cg->out);
             emit_expr(cg, e->as.index.base);
             fputs(", ", cg->out);
@@ -1086,7 +1003,6 @@ static void emit_coro_fn(Codegen *cg, CoroDecl *coro) {
     fprintf(cg->out, "    %.*s_state_t *%s = (%.*s_state_t *)__userdata;\n",
             (int)coro->name.len, coro->name.data, "st",
             (int)coro->name.len, coro->name.data);
-    fputs("    fr_msg_t __recv_msg;\n", cg->out);
     fputs("    switch (fr_coro_step(__coro)) {\n", cg->out);
     cg->indent++;
     cg_line(cg, "default:");
@@ -1148,9 +1064,23 @@ static void emit_coro_fn(Codegen *cg, CoroDecl *coro) {
 
 /* Local declarations are a stack: exiting a generated C block restores the
  * outer binding and its type rather than overwriting it during shadowing. */
+static bool cg_has_cleanup(Codegen *cg) {
+    for (size_t i=0;i<cg->local_count;++i)
+        if (cg->locals[i].cleanup_slot) return true;
+    return false;
+}
+static void emit_cleanup(Codegen *cg, size_t base) {
+    for (size_t i=cg->local_count;i-- > base;) {
+        struct ForgeLocal *l=&cg->locals[i];
+        if (l->cleanup_slot)
+            cg_line(cg,"if (*__forge_owner_%d) { %s(*__forge_owner_%d); *__forge_owner_%d = 0; }",
+                    l->cleanup_slot,l->release,l->cleanup_slot,l->cleanup_slot);
+    }
+}
 static void emit_block_stmts(Codegen *cg, Stmt *s, const char *proc_var, bool in_coro) {
     size_t saved_locals = cg->local_count;
     emit_stmts(cg, s, proc_var, in_coro);
+    emit_cleanup(cg, saved_locals);
     forge_local_truncate(&cg->local_index, saved_locals); cg->local_count = saved_locals;
 }
 
@@ -1927,6 +1857,13 @@ static void emit_local_let(Codegen *cg, Stmt *s) {
         emit_expr(cg, s->as.let.init);
     }
     fputs(";\n", cg->out);
+    if (s->as.let.owned_ && s->as.let.type.kind==TY_INT) {
+        const ForgeResourceContract *contract=forge_cleanup_factory(&cg->typed_index,s->as.let.init);
+        if (!contract) forge_die("missing owned resource cleanup contract");
+        struct ForgeLocal *l=&cg->locals[cg->local_count-1];
+        l->cleanup_slot=++cg->label_seq; l->release=contract->release;
+        cg_line(cg,"int64_t *__forge_owner_%d = &%.*s;",l->cleanup_slot,(int)l->name.len,l->name.data);
+    }
 }
 
 static void emit_append_loop_legacy(Codegen *cg, Stmt *loop,
@@ -2504,6 +2441,21 @@ static void emit_stmts(Codegen *cg, Stmt *s, const char *proc_var, bool in_coro)
             fputs(";\n", cg->out);
             break;
         case STMT_RETURN:
+            if (cg_has_cleanup(cg)) {
+                int result=++cg->label_seq;
+                if (s->as.ret) {
+                    cg_indent(cg);
+                    if (cg->return_type.kind!=TY_VOID) {
+                        c_type_name(cg->out,cg->return_type);
+                        fprintf(cg->out," __forge_return_%d = ",result);
+                    }
+                    emit_expr(cg,s->as.ret); fputs(";\n",cg->out);
+                }
+                emit_cleanup(cg,0);
+                if (s->as.ret && cg->return_type.kind!=TY_VOID) cg_line(cg,"return __forge_return_%d;",result);
+                else cg_line(cg,"return;");
+                break;
+            }
             cg_indent(cg);
             fputs("return ", cg->out);
             if (s->as.ret) emit_expr(cg, s->as.ret);
@@ -2513,6 +2465,8 @@ static void emit_stmts(Codegen *cg, Stmt *s, const char *proc_var, bool in_coro)
             emit_if_stmt(cg, s, proc_var, in_coro);
             break;
         case STMT_WHILE: {
+            size_t saved_cleanup_base=cg->cleanup_loop_base;
+            cg->cleanup_loop_base=cg->local_count;
             Stmt *saved_increment = cg->safe_increment;
             ForgeStr saved_view_at_view = cg->safe_view_at_view;
             ForgeStr saved_view_at_index = cg->safe_view_at_index;
@@ -2522,6 +2476,7 @@ static void emit_stmts(Codegen *cg, Stmt *s, const char *proc_var, bool in_coro)
             cg->safe_view_at_index = (ForgeStr){0};
             prove_view_at_loop(cg, block_first, s, cg->safe_increment);
             if (!in_coro && emit_mersenne_loop_version(cg, s, proc_var)) {
+                cg->cleanup_loop_base=saved_cleanup_base;
                 cg->safe_increment = saved_increment;
                 cg->safe_view_at_view = saved_view_at_view;
                 cg->safe_view_at_index = saved_view_at_index;
@@ -2542,9 +2497,11 @@ static void emit_stmts(Codegen *cg, Stmt *s, const char *proc_var, bool in_coro)
             cg->indent--;
             cg_indent(cg);
             fputs("}\n", cg->out);
+            cg->cleanup_loop_base=saved_cleanup_base;
             break;
         }
         case STMT_FOR: {
+            size_t saved_cleanup_base=cg->cleanup_loop_base;
             Stmt *saved_increment = cg->safe_increment;
             size_t saved_locals = cg->local_count;
             bool suspends = block_has_yield(s->as.for_stmt.body->first);
@@ -2554,6 +2511,7 @@ static void emit_stmts(Codegen *cg, Stmt *s, const char *proc_var, bool in_coro)
             fputs("{\n", cg->out);
             cg->indent++;
             if (s->as.for_stmt.init) emit_stmts(cg, s->as.for_stmt.init, proc_var, in_coro);
+            cg->cleanup_loop_base=cg->local_count;
             cg->safe_increment = prove_loop_increment(cg, s->as.for_stmt.cond,
                 s->as.for_stmt.body, s->as.for_stmt.step);
             if (!suspends && inline_step) {
@@ -2593,17 +2551,21 @@ static void emit_stmts(Codegen *cg, Stmt *s, const char *proc_var, bool in_coro)
                 cg_indent(cg);
                 fputs("}\n", cg->out);
             }
+            emit_cleanup(cg,saved_locals);
             cg->indent--;
             cg_indent(cg);
             fputs("}\n", cg->out);
             forge_local_truncate(&cg->local_index, saved_locals); cg->local_count = saved_locals;
+            cg->cleanup_loop_base=saved_cleanup_base;
             cg->safe_increment = saved_increment;
             break;
         }
         case STMT_BREAK:
+            emit_cleanup(cg,cg->cleanup_loop_base);
             cg_line(cg, "break;");
             break;
         case STMT_CONTINUE:
+            emit_cleanup(cg,cg->cleanup_loop_base);
             if (cg->continue_label) cg_line(cg, "goto __forge_cont_%d;", cg->continue_label);
             else cg_line(cg, "continue;");
             break;
@@ -2647,12 +2609,23 @@ static void emit_stmts(Codegen *cg, Stmt *s, const char *proc_var, bool in_coro)
                 fputs(", FR_EVENT_READ)) return fr_yield(__coro);\n", cg->out);
             }
             break;
-        case STMT_ASSIGN:
+        case STMT_ASSIGN: {
+            size_t id=forge_local_find(&cg->local_index,cg->locals,cg->local_count,sizeof(*cg->locals),s->as.assign.name);
+            if (id!=SIZE_MAX && cg->locals[id].cleanup_slot) {
+                struct ForgeLocal l=cg->locals[id];
+                int temporary=++cg->label_seq;
+                cg_indent(cg); fprintf(cg->out,"int64_t __forge_replace_%d = ",temporary);
+                emit_assignment_rhs(cg,s); fputs(";\n",cg->out);
+                cg_line(cg,"if (*__forge_owner_%d) %s(*__forge_owner_%d);",l.cleanup_slot,l.release,l.cleanup_slot);
+                cg_line(cg,"*__forge_owner_%d = __forge_replace_%d;",l.cleanup_slot,temporary);
+                break;
+            }
             cg_indent(cg);
             fprintf(cg->out, "%.*s = ", (int)s->as.assign.name.len, s->as.assign.name.data);
             emit_assignment_rhs(cg, s);
             fputs(";\n", cg->out);
             break;
+        }
         case STMT_MATCH: {
             cg_indent(cg);
             fputs("{\n", cg->out);
@@ -2802,7 +2775,8 @@ static void emit_enums(Program *prog, FILE *out) {
 /* Select from the actual C type, including declarations supplied by binary
  * library headers. _Generic's controlling expression is not evaluated. */
 static void emit_print_auto_macro(FILE *out) {
-    fputs("static inline void __forge_print_float(double value) { printf(\"%.17g\", value); }\n"
+    fputs("#include \"forge/float_format.h\"\n"
+          "static inline void __forge_print_float(double value) { char text[64]; __forge_format_float(value, text); fputs(text, stdout); }\n"
           "#define FORGE_PRINT_AUTO(x) _Generic((x), \\\n"
           "    char*: fr_print_str, const char*: fr_print_str, \\\n"
           "    float: __forge_print_float, double: __forge_print_float, \\\n"
@@ -2972,6 +2946,13 @@ static bool cg_mersenne_modmul(Codegen *cg, Expr *e, Expr **value,
 }
 
 static void emit_owned_send_helper(FILE *out) {
+    fputs("static inline int64_t __forge_recv_value(fr_process_t *process) {\n"
+          "    fr_msg_t message = {0};\n"
+          "    if (!fr_recv(process, &message)) abort();\n"
+          "    int64_t value = message.value;\n"
+          "    fr_msg_free_payload(&message);\n"
+          "    return value;\n"
+          "}\n\n", out);
     fputs("static inline void __forge_send_owned_string(fr_process_t *dst, int tag, const char **source) {\n"
           "    char *payload = fr_own_clone(*source);\n"
           "    if (*source && !payload) { fputs(\"forge: owned message allocation failed\\n\", stderr); abort(); }\n"
@@ -2980,7 +2961,7 @@ static void emit_owned_send_helper(FILE *out) {
           "}\n\n", out);
 }
 
-void codegen_emit_library(Program *prog, FILE *out_c, FILE *out_h, const char *runtime_include) {
+void codegen_emit_library(Program *prog, const ForgeTypedProgram *typed, FILE *out_c, FILE *out_h, const char *runtime_include) {
     if (!prog->library.present) {
         fprintf(stderr, "forge: no library block found\n");
         exit(1);
@@ -3036,6 +3017,7 @@ void codegen_emit_library(Program *prog, FILE *out_c, FILE *out_h, const char *r
     fputs("\n", out_c);
 
     Codegen cg = { .out = out_c, .prog = prog,
+                   .typed_index = forge_typed_index(typed), .typed_context = FORGE_TYPED_NONE,
                    .imports = lib->imports, .import_count = lib->import_count };
     cg_build_symbols(&cg);
     for (size_t i = 0; i < lib->fn_count; i++) {
@@ -3046,12 +3028,13 @@ void codegen_emit_library(Program *prog, FILE *out_c, FILE *out_h, const char *r
         fputs(" {\n", out_c);
         cg.indent = 1;
         cg_begin_function(&cg);
+        cg.return_type=fn->ret_type;
         cg.prove_loop_increments = true;
         cg_push_params(&cg, fn->params);
         emit_bounded_mod_pow(&cg, fn);
         emit_invariant_mod_descriptors(&cg, fn);
         emit_periodic_view_sum(&cg, fn);
-        emit_stmts(&cg, fn->body.first, NULL, false);
+        emit_block_stmts(&cg, fn->body.first, NULL, false);
         cg.indent = 0;
         fputs("}\n\n", out_c);
     }
@@ -3060,8 +3043,9 @@ void codegen_emit_library(Program *prog, FILE *out_c, FILE *out_h, const char *r
     cg_free_symbols(&cg);
 }
 
-void codegen_emit(Program *prog, FILE *out, const char *runtime_include) {
+void codegen_emit(Program *prog, const ForgeTypedProgram *typed, FILE *out, const char *runtime_include) {
     Codegen cg = { .out = out, .prog = prog,
+                   .typed_index = forge_typed_index(typed), .typed_context = FORGE_TYPED_NONE,
                    .imports = prog->imports, .import_count = prog->import_count };
     cg_build_symbols(&cg);
 
@@ -3137,13 +3121,14 @@ void codegen_emit(Program *prog, FILE *out, const char *runtime_include) {
         fputs(" {\n", out);
         cg.indent = 1;
         cg_begin_function(&cg);
+        cg.return_type=fn->ret_type;
         cg.current_module = forge_str("");
         cg.prove_loop_increments = true;
         cg_push_params(&cg, fn->params);
         emit_bounded_mod_pow(&cg, fn);
         emit_invariant_mod_descriptors(&cg, fn);
         emit_periodic_view_sum(&cg, fn);
-        emit_stmts(&cg, fn->body.first, NULL, false);
+        emit_block_stmts(&cg, fn->body.first, NULL, false);
         cg.indent = 0;
         fputs("}\n\n", out);
     }
@@ -3159,13 +3144,14 @@ void codegen_emit(Program *prog, FILE *out, const char *runtime_include) {
             fputs(" {\n", out);
             cg.indent = 1;
             cg_begin_function(&cg);
+            cg.return_type=fn->ret_type;
             cg.current_module = mod->name;
             cg.prove_loop_increments = true;
             cg_push_params(&cg, fn->params);
             emit_bounded_mod_pow(&cg, fn);
             emit_invariant_mod_descriptors(&cg, fn);
             emit_periodic_view_sum(&cg, fn);
-            emit_stmts(&cg, fn->body.first, NULL, false);
+            emit_block_stmts(&cg, fn->body.first, NULL, false);
             cg.indent = 0;
             fputs("}\n\n", out);
         }
@@ -3190,9 +3176,10 @@ void codegen_emit(Program *prog, FILE *out, const char *runtime_include) {
         fputs("int main(int argc, char **argv) {\n", out);
         cg.indent = 1;
         cg_begin_function(&cg);
+        cg.return_type=forge_type_int();
         cg.prove_loop_increments = true;
         cg_line(&cg, "fr_os_set_args(argc, argv);");
-        emit_stmts(&cg, native_main->body.first, NULL, false);
+        emit_block_stmts(&cg, native_main->body.first, NULL, false);
         cg_line(&cg, "return 0;");
         cg.indent = 0;
         fputs("}\n", out);

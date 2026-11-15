@@ -16,6 +16,12 @@ This translates the Project, Branding & Community Strategy into deliverables. It
 
 ## Priority technical work
 
+The [backend support matrix](docs/backend-conformance.md) records implemented
+typed conversions, scalar parity and selfhost arithmetic with test references.
+Ownership binding consumption is checked across control-flow joins; full region,
+external-resource and concurrency guarantees remain incomplete. Further security
+audits and hardening are deferred from the current work scope.
+
 1. Correctness before safety claims: complete type rules, ownership transfer/aliasing/lifetimes, memory and scheduler tests.
 2. Native concurrency: mailbox lifetime, cooperative fairness, worker synchronization and automatic supervisor recovery.
 3. Measurements: workload parity, isolated resources, longer runs and raw observations; do not extrapolate a cached HTTP path to language-wide superiority.

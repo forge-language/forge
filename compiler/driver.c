@@ -74,6 +74,23 @@ static void argv_add_opt(Argv *a, int opt_level) {
     argv_push_owned(a, strdup(opt));
 }
 
+static void argv_add_instrumentation(Argv *a) {
+#if defined(FORGE_SANITIZER_ADDRESS)
+    argv_push(a, "-fsanitize=address,undefined");
+    argv_push(a, "-fno-sanitize-recover=all");
+    argv_push(a, "-fno-omit-frame-pointer");
+#elif defined(FORGE_SANITIZER_THREAD)
+    argv_push(a, "-fsanitize=thread");
+    argv_push(a, "-fno-omit-frame-pointer");
+#else
+    (void)a;
+#endif
+#if defined(FORGE_SANITIZER_NONPIE)
+    argv_push(a, "-fno-pie");
+    argv_push(a, "-no-pie");
+#endif
+}
+
 static void argv_add_lto(Argv *a) {
 #if !defined(FORGE_OS_WINDOWS)
     argv_push_owned(a, strdup("-flto"));
@@ -136,7 +153,7 @@ static int exec_argv(Argv *a) {
 }
 
 static int compile_c_source(Program *prog, const char *obj_path, const ForgeDriverConfig *cfg,
-                            void (*emit)(Program *, FILE *, const char *)) {
+                            void (*emit)(Program *, const ForgeTypedProgram *, FILE *, const char *)) {
     char cpath[PATH_MAX];
     if (fr_make_temp_path(cpath, sizeof(cpath), "forge", ".c") != 0) {
         fprintf(stderr, "forge: cannot create temp file\n");
@@ -147,12 +164,13 @@ static int compile_c_source(Program *prog, const char *obj_path, const ForgeDriv
         remove(cpath);
         return 1;
     }
-    emit(prog, out, "forge_runtime.h");
+    emit(prog, cfg->typed, out, "forge_runtime.h");
     if (fclose(out) != 0) { remove(cpath); return 1; }
 
     Argv args;
     argv_init(&args);
     argv_push(&args, (char *)cfg->cc);
+    argv_add_instrumentation(&args);
     argv_push(&args, "-std=c11");
     argv_add_opt(&args, cfg->opt_level > 0 ? cfg->opt_level : 3);
     if (cfg->opt_level > 0 && getenv("FORGE_ENABLE_LTO")) argv_add_lto(&args);
@@ -168,8 +186,8 @@ static int compile_c_source(Program *prog, const char *obj_path, const ForgeDriv
     return rc;
 }
 
-static void emit_program(Program *prog, FILE *out, const char *runtime_include) {
-    codegen_emit(prog, out, runtime_include);
+static void emit_program(Program *prog, const ForgeTypedProgram *typed, FILE *out, const char *runtime_include) {
+    codegen_emit(prog, typed, out, runtime_include);
 }
 
 static void argv_add_link_extras(Argv *a, const ForgeDriverConfig *cfg) {
@@ -196,6 +214,7 @@ static int link_object(const char *obj_path, const char *output_path, const Forg
     Argv args;
     argv_init(&args);
     argv_push(&args, (char *)cfg->cc);
+    argv_add_instrumentation(&args);
     argv_push(&args, (char *)obj_path);
     argv_push(&args, "-o");
     argv_push(&args, (char *)output_path);
@@ -359,18 +378,32 @@ static bool output_is_c(const char *path) {
     return n > 2 && strcmp(path + n - 2, ".c") == 0;
 }
 
+/* Finish backend validation before opening a user's destination. */
+static int write_emitted(FILE *staged, const char *path) {
+    if (fflush(staged) != 0 || ferror(staged) || fseek(staged, 0, SEEK_SET) != 0) {
+        fclose(staged);
+        return 1;
+    }
+    FILE *out = path ? fopen(path, "wb") : stdout;
+    if (!out) { fclose(staged); return 1; }
+    char buffer[8192];
+    size_t count;
+    int failed = 0;
+    while ((count = fread(buffer, 1, sizeof(buffer), staged)) != 0) {
+        if (fwrite(buffer, 1, count, out) != count) { failed = 1; break; }
+    }
+    failed |= ferror(staged) != 0;
+    failed |= fclose(staged) != 0;
+    failed |= path ? fclose(out) != 0 : fflush(out) != 0;
+    return failed;
+}
+
 int forge_driver_compile_program(Program *prog, const char *output_path, const ForgeDriverConfig *cfg) {
     if (cfg->emit_c_only || output_is_c(output_path)) {
-        FILE *out = stdout;
-        if (output_path) {
-            out = fopen(output_path, "w");
-            if (!out) {
-                fprintf(stderr, "forge: cannot write '%s'\n", output_path);
-                return 1;
-            }
-        }
-        codegen_emit(prog, out, "forge_runtime.h");
-        return output_path ? (fclose(out) != 0) : (fflush(out) != 0);
+        FILE *out = tmpfile();
+        if (!out) return 1;
+        codegen_emit(prog, cfg->typed, out, "forge_runtime.h");
+        return write_emitted(out, output_path);
     }
 
     if (!output_path) {
@@ -394,24 +427,25 @@ int forge_driver_compile_program(Program *prog, const char *output_path, const F
     return rc;
 }
 
-static void emit_library_c(Program *prog, FILE *out, const char *runtime_include) {
-    codegen_emit_library(prog, out, NULL, runtime_include);
+static void emit_library_c(Program *prog, const ForgeTypedProgram *typed, FILE *out, const char *runtime_include) {
+    codegen_emit_library(prog, typed, out, NULL, runtime_include);
 }
 
 int forge_driver_compile_library(Program *prog, const char *output_a, const char *output_h,
                                  const ForgeDriverConfig *cfg) {
     if (cfg->emit_c_only || (output_a && output_is_c(output_a))) {
-        FILE *out_c = fopen(output_a, "w");
-        FILE *out_h = fopen(output_h, "w");
+        FILE *out_c = tmpfile();
+        FILE *out_h = tmpfile();
         if (!out_c || !out_h) {
             if (out_c) fclose(out_c);
             if (out_h) fclose(out_h);
             fprintf(stderr, "forge: cannot write library output\n");
             return 1;
         }
-        codegen_emit_library(prog, out_c, out_h, "forge_runtime.h");
-        int c_error = fclose(out_c) != 0;
-        int h_error = fclose(out_h) != 0;
+        codegen_emit_library(prog, cfg->typed, out_c, out_h, "forge_runtime.h");
+        int c_error = write_emitted(out_c, output_a);
+        if (c_error) { fclose(out_h); return 1; }
+        int h_error = write_emitted(out_h, output_h);
         return c_error || h_error;
     }
 
@@ -422,7 +456,7 @@ int forge_driver_compile_library(Program *prog, const char *output_a, const char
 
     FILE *out_h = fopen(output_h, "w");
     if (!out_h) return 1;
-    codegen_emit_library(prog, NULL, out_h, "forge_runtime.h");
+    codegen_emit_library(prog, cfg->typed, NULL, out_h, "forge_runtime.h");
     if (fclose(out_h) != 0) return 1;
 
     char obj_path[PATH_MAX];

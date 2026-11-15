@@ -1,0 +1,6 @@
+#!@Python3_EXECUTABLE@
+"""Keep manually compiled regression programs consistent with instrumented SDK libraries."""
+import os
+import sys
+
+os.execv('@CMAKE_C_COMPILER@', ['@CMAKE_C_COMPILER@', @instrument_arguments@ *sys.argv[1:]])

@@ -1,0 +1,2 @@
+fn half(x:float):float{return x/2;}
+native main{println(half(5));println(false && (1/0));return 0;}

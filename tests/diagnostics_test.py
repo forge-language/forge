@@ -214,7 +214,7 @@ int main(int argc,char **argv) {
             source.write_text(harness)
             result = subprocess.run([config.cc, '-std=c11', '-I', str(root), str(source),
                                      *[str(root / (name + '.c')) for name in
-                                       ('ast', 'lexer', 'parser', 'source', 'optimize', 'semantic', 'typed_ast', 'mod_registry')],
+                                       ('ast', 'lexer', 'parser', 'source', 'optimize', 'semantic', 'ownership', 'resource_contracts', 'typed_ast', 'mod_registry')],
                                      '-lm', '-o', str(binary)], capture_output=True, text=True, timeout=30)
             self.assertEqual(result.returncode, 0, result.stderr)
             result = subprocess.run([str(binary)], capture_output=True, text=True, timeout=20)
