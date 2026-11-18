@@ -56,6 +56,22 @@ println(show("parameter"));{let TEXT:int=9;println(TEXT);}println(TEXT);return 0
  def test_view_builder_nul_terminated_ffi(self):
   r=self.compile_run('import strings;import helper;native main{let s: string=helper.read();let v: int=str_view(s);println(str_view_len(v));println(str_view_sub(v,0,9223372036854775807));println(str_view_matches(v,0,s));println(str_view_matches(v,1,"suffix"));let b: int=str_builder();str_builder_append_view(b,v,0,9223372036854775807);println(str_builder_finish(b));return 0;}',{'helper':'extern fn js_read(): string;fn read(): string{return js_read();}'},'globalThis.ForgeNative={js_read:()=>"a"+String.fromCharCode(0)+"suffix"};')
   self.assertEqual(r.returncode,0,r.stderr);self.assertEqual(r.stdout.splitlines(),['1','a','1','0','a'])
+ def test_mixed_utf8_prefixes_and_encoder_fallback(self):
+  source = r'''import strings;
+native main {
+ let view: int = str_view("xAB서울😀");
+ println(str_view_matches(view,1,"AB서울😀"));
+ println(str_view_matches(view,1,"AB서X"));
+ println(str_view_matches(view,2,"B서\0ignored"));
+ println(str_view_matches(view,1,"AB서울😀!"));
+ println(str_view_matches(view,4,"서울"));
+ return 0;
+}'''
+  for setup in ('', 'TextEncoder.prototype.encodeInto = undefined;'):
+   with self.subTest(setup=setup):
+    result = self.compile_run(source, bridge=setup)
+    self.assertEqual(result.returncode, 0, result.stderr)
+    self.assertEqual(result.stdout.splitlines(), ['1','0','1','0','0'])
  def test_builder_invalid_utf8_rejected(self):
   r=self.compile_run('import strings;native main{let b: int=str_builder();str_builder_char(b,255);println(str_builder_finish(b));return 0;}')
   self.assertNotEqual(r.returncode,0)
