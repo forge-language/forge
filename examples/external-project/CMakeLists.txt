@@ -29,3 +29,6 @@ add_executable(sdk_runtime sdk_runtime_consumer.c)
 target_link_libraries(sdk_runtime PRIVATE Forge::forge_runtime)
 add_executable(sdk_std sdk_consumer.c)
 target_link_libraries(sdk_std PRIVATE Forge::forge_std)
+
+add_executable(c_greeting c_greeting.c)
+target_link_libraries(c_greeting PRIVATE greeting_ext)

@@ -26,3 +26,4 @@ jobs:
           "$RUNNER_TEMP/forge-external/bin/hello"
           "$RUNNER_TEMP/forge-external/sdk_runtime"
           "$RUNNER_TEMP/forge-external/sdk_std"
+          "$RUNNER_TEMP/forge-external/c_greeting"

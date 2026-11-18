@@ -100,7 +100,21 @@ Manual equivalent (no CMake):
     -L . -l forge_greeting_ext -I .
 ```
 
-## Expected output
+## Call the same function from C
+
+The `c_greeting` target includes the generated `greeting_ext.h` and calls
+`frlib_greeting_ext_hello("C")`. CMake builds the Forge archive and supplies its
+headers and standard-library dependencies to the C linker.
+
+```cmake
+add_executable(c_greeting c_greeting.c)
+target_link_libraries(c_greeting PRIVATE greeting_ext)
+```
+
+From the external project directory, run `./build/c_greeting` to print
+`Hello from an external project, C`.
+
+## Expected Forge executable output
 
 ```
 Hello from an external project, Forge

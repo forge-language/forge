@@ -59,7 +59,7 @@ function(forge_add_library NAME SOURCE)
     set_target_properties(${NAME} PROPERTIES
         IMPORTED_LOCATION "${gen_a}"
         INTERFACE_INCLUDE_DIRECTORIES "${CMAKE_BINARY_DIR}/generated/libs"
-        INTERFACE_LINK_LIBRARIES "${FORGE_RUNTIME_TARGET}"
+        INTERFACE_LINK_LIBRARIES "ForgeStd::stdlib;${FORGE_RUNTIME_TARGET}"
     )
 endfunction()
 
