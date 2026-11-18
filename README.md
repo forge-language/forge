@@ -39,6 +39,11 @@ Each executable and the Node program print `alerts=3`. To try the language
 inside an existing C application, the [external CMake example](docs/examples/external_project.md)
 calls a Forge function through its generated C header.
 
+On a generated 100,000-record input, the Node version of this filter took
+114 ms, down from 220 ms at compiler revision `642aea4` (25 alternating
+pairs on one Linux host). The [measurement report and raw samples](https://github.com/forge-language/forge-benchmarks/blob/c62b2832f1228825d64c5bda0a660ff63e4b8008/docs/compiler/utf8-toolchain-2026-11-19.md)
+include the input, reproduction commands and cases with little change.
+
 ## Repositories
 
 Each component lives in its own repository and directory under the
