@@ -369,6 +369,18 @@ native main {
         self.assertEqual(result.returncode, 0, result.stderr)
         self.run_binary(output, '3\n')
 
+    def test_constant_index_respects_token_boundaries_and_forward_offsets(self):
+        self.source.write_text(
+            '// const UNUSED = 7;\n'
+            'const VALUE = VALUE_LONG;\n'
+            'fn show(V: string): void { println(V, VALUE); }\n'
+            'const VALUE_LONG = "a;:b";\n'
+            'native main { show("prefix:"); return 0; }\n')
+        output = self.directory / 'records'
+        result = self.invoke(self.source, '-o', output, *self.native_flags())
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.run_binary(output, 'prefix:a;:b\n')
+
     def test_semantic_nesting_limits_reject_without_creating_output(self):
         sources = [
             'native main { println(' + '!' * 260 + 'true); }',

@@ -1098,6 +1098,7 @@ fn validate_source(src: string): int {
     let size: int = str_view_len(view);
     let i: int = 0;
     let mains: int = 0;
+    let constant_records: int = 0;
     while (i < size) {
         i = skip_ws(view, i);
         if (i >= size) { break; }
@@ -1115,6 +1116,18 @@ fn validate_source(src: string): int {
             if (i > 0 && str_view_at(view, i - 1) != 10) { return source_error("const declarations must start at the beginning of a line"); }
             let semi: int = find_stmt_end(view, i, size);
             if (semi >= size) { return source_error("missing const semicolon"); }
+            // Record the source offset after each name. Initializers are checked
+            // in the original view, with the usual depth and global-scope rules.
+            let start: int = skip_ws(view, i + 5);
+            let name_end: int = identifier_end(view, start);
+            if (constant_records == 0) { constant_records = str_builder(); }
+            constant_records = str_builder_append_view(constant_records, view, start, name_end - start);
+            constant_records = str_builder_char(constant_records, 58);
+            let offset: string = str_from_int(name_end);
+            if (str_len(offset) == 0) { return source_error("cannot record constant offset"); }
+            constant_records = str_builder_append(constant_records, offset);
+            constant_records = str_builder_char(constant_records, 59);
+            if (constant_records == 0) { return source_error("cannot record constant declaration"); }
             i = semi + 1;
             continue;
         }
@@ -1152,7 +1165,12 @@ fn validate_source(src: string): int {
         return source_error("unsupported top-level declaration");
     }
     if (mains == 0) { return source_error("a native main or process main block is required"); }
-    return validate_semantics(view);
+    let constant_index: int = 0;
+    if (constant_records != 0) {
+        constant_index = str_view(str_builder_finish(constant_records));
+        if (str_view_len(constant_index) == 0) { return source_error("cannot read constant declarations"); }
+    }
+    return validate_semantics(view, constant_index);
 }
 
 // Semantic checking for the emitted subset. Immutable string tables avoid
@@ -1192,17 +1210,33 @@ fn semantic_name(name: string): bool {
     return str_eq(map_ident(name), name);
 }
 
-// Return the payload offset of the last matching record (lexical shadowing).
-fn semantic_lookup(table: int, name: string): int {
-    let key: string = str_concat(name, ":");
+// A record starts after a semicolon (or at zero) and ends with a semicolon.
+fn record_matches(table: int, start: int, name: string, size: int): bool {
+    return size < str_view_len(table) - start && str_view_at(table, start + size) == 58 && str_view_matches(table, start, name);
+}
+
+fn first_record(table: int, name: string): int {
+    let size: int = str_len(name);
     let i: int = 0;
-    let found: int = -1;
     while (i < str_view_len(table)) {
-        if (str_view_matches(table, i, key)) { found = i + str_len(key); }
+        if (record_matches(table, i, name, size)) { return i + size + 1; }
         while (i < str_view_len(table) && str_view_at(table, i) != 59) { i = i + 1; }
         i = i + 1;
     }
-    return found;
+    return -1;
+}
+
+// Walk backwards for lexical shadowing and later imports.
+fn semantic_lookup(table: int, name: string): int {
+    let size: int = str_len(name);
+    let end: int = str_view_len(table);
+    while (end > 0) {
+        let start: int = end - 1;
+        while (start > 0 && str_view_at(table, start - 1) != 59) { start = start - 1; }
+        if (record_matches(table, start, name, size)) { return start + size + 1; }
+        end = start;
+    }
+    return -1;
 }
 
 fn semantic_local(env: string, name: string, ty: int): string {
@@ -1227,7 +1261,7 @@ fn semantic_builtins(module: string): string {
     return "";
 }
 
-fn semantic_params(view: int, start: int, end: int): string {
+fn semantic_params(view: int, start: int, end: int, constant_index: int): string {
     let env: string = "";
     let i: int = skip_ws(view, start);
     while (i < end) {
@@ -1235,7 +1269,7 @@ fn semantic_params(view: int, start: int, end: int): string {
         if (name_end == i) { semantic_error("parameter requires an identifier"); return "!"; }
         let name: string = str_view_sub(view, i, name_end - i);
         if (semantic_name(name) == false) { semantic_error("reserved parameter name"); return "!"; }
-        if (semantic_constant_named(view, name)) { semantic_error("constant shadowing is outside the self-hosted subset"); return "!"; }
+        if (first_record(constant_index, name) >= 0) { semantic_error("constant shadowing is outside the self-hosted subset"); return "!"; }
         if (semantic_lookup(str_view(env), name) >= 0) { semantic_error("duplicate parameter"); return "!"; }
         let colon: int = skip_ws(view, name_end);
         if (str_view_at(view, colon) != 58) { semantic_error("parameter requires a type"); return "!"; }
@@ -1267,52 +1301,27 @@ fn semantic_signature(params: string, ret: int): string {
     return str_builder_finish(out);
 }
 
-fn semantic_constant_named(view: int, name: string): bool {
-    let i: int = skip_ws(view, 0);
-    let end: int = str_view_len(view);
-    while (i < end) {
-        if (keyword_at(view, i, "const")) {
-            let start: int = skip_ws(view, i + 5);
-            let name_end: int = identifier_end(view, start);
-            if (str_eq(name, str_view_sub(view, start, name_end - start))) { return true; }
-            i = find_semi_at(view, i, end) + 1;
-        } else {
-            if (keyword_at(view, i, "import")) { i = find_semi_at(view, i, end) + 1; }
-            else { i = matching_brace(view, find_separator_at(view, i, end, 123)) + 1; }
-        }
-        i = skip_ws(view, i);
+fn constant_name_end(constant_index: int, name: string): int {
+    let payload: int = first_record(constant_index, name);
+    if (payload < 0) { return -1; }
+    let name_end: int = 0;
+    while (str_view_at(constant_index, payload) != 59) {
+        name_end = name_end * 10 + (str_view_at(constant_index, payload) - 48);
+        payload = payload + 1;
     }
-    return false;
+    return name_end;
 }
 
-// Resolve constants against the global source, never against caller locals.
-// Forward aliases work; cycles stop at the shared expression nesting limit.
-fn semantic_constant(view: int, name: string, functions: int, depth: int): int {
-    let i: int = skip_ws(view, 0);
-    let end: int = str_view_len(view);
-    while (i < end) {
-        if (keyword_at(view, i, "const")) {
-            let start: int = skip_ws(view, i + 5);
-            let name_end: int = identifier_end(view, start);
-            let semi: int = find_semi_at(view, name_end, end);
-            if (str_eq(name, str_view_sub(view, start, name_end - start))) {
-                let eq: int = skip_ws(view, name_end);
-                return semantic_expr(view, eq + 1, semi, "", functions, depth + 1);
-            }
-            i = semi + 1;
-        } else {
-            if (keyword_at(view, i, "import")) { i = find_semi_at(view, i, end) + 1; }
-            else {
-                let open: int = find_separator_at(view, i, end, 123);
-                i = matching_brace(view, open) + 1;
-            }
-        }
-        i = skip_ws(view, i);
-    }
-    return semantic_error(str_concat("unknown value: ", name));
+// The table contains decimal offsets produced from positions in this source.
+fn semantic_constant(view: int, name: string, functions: int, constant_index: int, depth: int): int {
+    let name_end: int = constant_name_end(constant_index, name);
+    if (name_end < 0) { return semantic_error(str_concat("unknown value: ", name)); }
+    let eq: int = skip_ws(view, name_end);
+    let semi: int = find_semi_at(view, name_end, str_view_len(view));
+    return semantic_expr(view, eq + 1, semi, "", functions, constant_index, depth + 1);
 }
 
-fn semantic_call(view: int, start: int, end: int, env: string, functions: int, depth: int): int {
+fn semantic_call(view: int, start: int, end: int, env: string, functions: int, constant_index: int, depth: int): int {
     let name_end: int = identifier_end(view, start);
     let name: string = str_view_sub(view, start, name_end - start);
     let signature: int = semantic_lookup(functions, name);
@@ -1325,7 +1334,7 @@ fn semantic_call(view: int, start: int, end: int, env: string, functions: int, d
     while (i < close) {
         let comma: int = find_separator_at(view, i, close, 44);
         if (comma < 0) { comma = close; }
-        let value: int = semantic_expr(view, i, comma, env, functions, depth + 1);
+        let value: int = semantic_expr(view, i, comma, env, functions, constant_index, depth + 1);
         if (value == 0) { return 0; }
         if (value == 118 || value == 102) { return semantic_error("argument must be a scalar value"); }
         if (variadic == false) {
@@ -1344,7 +1353,7 @@ fn semantic_call(view: int, start: int, end: int, env: string, functions: int, d
 
 // Split at the last weakest binary operator, preserving precedence and
 // associativity. Paired delimiters, strings and line comments are skipped.
-fn semantic_expr(view: int, start: int, end: int, env: string, functions: int, depth: int): int {
+fn semantic_expr(view: int, start: int, end: int, env: string, functions: int, constant_index: int, depth: int): int {
     if (depth > 128) { return semantic_error("expression nesting limit exceeded (possibly cyclic constant)"); }
     start = skip_ws(view, start);
     if (start >= end) { return semantic_error("expected an expression"); }
@@ -1385,9 +1394,9 @@ fn semantic_expr(view: int, start: int, end: int, env: string, functions: int, d
         operand = true; i = i + size;
     }
     if (split >= 0) {
-        let left: int = semantic_expr(view, start, split, env, functions, depth + 1);
+        let left: int = semantic_expr(view, start, split, env, functions, constant_index, depth + 1);
         if (left == 0) { return 0; }
-        let right: int = semantic_expr(view, split + width, end, env, functions, depth + 1);
+        let right: int = semantic_expr(view, split + width, end, env, functions, constant_index, depth + 1);
         if (right == 0) { return 0; }
         if (semantic_numeric(left) == false || semantic_numeric(right) == false) { return semantic_error("non-numeric operand for operator"); }
         if (weakest <= 3) { return 98; }
@@ -1395,7 +1404,7 @@ fn semantic_expr(view: int, start: int, end: int, env: string, functions: int, d
     }
     let ch: int = str_view_at(view, start);
     if (ch == 45 || ch == 33) {
-        let ty: int = semantic_expr(view, start + 1, end, env, functions, depth + 1);
+        let ty: int = semantic_expr(view, start + 1, end, env, functions, constant_index, depth + 1);
         if (ty == 0) { return 0; }
         if (semantic_numeric(ty) == false) { return semantic_error("non-numeric unary operand"); }
         if (ch == 33) { return 98; }
@@ -1404,7 +1413,7 @@ fn semantic_expr(view: int, start: int, end: int, env: string, functions: int, d
     if (ch == 40) {
         let close: int = matching_paren(view, start);
         if (skip_ws(view, close + 1) != end) { return semantic_error("invalid parenthesized expression"); }
-        return semantic_expr(view, start + 1, close, env, functions, depth + 1);
+        return semantic_expr(view, start + 1, close, env, functions, constant_index, depth + 1);
     }
     if (ch == 34) {
         i = start + 1;
@@ -1430,38 +1439,38 @@ fn semantic_expr(view: int, start: int, end: int, env: string, functions: int, d
     if (name_end == start) { return semantic_error("expected a value"); }
     let name: string = str_view_sub(view, start, name_end - start);
     let after: int = skip_ws(view, name_end);
-    if (str_view_at(view, after) == 40 && after < end) { return semantic_call(view, start, end, env, functions, depth + 1); }
+    if (str_view_at(view, after) == 40 && after < end) { return semantic_call(view, start, end, env, functions, constant_index, depth + 1); }
     if (after != end) { return semantic_error("invalid value expression"); }
     if (str_eq(name, "true") || str_eq(name, "false")) { return 98; }
     let locals: int = str_view(env);
     let local: int = semantic_lookup(locals, name);
     if (local >= 0) { return str_view_at(locals, local); }
-    if (semantic_lookup(functions, name) >= 0) { return 102; }
-    return semantic_constant(view, name, functions, depth + 1);
+    if (first_record(functions, name) >= 0) { return 102; }
+    return semantic_constant(view, name, functions, constant_index, depth + 1);
 }
 
-fn semantic_binding(view: int, start: int, end: int, env: string, functions: int): string {
+fn semantic_binding(view: int, start: int, end: int, env: string, functions: int, constant_index: int): string {
     let name_start: int = skip_ws(view, start + 3);
     let name_end: int = identifier_end(view, name_start);
     let colon: int = skip_ws(view, name_end);
     if (name_end == name_start || str_view_at(view, colon) != 58) { semantic_error("binding requires a name and type"); return "!"; }
     let name: string = str_view_sub(view, name_start, name_end - name_start);
     if (semantic_name(name) == false) { semantic_error("reserved binding name"); return "!"; }
-    if (semantic_constant_named(view, name)) { semantic_error("constant shadowing is outside the self-hosted subset"); return "!"; }
+    if (first_record(constant_index, name) >= 0) { semantic_error("constant shadowing is outside the self-hosted subset"); return "!"; }
     let type_start: int = skip_ws(view, colon + 1);
     let type_end: int = identifier_end(view, type_start);
     let ty: int = semantic_type(str_view_sub(view, type_start, type_end - type_start));
     if (ty == 0 || ty == 118) { semantic_error("binding requires a value type"); return "!"; }
     let eq: int = skip_ws(view, type_end);
     if (str_view_at(view, eq) != 61 || str_view_at(view, eq + 1) == 61) { semantic_error("binding requires an initializer"); return "!"; }
-    let value: int = semantic_expr(view, eq + 1, end, env, functions, 0);
+    let value: int = semantic_expr(view, eq + 1, end, env, functions, constant_index, 0);
     if (value == 0) { return "!"; }
     if (semantic_compatible(ty, value) == false) { semantic_error("initializer type mismatch"); return "!"; }
     return semantic_local("", name, ty);
 }
 
 // Assignment is a statement, not a C expression accepted through passthrough.
-fn semantic_simple(view: int, start: int, end: int, env: string, functions: int): bool {
+fn semantic_simple(view: int, start: int, end: int, env: string, functions: int, constant_index: int): bool {
     start = skip_ws(view, start);
     let name_end: int = identifier_end(view, start);
     let eq: int = skip_ws(view, name_end);
@@ -1475,13 +1484,13 @@ fn semantic_simple(view: int, start: int, end: int, env: string, functions: int)
         let local: int = semantic_lookup(locals, name);
         if (local < 0) { return semantic_error(str_concat("assignment to unknown value: ", name)); }
         let ty: int = str_view_at(locals, local);
-        let value: int = semantic_expr(view, eq + size, end, env, functions, 0);
+        let value: int = semantic_expr(view, eq + size, end, env, functions, constant_index, 0);
         if (value == 0) { return false; }
         if (size == 2 && (semantic_numeric(ty) == false || semantic_numeric(value) == false)) { return semantic_error("non-numeric compound assignment"); }
         if (semantic_compatible(ty, value) == false) { return semantic_error("assignment type mismatch"); }
         return true;
     }
-    return semantic_expr(view, start, end, env, functions, 0) != 0;
+    return semantic_expr(view, start, end, env, functions, constant_index, 0) != 0;
 }
 
 // Exit sets: next=1, return=2, break=4, continue=8. No bitwise operators
@@ -1521,9 +1530,9 @@ fn semantic_truth(view: int, start: int, end: int): int {
     return -1;
 }
 
-fn semantic_statement(view: int, start: int, end: int, env: string, functions: int, ret: int, loops: int, depth: int): int {
+fn semantic_statement(view: int, start: int, end: int, env: string, functions: int, constant_index: int, ret: int, loops: int, depth: int): int {
     if (depth > 128) { semantic_error("statement nesting limit exceeded"); return -1; }
-    if (str_view_at(view, start) == 123) { return semantic_block(view, start + 1, end - 1, env, functions, ret, loops, depth + 1); }
+    if (str_view_at(view, start) == 123) { return semantic_block(view, start + 1, end - 1, env, functions, constant_index, ret, loops, depth + 1); }
     if (keyword_at(view, start, "if") || keyword_at(view, start, "while") || keyword_at(view, start, "for")) {
         let is_if: bool = keyword_at(view, start, "if");
         let is_for: bool = keyword_at(view, start, "for");
@@ -1542,22 +1551,22 @@ fn semantic_statement(view: int, start: int, end: int, env: string, functions: i
             let init: int = skip_ws(view, cond_start);
             if (init < semi1) {
                 if (keyword_at(view, init, "let")) {
-                    let binding: string = semantic_binding(view, init, semi1, env, functions);
+                    let binding: string = semantic_binding(view, init, semi1, env, functions, constant_index);
                     if (str_eq(binding, "!")) { return -1; }
                     env = str_concat(env, binding);
-                } else { if (semantic_simple(view, init, semi1, env, functions) == false) { return -1; } }
+                } else { if (semantic_simple(view, init, semi1, env, functions, constant_index) == false) { return -1; } }
             }
             cond_start = semi1 + 1; cond_end = semi2; step = skip_ws(view, semi2 + 1);
         }
-        let cond: int = semantic_expr(view, cond_start, cond_end, env, functions, 0);
+        let cond: int = semantic_expr(view, cond_start, cond_end, env, functions, constant_index, 0);
         if (cond == 0) { return -1; }
         if (semantic_numeric(cond) == false) { semantic_error("non-numeric condition"); return -1; }
-        if (step >= 0 && step < close && semantic_simple(view, step, close, env, functions) == false) { return -1; }
+        if (step >= 0 && step < close && semantic_simple(view, step, close, env, functions, constant_index) == false) { return -1; }
         let body: int = skip_ws(view, close + 1);
         let body_end: int = matching_brace(view, body) + 1;
         let body_loops: int = loops;
         if (is_if == false) { body_loops = loops + 1; }
-        let a: int = semantic_statement(view, body, body_end, env, functions, ret, body_loops, depth + 1);
+        let a: int = semantic_statement(view, body, body_end, env, functions, constant_index, ret, body_loops, depth + 1);
         if (a < 0) { return -1; }
         let truth: int = semantic_truth(view, cond_start, cond_end);
         if (is_if) {
@@ -1565,7 +1574,7 @@ fn semantic_statement(view: int, start: int, end: int, env: string, functions: i
             let next: int = skip_ws(view, body_end);
             if (next < end && keyword_at(view, next, "else")) {
                 next = skip_ws(view, next + 4);
-                b = semantic_statement(view, next, end, env, functions, ret, loops, depth + 1);
+                b = semantic_statement(view, next, end, env, functions, constant_index, ret, loops, depth + 1);
                 if (b < 0) { return -1; }
             }
             if (truth == 1) { return a; }
@@ -1581,7 +1590,7 @@ fn semantic_statement(view: int, start: int, end: int, env: string, functions: i
     if (keyword_at(view, start, "match")) {
         let open: int = find_separator_at(view, start + 5, end, 123);
         let close: int = matching_brace(view, open);
-        let value: int = semantic_expr(view, start + 5, open, env, functions, 0);
+        let value: int = semantic_expr(view, start + 5, open, env, functions, constant_index, 0);
         if (value == 0) { return -1; }
         if (semantic_numeric(value) == false) { semantic_error("match requires an integer value"); return -1; }
         let exits: int = 0;
@@ -1592,7 +1601,7 @@ fn semantic_statement(view: int, start: int, end: int, env: string, functions: i
             let arrow: int = skip_ws(view, match_pattern_end(view, i, close));
             let body: int = skip_ws(view, arrow + 2);
             let next: int = statement_end(view, body, close, 0);
-            let arm: int = semantic_statement(view, body, next, env, functions, ret, loops, depth + 1);
+            let arm: int = semantic_statement(view, body, next, env, functions, constant_index, ret, loops, depth + 1);
             if (arm < 0) { return -1; }
             exits = flow_union(exits, arm); i = skip_ws(view, next);
         }
@@ -1602,7 +1611,7 @@ fn semantic_statement(view: int, start: int, end: int, env: string, functions: i
     if (keyword_at(view, start, "return")) {
         let value: int = 118;
         let first: int = skip_ws(view, start + 6);
-        if (first < end - 1) { value = semantic_expr(view, first, end - 1, env, functions, 0); }
+        if (first < end - 1) { value = semantic_expr(view, first, end - 1, env, functions, constant_index, 0); }
         if (value == 0) { return -1; }
         if (semantic_compatible(ret, value) == false) { semantic_error("return type mismatch"); return -1; }
         return 2;
@@ -1616,14 +1625,14 @@ fn semantic_statement(view: int, start: int, end: int, env: string, functions: i
         return exits;
     }
     if (keyword_at(view, start, "let")) {
-        if (str_eq(semantic_binding(view, start, end - 1, env, functions), "!")) { return -1; }
+        if (str_eq(semantic_binding(view, start, end - 1, env, functions, constant_index), "!")) { return -1; }
         return 1;
     }
-    if (semantic_simple(view, start, end - 1, env, functions) == false) { return -1; }
+    if (semantic_simple(view, start, end - 1, env, functions, constant_index) == false) { return -1; }
     return 1;
 }
 
-fn semantic_block(view: int, start: int, end: int, env: string, functions: int, ret: int, loops: int, depth: int): int {
+fn semantic_block(view: int, start: int, end: int, env: string, functions: int, constant_index: int, ret: int, loops: int, depth: int): int {
     if (depth > 128) { semantic_error("block nesting limit exceeded"); return -1; }
     let i: int = skip_ws(view, start);
     let exits: int = 1;
@@ -1634,7 +1643,7 @@ fn semantic_block(view: int, start: int, end: int, env: string, functions: int, 
         if (next < 0) { semantic_error("expected a complete statement or block"); return -1; }
         let flow: int = 1;
         if (keyword_at(view, i, "let")) {
-            let binding: string = semantic_binding(view, i, next - 1, env, functions);
+            let binding: string = semantic_binding(view, i, next - 1, env, functions, constant_index);
             if (str_eq(binding, "!")) { return -1; }
             let binding_view: int = str_view(binding);
             let name: string = str_view_sub(binding_view, 0, identifier_end(binding_view, 0));
@@ -1642,7 +1651,7 @@ fn semantic_block(view: int, start: int, end: int, env: string, functions: int, 
             declared = str_concat(declared, binding);
             env = str_concat(env, binding);
         } else {
-            flow = semantic_statement(view, i, next, env, functions, ret, loops, depth + 1);
+            flow = semantic_statement(view, i, next, env, functions, constant_index, ret, loops, depth + 1);
             if (flow < 0) { return -1; }
         }
         // Unreachable statements are still type/name checked.
@@ -1652,7 +1661,7 @@ fn semantic_block(view: int, start: int, end: int, env: string, functions: int, 
     return exits;
 }
 
-fn validate_semantics(view: int): bool {
+fn validate_semantics(view: int, constant_index: int): bool {
     let size: int = str_view_len(view);
     let table: string = "println:*:v;print:s:v;print_int:i:v;print_str:s:v;eprint:s:v;eprintln:s:v;";
     let i: int = skip_ws(view, 0);
@@ -1672,9 +1681,9 @@ fn validate_semantics(view: int): bool {
                     let paren: int = skip_ws(view, name_end);
                     if (name_end == start || str_view_at(view, paren) != 40) { return semantic_error("function requires an identifier"); }
                     let name: string = str_view_sub(view, start, name_end - start);
-                    if (semantic_lookup(str_view(table), name) >= 0 || semantic_name(name) == false) { return semantic_error("duplicate or reserved function name"); }
+                    if (first_record(str_view(table), name) >= 0 || semantic_name(name) == false) { return semantic_error("duplicate or reserved function name"); }
                     let close: int = matching_paren(view, paren);
-                    let params: string = semantic_params(view, paren + 1, close);
+                    let params: string = semantic_params(view, paren + 1, close, constant_index);
                     if (str_eq(params, "!")) { return false; }
                     let colon: int = skip_ws(view, close + 1);
                     let ret: int = semantic_type(str_trim(str_view_sub(view, colon + 1, open - colon - 1)));
@@ -1686,7 +1695,6 @@ fn validate_semantics(view: int): bool {
         i = skip_ws(view, i);
     }
     let functions: int = str_view(table);
-    let constants: string = "";
     i = skip_ws(view, 0);
     while (i < size) {
         if (keyword_at(view, i, "import")) { i = find_semi_at(view, i, size) + 1; }
@@ -1698,9 +1706,8 @@ fn validate_semantics(view: int): bool {
                 let semi: int = find_semi_at(view, i, size);
                 if (name_end == start || str_view_at(view, eq) != 61 || str_view_at(view, eq + 1) == 61) { return semantic_error("constant requires a name and initializer"); }
                 let name: string = str_view_sub(view, start, name_end - start);
-                if (semantic_name(name) == false || semantic_lookup(functions, name) >= 0 || semantic_lookup(str_view(constants), name) >= 0) { return semantic_error("duplicate or reserved constant name"); }
-                constants = semantic_local(constants, name, 105);
-                let value: int = semantic_expr(view, eq + 1, semi, "", functions, 0);
+                if (semantic_name(name) == false || first_record(functions, name) >= 0 || constant_name_end(constant_index, name) != name_end) { return semantic_error("duplicate or reserved constant name"); }
+                let value: int = semantic_expr(view, eq + 1, semi, "", functions, constant_index, 0);
                 if (value == 0) { return false; }
                 if (value == 118 || value == 102) { return semantic_error("constant requires a scalar value"); }
                 i = semi + 1;
@@ -1713,12 +1720,12 @@ fn validate_semantics(view: int): bool {
                 if (is_fn) {
                     let paren: int = skip_ws(view, identifier_end(view, skip_ws(view, i + 3)));
                     let params_end: int = matching_paren(view, paren);
-                    env = semantic_params(view, paren + 1, params_end);
+                    env = semantic_params(view, paren + 1, params_end, constant_index);
                     let colon: int = skip_ws(view, params_end + 1);
                     ret = semantic_type(str_trim(str_view_sub(view, colon + 1, open - colon - 1)));
                 }
                 if (keyword_at(view, i, "process")) { ret = 118; }
-                let exits: int = semantic_block(view, open + 1, close, env, functions, ret, 0, 0);
+                let exits: int = semantic_block(view, open + 1, close, env, functions, constant_index, ret, 0, 0);
                 if (exits < 0) { return false; }
                 if (is_fn && ret != 118 && flow_has(exits, 1)) { return semantic_error("reachable end of non-void function"); }
                 i = close + 1;
