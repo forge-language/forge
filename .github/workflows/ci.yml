@@ -18,6 +18,14 @@ jobs:
       - run: cmake --build build -j2
       - run: ctest --test-dir build --output-on-failure
       - run: cmake --build build --target forge-selfhost-verify -j2
+      - name: Run the UTF-8 log example on all three compiler paths
+        run: |
+          test "$(build/bin/log_alerts)" = 'alerts=3'
+          build/bin/forge examples/log_alerts.fg --emit-js -o build/log_alerts.js
+          test "$(node build/log_alerts.js)" = 'alerts=3'
+          build/bin/forge-stage2 examples/log_alerts.fg --check
+          build/bin/forge-stage2 examples/log_alerts.fg --forge-root "$PWD/build" -o build/alerts-fg
+          test "$(build/alerts-fg)" = 'alerts=3'
       - name: Verify installed external consumers
         run: |
           cmake --install build --prefix "$RUNNER_TEMP/forge-sdk"

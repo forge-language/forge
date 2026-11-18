@@ -1,0 +1,21 @@
+// Count alert records in a UTF-8 buffer. Positions and prefixes use byte offsets.
+import strings;
+
+fn count_alerts(records: string): int {
+    let view: int = str_view(records);
+    let end: int = str_view_len(view);
+    let count: int = 0;
+    for (let i: int = 0; i < end; i += 1) {
+        if (i == 0 || str_view_at(view, i - 1) == 10) {
+            if (str_view_matches(view, i, "WARN ") || str_view_matches(view, i, "오류 ")) {
+                count += 1;
+            }
+        }
+    }
+    return count;
+}
+
+native main {
+    println("alerts=", count_alerts("INFO ready\nWARN retry\nINFO ignore WARN text\n오류 timeout\nWARN slow"));
+    return 0;
+}

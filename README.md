@@ -17,6 +17,28 @@ Official site: [forge-lang.org](https://forge-lang.org) ·
 rules: preserve observable behavior, make resource costs explicit, protect
 concurrent progress and support performance claims with reproducible measurements.
 
+## Try Forge on a UTF-8 log
+
+A telemetry collector and its JavaScript dashboard can share the same alert
+rule. The [log example](examples/log_alerts.fg) counts records beginning with
+`WARN ` or `오류 `. It scans one byte view of the buffer, so a warning mentioned
+inside a message does not count and the code needs no substring per line.
+
+With the Release build below and Node on your path, run the same file three ways:
+
+```sh
+./build/bin/log_alerts
+./build/bin/forge examples/log_alerts.fg --emit-js -o build/log_alerts.js
+node build/log_alerts.js
+./build/bin/forge-stage2 examples/log_alerts.fg --check
+./build/bin/forge-stage2 examples/log_alerts.fg --forge-root "$PWD/build" -o build/alerts-fg
+./build/alerts-fg
+```
+
+Each executable and the Node program print `alerts=3`. To try the language
+inside an existing C application, the [external CMake example](docs/examples/external_project.md)
+calls a Forge function through its generated C header.
+
 ## Repositories
 
 Each component lives in its own repository and directory under the

@@ -80,7 +80,7 @@ local candidates use source overrides. Build outputs form an SDK with
 Release is the default, LTO is opt-in. The default build includes stage2;
 CTest and the explicit self-host fixed-point target are separate checks.
 Python3 and Node are needed for the full UNIX regression set. CI also installs
-the SDK and builds/runs all three `examples/external-project/` consumers.
+the SDK and builds/runs all four `examples/external-project/` consumers.
 
 ## Change boundaries
 
