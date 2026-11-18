@@ -40,31 +40,65 @@ static void skip_ws(Lexer *lx) {
 }
 
 static TokenKind keyword_kind(ForgeStr s) {
-    struct { const char *kw; TokenKind kind; } kws[] = {
-        {"process", TOK_KW_PROCESS}, {"coroutine", TOK_KW_COROUTINE},
-        {"supervisor", TOK_KW_SUPERVISOR}, {"spawn", TOK_KW_SPAWN},
-        {"send", TOK_KW_SEND}, {"recv", TOK_KW_RECV}, {"yield", TOK_KW_YIELD},
-        {"on", TOK_KW_ON}, {"receive", TOK_KW_RECEIVE},
-        {"let", TOK_KW_LET}, {"mut", TOK_KW_MUT},
-        {"fn", TOK_KW_FN}, {"return", TOK_KW_RETURN},
-        {"if", TOK_KW_IF}, {"else", TOK_KW_ELSE}, {"while", TOK_KW_WHILE},
-        {"for", TOK_KW_FOR}, {"break", TOK_KW_BREAK}, {"continue", TOK_KW_CONTINUE},
-        {"struct", TOK_KW_STRUCT}, {"enum", TOK_KW_ENUM},
-        {"native", TOK_KW_NATIVE}, {"extern", TOK_KW_EXTERN},
-        {"true", TOK_KW_TRUE}, {"false", TOK_KW_FALSE},
-        {"int", TOK_KW_INT}, {"float", TOK_KW_FLOAT},
-        {"bool", TOK_KW_BOOL}, {"string", TOK_KW_STRING}, {"void", TOK_KW_VOID},
-        {"ptr", TOK_KW_PTR},
-        {"restart", TOK_KW_RESTART},
-        {"import", TOK_KW_IMPORT},
-        {"library", TOK_KW_LIBRARY},
-        {"export", TOK_KW_EXPORT},
-        {"own", TOK_KW_OWN}, {"move", TOK_KW_MOVE}, {"await", TOK_KW_AWAIT},
-        {"match", TOK_KW_MATCH}, {"const", TOK_KW_CONST},
-    };
-    for (size_t i = 0; i < sizeof(kws) / sizeof(kws[0]); i++) {
-        ForgeStr kw = forge_str(kws[i].kw);
-        if (forge_str_eq(s, kw)) return kws[i].kind;
+    switch (s.len) {
+    case 2:
+        if (memcmp(s.data, "on", s.len) == 0) return TOK_KW_ON;
+        if (memcmp(s.data, "fn", s.len) == 0) return TOK_KW_FN;
+        if (memcmp(s.data, "if", s.len) == 0) return TOK_KW_IF;
+        break;
+    case 3:
+        if (memcmp(s.data, "let", s.len) == 0) return TOK_KW_LET;
+        if (memcmp(s.data, "mut", s.len) == 0) return TOK_KW_MUT;
+        if (memcmp(s.data, "for", s.len) == 0) return TOK_KW_FOR;
+        if (memcmp(s.data, "int", s.len) == 0) return TOK_KW_INT;
+        if (memcmp(s.data, "ptr", s.len) == 0) return TOK_KW_PTR;
+        if (memcmp(s.data, "own", s.len) == 0) return TOK_KW_OWN;
+        break;
+    case 4:
+        if (memcmp(s.data, "send", s.len) == 0) return TOK_KW_SEND;
+        if (memcmp(s.data, "recv", s.len) == 0) return TOK_KW_RECV;
+        if (memcmp(s.data, "else", s.len) == 0) return TOK_KW_ELSE;
+        if (memcmp(s.data, "enum", s.len) == 0) return TOK_KW_ENUM;
+        if (memcmp(s.data, "true", s.len) == 0) return TOK_KW_TRUE;
+        if (memcmp(s.data, "bool", s.len) == 0) return TOK_KW_BOOL;
+        if (memcmp(s.data, "void", s.len) == 0) return TOK_KW_VOID;
+        if (memcmp(s.data, "move", s.len) == 0) return TOK_KW_MOVE;
+        break;
+    case 5:
+        if (memcmp(s.data, "spawn", s.len) == 0) return TOK_KW_SPAWN;
+        if (memcmp(s.data, "yield", s.len) == 0) return TOK_KW_YIELD;
+        if (memcmp(s.data, "while", s.len) == 0) return TOK_KW_WHILE;
+        if (memcmp(s.data, "break", s.len) == 0) return TOK_KW_BREAK;
+        if (memcmp(s.data, "false", s.len) == 0) return TOK_KW_FALSE;
+        if (memcmp(s.data, "float", s.len) == 0) return TOK_KW_FLOAT;
+        if (memcmp(s.data, "await", s.len) == 0) return TOK_KW_AWAIT;
+        if (memcmp(s.data, "match", s.len) == 0) return TOK_KW_MATCH;
+        if (memcmp(s.data, "const", s.len) == 0) return TOK_KW_CONST;
+        break;
+    case 6:
+        if (memcmp(s.data, "return", s.len) == 0) return TOK_KW_RETURN;
+        if (memcmp(s.data, "struct", s.len) == 0) return TOK_KW_STRUCT;
+        if (memcmp(s.data, "native", s.len) == 0) return TOK_KW_NATIVE;
+        if (memcmp(s.data, "extern", s.len) == 0) return TOK_KW_EXTERN;
+        if (memcmp(s.data, "string", s.len) == 0) return TOK_KW_STRING;
+        if (memcmp(s.data, "import", s.len) == 0) return TOK_KW_IMPORT;
+        if (memcmp(s.data, "export", s.len) == 0) return TOK_KW_EXPORT;
+        break;
+    case 7:
+        if (memcmp(s.data, "process", s.len) == 0) return TOK_KW_PROCESS;
+        if (memcmp(s.data, "receive", s.len) == 0) return TOK_KW_RECEIVE;
+        if (memcmp(s.data, "restart", s.len) == 0) return TOK_KW_RESTART;
+        if (memcmp(s.data, "library", s.len) == 0) return TOK_KW_LIBRARY;
+        break;
+    case 8:
+        if (memcmp(s.data, "continue", s.len) == 0) return TOK_KW_CONTINUE;
+        break;
+    case 9:
+        if (memcmp(s.data, "coroutine", s.len) == 0) return TOK_KW_COROUTINE;
+        break;
+    case 10:
+        if (memcmp(s.data, "supervisor", s.len) == 0) return TOK_KW_SUPERVISOR;
+        break;
     }
     return TOK_IDENT;
 }
