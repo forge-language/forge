@@ -72,6 +72,18 @@ native main {
     result = self.compile_run(source, bridge=setup)
     self.assertEqual(result.returncode, 0, result.stderr)
     self.assertEqual(result.stdout.splitlines(), ['1','0','1','0','0'])
+ def test_view_indices_outside_number_precision(self):
+  result = self.compile_run('''import strings;
+native main {
+ let view: int = str_view("한");
+ println(str_view_at(view,2));
+ println(str_view_at(view,3));
+ println(str_view_at(view,9007199254740993));
+ println(str_view_at(view,-9223372036854775807));
+ return 0;
+}''')
+  self.assertEqual(result.returncode, 0, result.stderr)
+  self.assertEqual(result.stdout.splitlines(), ['156','-1','-1','-1'])
  def test_builder_invalid_utf8_rejected(self):
   r=self.compile_run('import strings;native main{let b: int=str_builder();str_builder_char(b,255);println(str_builder_finish(b));return 0;}')
   self.assertNotEqual(r.returncode,0)

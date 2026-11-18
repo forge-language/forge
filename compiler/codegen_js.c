@@ -428,7 +428,15 @@ void codegen_emit_js(Program *prog, FILE *out) {
       "s+String.fromCharCode(Number(c));},fr_str_append_str:(s,t)=>s+t,fr_str_"
       "from_int:String,fr_str_arena_reset:()=>{handles.clear();return 0n;},\n"
       "fr_str_view:s=>store({kind:'view',data:cbytes(s)}),fr_str_view_len:h=>{const v=view(h);return i(v&&v.kind==='view'?v.data.length:0);},\n"
-      "fr_str_view_at:(h,n)=>{const v=view(h);return !v||v.kind!=='view'||n<0n||n>=BigInt(v.data.length)?-1n:BigInt(v.data[Number(n)]);},\n"
+      "fr_str_view_at:(h,n)=>{\n"
+      "  const v=view(h);if(!v||v.kind!=='view')return -1n;\n"
+      "  if(typeof n==='bigint'){\n"
+      // A typed array's length is a safe JS integer. Rounding a larger index
+      // when converting from BigInt cannot bring it into the valid range.
+      "    const pos=Number(n);\n"
+      "    return pos<0||pos>=v.data.length?-1n:BigInt(v.data[pos]);\n"
+      "  }\n"
+      "  return n<0n||n>=BigInt(v.data.length)?-1n:BigInt(v.data[Number(n)]);},\n"
       "fr_str_view_sub:(h,a,n)=>{const v=view(h),r=range(v,a,n);return r?decode(v.data.subarray(r[0],r[0]+r[1])):null;},\n"
       "fr_str_view_matches:(h,a,s)=>{\n"
       "  const v=view(h);\n"
