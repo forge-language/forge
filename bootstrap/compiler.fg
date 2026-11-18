@@ -1841,20 +1841,22 @@ native main {
     let root: string = "";
     let libs: string = "";
     let emit_c: int = 0;
+    let check_only: bool = false;
     let keep: int = 0;
     let i: int = 1;
     while (i < os_argc()) {
         let arg: string = os_argv(i);
         if (str_eq(arg, "--help") || str_eq(arg, "-h")) {
-            println("Usage: forge-fg <input.fg> [-o output] [--emit-c] [--cc executable]");
+            println("Usage: forge-fg <input.fg> [-o output] [--emit-c | --check] [--cc executable]");
             println("                [--forge-root path] [--lib-dir path] [--keep-temp]");
             println("Default output: native executable named after the input basename.");
             println("Legacy -o output.c emits C. Supported imports: strings, fs, os, io.");
-            println("Self-hosted subset: line-start fn/const, int/string/void, main and basic control flow.");
-            println("Print arbitrary string values with print_str(value); println();.");
+            println("Self-hosted subset: line-start fn/const, int/bool/string/void, main and basic control flow.");
+            println("--check validates the source and exits before C emission or linking.");
             return 0;
         }
         if (str_eq(arg, "--version")) { println("forge-fg 0.3.0"); return 0; }
+        if (str_eq(arg, "--check")) { check_only = true; i = i + 1; continue; }
         if (str_eq(arg, "--emit-c")) { emit_c = 1; i = i + 1; continue; }
         if (str_eq(arg, "--keep-temp")) { keep = 1; i = i + 1; continue; }
         if (str_eq(arg, "-o") || str_eq(arg, "--cc") || str_eq(arg, "--forge-root") || str_eq(arg, "--lib-dir")) {
@@ -1877,6 +1879,7 @@ native main {
     let src: string = fs_read(input);
     if (str_len(src) == 0) { return cli_error("input is empty or cannot be read"); }
     if (validate_source(src) == 0) { return 1; }
+    if (check_only) { return 0; }
     if (has_c_suffix(output) == 1) { emit_c = 1; }
     if (str_len(output) == 0) {
         output = output_stem(input);

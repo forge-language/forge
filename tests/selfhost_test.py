@@ -95,6 +95,20 @@ class SelfHostedCompilerTests(unittest.TestCase):
                 self.assertIn('int main(', (self.directory / name).read_text())
         self.assertFalse((self.directory / self.source.stem).exists())
 
+    def test_check_validates_without_writing_or_linking(self):
+        output = self.directory / 'existing.c'
+        output.write_bytes(b'preserve')
+        for source, status in [('native main { println(42); }', 0),
+                               ('native main { println(missing); }', 1),
+                               ('native main {', 1)]:
+            with self.subTest(source=source):
+                self.source.write_text(source)
+                result = self.invoke(self.source, '--check', '-o', output,
+                                     '--cc', self.directory / 'absent-cc')
+                self.assertEqual(result.returncode, status, result.stderr)
+                self.assertEqual(output.read_bytes(), b'preserve')
+                self.assertEqual(set(self.directory.iterdir()), {self.source, output})
+
     def test_cli_errors(self):
         for args in [[], ['missing.fg'], [self.source, '--unknown'],
                      [self.source, '--emit-js'], [self.source, self.source],
