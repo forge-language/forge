@@ -132,11 +132,17 @@ static Token read_number(Lexer *lx) {
         }
     }
     ForgeStr lex = { (char *)lx->src + start, lx->pos - start };
-    char *buf = forge_strdup(lex);
-    if (!buf) forge_die("out of memory");
     Token t = make_token(lx, is_float ? TOK_FLOAT : TOK_INT, lex);
     t.line = lx->line;
     t.col = col;
+    // Every decimal literal of at most 18 digits fits a signed 64-bit value.
+    if (!is_float && lex.len <= 18) {
+        for (size_t i = 0; i < lex.len; ++i)
+            t.int_val = t.int_val * 10 + (lex.data[i] - '0');
+        return t;
+    }
+    char *buf = forge_strdup(lex);
+    if (!buf) forge_die("out of memory");
     errno = 0;
     if (is_float) t.float_val = strtod(buf, NULL);
     else t.int_val = strtoll(buf, NULL, 10);

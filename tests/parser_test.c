@@ -19,6 +19,14 @@ static void check_name(ForgeStr name, const char *prefix, size_t index) {
     CHECK(forge_str_eq(name, forge_str(expected)));
 }
 int main(void) {
+    const char *numbers = "999999999999999999 1000000000000000000 0000000000000000007 123.5";
+    Lexer digits;
+    lexer_init(&digits, numbers, strlen(numbers));
+    CHECK(lexer_next(&digits).int_val == INT64_C(999999999999999999));
+    CHECK(lexer_next(&digits).int_val == INT64_C(1000000000000000000));
+    CHECK(lexer_next(&digits).int_val == 7);
+    CHECK(lexer_next(&digits).float_val == 123.5);
+
     /* Cross every geometric capacity boundary up to 64, using independent
      * lists and interleaved external and normal functions in one list. */
     const size_t count = 65;
